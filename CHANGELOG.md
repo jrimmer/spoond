@@ -10,6 +10,16 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+## [3.8.0] - 2026-10-14
+
+3.8.0 keeps a durable history of every lease and shows it: a new
+`lease_history` table (schema 29) with a journal backfill, a records
+panel of all-time stats, and an images panel that sorts by use, folds
+past eight rows into a link to a full `/images` page, and shows sizes as
+`mem/vcpu`. The dashboard no longer raises a notification for low free
+hugepages. `elixir-base` moves to Elixir 1.19.6 / OTP 28.5.0.7 with
+PostgreSQL 17. No breaking changes.
+
 ### Added
 
 - **The dashboard's `/images` page (spoond-p5s9).** `GET /images` serves
@@ -32,7 +42,7 @@ summarised from README "Status".
   latency and its longest nap. `spoond history import` backfills it from
   the backend journal. The records panel reads it.
 - **The dashboard's records panel (spoond-y5by).** `spoond dash` gains a
-  panel of twelve all-time records — busiest hour, one image at once,
+  panel of twelve all-time records — busiest moment, one image at once,
   longest and shortest run, top owner, lifetime lease/hours/GiB-hours
   totals, busiest Pacific day, biggest single-owner fleet, most memory,
   no-losses streak, longest nap and fastest start — computed over the
@@ -51,8 +61,9 @@ summarised from README "Status".
 - **Dashboard: no "hugepages past the danger level" notification.** Low free
   hugepages is not something to act on: spoond takes memory back itself, and a
   request it cannot serve raises its own box_full alert.
-- **Dashboard images panel: one `mem/vcpu` column** in the leases panel's size form (`8G/2V`), in place of separate `vcpu` and `mem` columns, and a total row summing live leases and lifetime uses.
-
+- **Dashboard images panel: one `mem/vcpu` column** in the leases
+  panel's size form (`8G/2V`), in place of separate `vcpu` and `mem`
+  columns, and a total row summing live leases and lifetime uses.
 - **`elixir-base` moves to Elixir 1.19.6 / Erlang OTP 28.5.0.7 and runs
   PostgreSQL 17.** Built from the exact hexpm tag, so repos pinning those
   versions match. A Postgres server starts at guest boot on

@@ -200,13 +200,16 @@ history), live leases (id, image, size as memory/vCPUs, owner, the
 two-cell state glyphs (▶ ‖ ■ ⭘, with ◆ on a pinned lease; a suspended
 lease's glyph is coloured by its suspend reason), policy, age, time
 left, holder — on the page the holder is a link), the image catalog
-beside the systemd
-units, a refusals-and-failures row with the mean create and resume
+(default size as mem/vcpu, sorted by use, eight rows then `+N more`
+linking to a full `/images` page, and a total row) beside the systemd
+units, a **records** panel of all-time stats from the lease history
+(busiest moment, longest and shortest run, top owner, lifetime totals
+and more; test owners left out via `DASH_RECORDS_EXCLUDE`), a refusals-and-failures row with the mean create and resume
 times, and the newest lease events (from the lease event stream,
 through a read-only `EVENTS_TOKEN`). The header draws `SPOOND ·
 <host>` at the left margin and right-aligns spoond's uptime and the
 frame's clock as `up <dur>, <time>`; the footer is one dim, centred
-line — `Spoond v3.7.2 (2026-10-13) · GitHub` — with the
+line — `Spoond v3.8.0 (2026-10-14) · GitHub` — with the
 dashboard binary's version and its release date, and the GitHub mark
 linking to the project URL (`DASH_PROJECT_URL`), dropping the date on a
 narrow frame. `DASH_SERVICES` includes `spoond-netwatch` by default.
@@ -216,8 +219,8 @@ the black background — cyan for titles and lease ids, blue for run
 state, green ok, amber warn, red bad, violet owner — never alone: every
 coloured state keeps its glyph or word. Above the panels sits a
 **Notifications** panel, drawn only when spoond has a system message to
-show: a systemd unit not active, free hugepages or snapshot disk past
-the danger level, or kept checkpoints past `KEPT_DISK_WARN_PCT` of the
+show: a systemd unit not active, snapshot disk past the danger level,
+or kept checkpoints past `KEPT_DISK_WARN_PCT` of the
 snapshot disk. Each message carries a stable id from its trigger and a
 severity, and each row has a `×` the viewer can click to dismiss it for
 their own browser (`localStorage`, no server state); the dismissal stays
@@ -281,6 +284,15 @@ stack does not exist yet.
 | [Changelog](CHANGELOG.md) | what changed in each release |
 
 ## Status
+
+**v3.8: lease history and records.** Every ended lease leaves a row in
+a new `lease_history` table (with its size, outcome, peak memory,
+start latency and longest nap); `spoond history import` backfills it
+from the backend journal. The dashboard gains a records panel over it,
+and the images panel sorts by use, caps at eight rows with a `+N more`
+link to a full `/images` page, and shows each image's size as
+`mem/vcpu`. Low free hugepages is no longer a dashboard notification.
+Schema 29. No breaking changes.
 
 **v3.7.2: image builds clean up after themselves.** The local tagged
 image is removed after each successful push. No breaking changes.
