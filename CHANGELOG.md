@@ -10,6 +10,41 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Fixed
+
+- **Warm-pool sandboxes count toward the overcommit cap, and the
+  low-memory floor sheds them first (spoond-41tk).** A pool VM holds
+  its hugepages around the clock, but the cap (`MEMORY_OVERCOMMIT`)
+  saw only leases: a full box with `POOL_SIZE` set could crash a VM the
+  moment it touched its own memory again. The pool's memory is now part
+  of the capped and committed total (`spoond_memory_committed_mib`
+  included), stocked per sandbox and re-seeded across a restart; a
+  pooled sandbox handed to a lease is counted once, as the lease. A
+  warm-pool fill stops (logged, retried by the next refill) rather than
+  stock a VM that would put the box over the cap or leave less than the
+  floor headroom free — the headroom is kept even with the floor loop
+  off, since a pool fill parks a VM for good — and never takes a lease
+  back. Below the `MEMORY_FLOOR_MIB` floor the tick now drops one
+  newest pooled sandbox first (the newest member of any image, its
+  guest deleted on the substrate and its rows cleared exactly like the
+  drain's pool trim) and returns: only an empty pool falls through to
+  pausing a lease, so under a standing breach the box sheds its idle
+  pool one VM per tick before anybody loses work.
+- **A grant served from the warm pool is admitted as the memory it
+  adds (also spoond-41tk).** Pool VMs count toward the cap now, and
+  grantLease still admitted before its pool pop, so a pooled grant was
+  charged twice — take-back paused a lease for it, and on a box at its
+  cap the grant was refused outright (`lease memory would be 2048 MiB
+  over the overcommit cap`), leaving the pool useless exactly when the
+  box is fullest. A pooled grant now runs admission only when nothing
+  was pooled: a pool hit takes over a VM already counted and is
+  admitted with nothing to debit and no take-back; an empty pool
+  (or one whose members all failed validation) falls through to the
+  ordinary admission for the cold create, take-back and cap included.
+  This also removes a double credit the pooled pop could fire (the
+  debit refunded at the pop and again through the undo), which read
+  the cache up to 2 GiB freer than the box was for up to 15 s.
+
 ## [3.9.0] - 2026-10-14
 
 ### Added
