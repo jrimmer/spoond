@@ -445,7 +445,7 @@ func (s *Server) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 			// take-back had nothing to reclaim (FS3b): the same 429
 			// box_full refusal a create is answered with. Nothing was
 			// written; the lease keeps running as it was.
-			writeBoxFull429(w, err)
+			writeBoxFull(w, err, 0)
 		default:
 			s.svc.log.Printf("checkpoint %s: %v", id, err)
 			writeError(w, http.StatusInternalServerError, "checkpoint failed")

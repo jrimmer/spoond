@@ -45,7 +45,8 @@ summarised from README "Status".
   `box_full` (only pinned leases in the way) answers without the key,
   as before, and the listing is the refusal's only effect. The same
   body shape on every re-admission path (create, suspend, restart,
-  clone, fork, checkpoint, resume, restore).
+  clone, fork, checkpoint, resume, restore). A create answered after an
+  admission wait stamps `waited_ms` inside the same body.
 
 ## [3.8.1] - 2026-10-14
 

@@ -359,9 +359,11 @@ A row carries the lease `id`, its `name` tag (omitted when untagged),
 in-flight operation or a running job. The rows are plain LRU, not the
 take-back selector's own ranking: the first row can be `pinned` or
 `busy`. Pausing a pinned lease is still safe (its hugepages are freed;
-but it will not resume while room is short), and pausing a `busy` one
-gets `409` `lease_busy` back rather than a pause, so read the flags
-before choosing.
+but it will not resume while room is short). Pausing a lease mid-pause,
+resume or save answers `409` `lease_busy`; the `busy` flag folds in a
+running background job, which a plain pause does not refuse, so do not
+pause a lease with running work you need unless you can afford to wait
+for it.
 
 The create fields `burst` and `priority` and the lease field `class` no
 longer exist (a create that sends them has them ignored). The lease
