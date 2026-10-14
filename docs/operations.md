@@ -1444,7 +1444,8 @@ leave no blank run and the freed width goes to the owner then the
 holder, and one dim legend under the table — `▶ running ‖ suspended
 ⭘ recovered ■ lost ◆ pinned` — spells the glyphs out whenever rows are
 shown), the image catalog (shape, live leases, lifetime
-uses, baked-at) beside the systemd units, a refusals-and-failures row
+uses, baked-at) beside the systemd units, a **records** panel of
+all-time stats (below), a refusals-and-failures row
 (auth, throttled, capacity, build fails, lost leases — non-zero
 counts highlighted — with the mean create and resume latencies), and
 the events panel (the backend's lease event stream) — plus
@@ -1489,6 +1490,46 @@ localhost.
 the page and its stream (lease ids, owners, host load), so use it only
 on a private network. The dashboard logs a line at startup when it is
 off. `/healthz` and `/readyz` never need a login.
+
+The **records** panel sits below the images/services band and above
+"refusals and failures": twelve all-time records over the backend's
+`lease_history` table plus the live leases (a live lease's end is now),
+recomputed at most once a minute and cached between refreshes — the 2 s
+tick reuses the cached result. Two columns at a wide frame (six records
+a side, the footer on the last row), one column below. The records:
+
+| Record | Meaning |
+|---|---|
+| `busiest` | the most leases running at once, and when it first reached that |
+| `one image` | the most leases of one image at once: image ×N, when |
+| `longest run` | the longest `ended_at − created_at`: duration, image, start date |
+| `shortest run` | the shortest **released** lease that ran ≥ 1 s (lost leases and sub-second runs don't qualify) |
+| `top owner` | the owner with the most leases, and the count |
+| `lifetime` | lease count · total lease-hours · total memory GiB-hours (`memory_mb × hours / 1024`) |
+| `busiest day` | the most leases created on one Pacific calendar day |
+| `biggest fleet` | the most leases one owner had running at once: owner, N, when |
+| `most memory` | the largest recorded peak, in GiB: image, end date |
+| `no losses for` | whole days since the newest `lost` lease, and its date/time; "no losses yet" while there is none |
+| `longest nap` | the longest suspend→resume: duration, image; `— (counting from 3.8)` until naps are recorded |
+| `fastest start` | the smallest create-to-grant latency over 0: `41 ms · image · date`; the same place-holder until starts are recorded |
+
+Times draw in America/Los_Angeles as `M/D h:mma` (`10/12 1:28a`), dates
+alone as `M/D`; durations as `N ms`, `Ns`, `Nm Ns`, `Nh Nm` or `Nd Nh`;
+thousands as `1.6k`. The "at once" sweeps sort start (+1) and end (−1)
+points with ends before starts at equal times, so a lease released as
+another starts never counts twice. `start_ms` and `max_nap_secs` exist
+only from spoond 3.8 (the backend writes them from 3.8 on); before the
+backend's `lease_history` migration lands the panel shows **no history
+yet**, and afterwards the two latency records show `— (counting from
+3.8)` until data accumulates.
+
+Owner ids count under their identity-store names, and
+`DASH_RECORDS_EXCLUDE` — a comma list of owner **names**, default
+`conformance,test-consumer` — keeps test leases out of every record
+(set it empty to count everyone). Excluded leases count nowhere in the
+panel; the images panel's `uses` column is untouched. While the list is
+not empty the panel's footer carries `· test leases not counted` beside
+`since <first created_at M/D>`.
 
 One collector loop builds a snapshot every `DASH_INTERVAL` (default 2 s)
 from spoond's `/metrics` using the scrape-only `METRICS_TOKEN`, the
@@ -1546,6 +1587,7 @@ variables:
 | `DASH_IO_FULL_WARN_PCT` | `5` | PSI full avg60 at which the i/o stall meter turns warn |
 | `DASH_IO_FULL_BAD_PCT` | `15` | PSI full avg60 at which it turns bad and the notification fires |
 | `DASH_SERVICES` | `spoond-backend,spoond-runner,spoond-sshd-gateway,e2b-orchestrator,e2b-guard,otelcol,spoond-netwatch` | systemd units to show |
+| `DASH_RECORDS_EXCLUDE` | `conformance,test-consumer` | owner names (comma list) kept out of the records panel's all-time stats; empty counts every owner |
 | `DASH_INTERVAL` | `2s` | refresh interval (minimum 1 s) |
 | `DASH_HISTORY` | `150` | sparkline points kept (10–200) |
 | `DASH_WIDTH` | `104` | frame width in cells (72–104) |

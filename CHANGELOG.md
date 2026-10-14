@@ -10,6 +10,23 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Added
+
+- **The dashboard's records panel (spoond-y5by).** `spoond dash` gains a
+  panel of twelve all-time records — busiest hour, one image at once,
+  longest and shortest run, top owner, lifetime lease/hours/GiB-hours
+  totals, busiest Pacific day, biggest single-owner fleet, most memory,
+  no-losses streak, longest nap and fastest start — computed over the
+  backend's `lease_history` table plus the live leases, owner ids mapped
+  to names from the identity store. `DASH_RECORDS_EXCLUDE` (a comma
+  list of owner names, default `conformance,test-consumer`) keeps test
+  leases out of every record; the images panel's `uses` column is
+  untouched. The computation is cached for a minute (the 2 s refresh
+  reuses it), and a catalog without the table yet shows "no history
+  yet". Needs the backend's lease-history change to have data; the two
+  latency records read `— (counting from 3.8)` until 3.8 backends start
+  writing `start_ms` and `max_nap_secs`.
+
 ### Changed
 
 - **`elixir-base` moves to Elixir 1.19.6 / Erlang OTP 28.5.0.7 and runs
