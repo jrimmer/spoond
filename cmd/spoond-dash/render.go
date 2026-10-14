@@ -447,6 +447,14 @@ func recordValues(r records) [][2]recordLine {
 		}
 		return fmt.Sprintf("%s · %s · %s", recDur(dur), img, recDay(at))
 	}
+	// The at-once records' values, or the dash at N = 0 (a history
+	// with no lease at all draws —, not "0 at once").
+	count := func(n int, val string) string {
+		if n == 0 {
+			return ""
+		}
+		return val
+	}
 	mostMem := ""
 	if r.MostMemMiB > 0 {
 		mostMem = fmt.Sprintf("%.1f GiB · %s · %s", float64(r.MostMemMiB)/(1<<10), r.MostMemImg, recDay(r.MostMemEnd))
@@ -464,16 +472,16 @@ func recordValues(r records) [][2]recordLine {
 		start = fmt.Sprintf("%d ms · %s · %s", r.FastestMs, r.FastestImg, recDay(r.FastestEnd))
 	}
 	left := [][2]string{
-		{"busiest", dash3(fmt.Sprintf("%d at once · %s", r.BusiestN, recTime(r.BusiestAt)))},
-		{"one image", dash3(fmt.Sprintf("%s ×%d · %s", r.OneImageImg, r.OneImageN, recTime(r.OneImageAt)))},
+		{"busiest", count(r.BusiestN, fmt.Sprintf("%d at once · %s", r.BusiestN, recTime(r.BusiestAt)))},
+		{"one image", count(r.OneImageN, fmt.Sprintf("%s ×%d · %s", r.OneImageImg, r.OneImageN, recTime(r.OneImageAt)))},
 		{"longest run", dash3(run(r.LongestDur, r.LongestImg, r.LongestCreated, r.LongestEnd))},
 		{"shortest run", dash3(run(r.ShortestDur, r.ShortestImg, r.ShortestCreated, r.ShortestEnd))},
-		{"top owner", dash3(fmt.Sprintf("%s · %s leases", r.TopOwner, recThousands(r.TopOwnerN)))},
-		{"lifetime", dash3(fmt.Sprintf("%s leases · %s · %s", recThousands(r.LifetimeN), recHours(r.LifetimeHrs), recGiBH(r.LifetimeGiBH)))},
+		{"top owner", count(r.TopOwnerN, fmt.Sprintf("%s · %s leases", r.TopOwner, recThousands(r.TopOwnerN)))},
+		{"lifetime", count(r.LifetimeN, fmt.Sprintf("%s leases · %s · %s", recThousands(r.LifetimeN), recHours(r.LifetimeHrs), recGiBH(r.LifetimeGiBH)))},
 	}
 	right := [][2]string{
-		{"busiest day", dash3(fmt.Sprintf("%d leases · %s", r.BusyDayN, recDay(r.BusyDay)))},
-		{"biggest fleet", dash3(fmt.Sprintf("%s · %d at once · %s", r.FleetOwner, r.FleetN, recTime(r.FleetAt)))},
+		{"busiest day", count(r.BusyDayN, fmt.Sprintf("%d leases · %s", r.BusyDayN, recDay(r.BusyDay)))},
+		{"biggest fleet", count(r.FleetN, fmt.Sprintf("%s · %d at once · %s", r.FleetOwner, r.FleetN, recTime(r.FleetAt)))},
 		{"most memory", dash3(mostMem)},
 		{"no losses for", noLoss},
 		{"longest nap", nap},
@@ -481,9 +489,20 @@ func recordValues(r records) [][2]recordLine {
 	}
 	out := make([][2]recordLine, len(left))
 	for i := range left {
-		out[i] = [2]recordLine{{left[i][0], left[i][1]}, {right[i][0], right[i][1]}}
+		out[i] = [2]recordLine{
+			{left[i][0], orDash(left[i][1])},
+			{right[i][0], orDash(right[i][1])},
+		}
 	}
 	return out
+}
+
+// orDash is the value a record with nothing to show draws.
+func orDash(s string) string {
+	if s == "" {
+		return recDash
+	}
+	return s
 }
 
 // histVals is one sparkline series, empty when there is no history.

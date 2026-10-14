@@ -138,3 +138,92 @@ func TestRecExcludeEnv(t *testing.T) {
 		t.Fatalf("empty = %q, want no exclusions", got)
 	}
 }
+
+// recSample is a records value with one of everything, for the drawn-
+// text tests: every record set, and a known first lease.
+func recSample() records {
+	at := func(d int, h, m int) time.Time { return time.Date(2026, 10, d, h, m, 0, 0, pacific) }
+	return records{
+		Avail:    true,
+		BusiestN: 11, BusiestAt: at(12, 1, 28),
+		OneImageImg: "honey-go-worker", OneImageN: 8, OneImageAt: at(9, 23, 15),
+		LongestDur: 21*time.Hour + 19*time.Minute, LongestImg: "honey-go-worker",
+		LongestCreated: at(10, 8, 0), LongestEnd: at(11, 5, 19),
+		ShortestDur: 2 * time.Second, ShortestImg: "honey-go-worker",
+		ShortestCreated: at(9, 16, 31), ShortestEnd: at(9, 16, 33),
+		TopOwner: "honey-svc", TopOwnerN: 468,
+		LifetimeN: 589, LifetimeHrs: 618, LifetimeGiBH: 1620,
+		BusyDayN: 164, BusyDay: at(9, 0, 0),
+		FleetOwner: "honey", FleetN: 6, FleetAt: at(12, 0, 26),
+		MostMemMiB: 3990, MostMemImg: "honey-go-worker", MostMemEnd: at(13, 9, 0),
+		NoLossDays: 1, LastLoss: at(12, 3, 15),
+		LongestNap: 5 * time.Hour, LongestNapImg: "honey-go-worker",
+		FastestMs: 41, FastestImg: "honey-go-worker", FastestEnd: at(13, 10, 0),
+		FirstCreated: at(9, 0, 0),
+	}
+}
+
+// TestRecordValuesFull: the drawn values with every record set — the
+// twelve labels in the approved render's order and each value's
+// "value · image · date" shape.
+func TestRecordValuesFull(t *testing.T) {
+	rows := recordValues(recSample())
+	want := [][4]string{
+		{"busiest", "11 at once · 10/12 1:28a", "busiest day", "164 leases · 10/9"},
+		{"one image", "honey-go-worker ×8 · 10/9 11:15p", "biggest fleet", "honey · 6 at once · 10/12 12:26a"},
+		{"longest run", "21h 19m · honey-go-worker · 10/10", "most memory", "3.9 GiB · honey-go-worker · 10/13"},
+		{"shortest run", "2s · honey-go-worker · 10/9", "no losses for", "1 day · last 10/12 3:15a"},
+		{"top owner", "honey-svc · 468 leases", "longest nap", "5h 0m · honey-go-worker"},
+		{"lifetime", "589 leases · 618 h · 1.6k GiB·h", "fastest start", "41 ms · honey-go-worker · 10/13"},
+	}
+	if len(rows) != len(want) {
+		t.Fatalf("recordValues drew %d rows, want %d", len(rows), len(want))
+	}
+	for i, w := range want {
+		for side, wl := range [][2]string{{w[0], w[1]}, {w[2], w[3]}} {
+			label, value := rows[i][side].label, rows[i][side].value
+			if label != wl[0] || value != wl[1] {
+				t.Errorf("row %d col %d = %q · %q, want %q · %q", i, side, label, value, wl[0], wl[1])
+			}
+		}
+	}
+}
+
+// TestRecordValuesPlaceholders: the values a fresh history draws — zero
+// start_ms and max_nap_secs show the "— (counting from 3.8)" place-
+// holder, no lost row shows "no losses yet", and the other records fall
+// back to the dash.
+func TestRecordValuesPlaceholders(t *testing.T) {
+	r := records{Avail: true, FirstCreated: time.Date(2026, 10, 9, 0, 0, 0, 0, pacific)}
+	rows := recordValues(r)
+	byLabel := map[string]string{}
+	for _, pair := range rows {
+		byLabel[pair[0].label] = pair[0].value
+		byLabel[pair[1].label] = pair[1].value
+	}
+	for label, want := range map[string]string{
+		"longest nap":   countingText,
+		"fastest start": countingText,
+		"no losses for": recNoLossYet,
+		"busiest":       recDash,
+		"lifetime":      recDash,
+		"most memory":   recDash,
+	} {
+		if got := byLabel[label]; got != want {
+			t.Errorf("%s = %q, want %q", label, got, want)
+		}
+	}
+}
+
+// TestRecFooter: the footer's two clauses — "since <first created
+// M/D>", with " · test leases not counted" while the exclude list
+// holds names and without it when the list is empty.
+func TestRecFooter(t *testing.T) {
+	rec := recSample()
+	if got, want := recFooter(rec, []string{"conformance"}), "since 10/9 · test leases not counted"; got != want {
+		t.Errorf("recFooter = %q, want %q", got, want)
+	}
+	if got, want := recFooter(rec, nil), "since 10/9"; got != want {
+		t.Errorf("recFooter = %q, want %q (no exclusions, no clause)", got, want)
+	}
+}

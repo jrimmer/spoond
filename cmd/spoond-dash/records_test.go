@@ -340,12 +340,16 @@ func TestRecNoLosses(t *testing.T) {
 		t.Fatalf("no losses = %d days, want 2", r.NoLossDays)
 	}
 
-	// No lost row at all: LastLoss zero, the panel's "no losses yet".
+	// No lost row at all: LastLoss zero, and the drawn value the
+	// plan's "no losses yet".
 	f2 := newRecFixture(t)
 	f2.addHist(t, "a", "u-honey", "go-base", 512, at, at.Add(time.Hour), "released", 0, 0, 0)
 	r2 := f2.computed(t)
 	if !r2.LastLoss.IsZero() || r2.NoLossDays != 0 {
 		t.Fatalf("no-loss history = %v/%d, want zero", r2.LastLoss, r2.NoLossDays)
+	}
+	if got := recordValues(r2)[3][1].value; got != recNoLossYet {
+		t.Fatalf("no-loss value = %q, want %q", got, recNoLossYet)
 	}
 }
 
@@ -477,16 +481,20 @@ func TestRecLiveLeaseInSweep(t *testing.T) {
 	}
 }
 
-// TestRecLostLiveRowsSkipped: a lost live row is already at its end and
-// a creating one has not started, so neither joins the live records.
+// TestRecLostLiveRowsSkipped: a live row in state 'lost' is already at
+// its end and a 'creating' one has not started its run, so neither
+// joins the records — while a running live lease beside them does.
 func TestRecLostLiveRowsSkipped(t *testing.T) {
 	f := newRecFixture(t)
 	f.addLive(t, "lost-1", "u-honey", "go-base", "lost", 512, f.now.Add(-2*time.Hour))
-	if _, err := f.raw.Exec(`DELETE FROM leases WHERE id = 'lost-1'`); err != nil {
-		t.Fatal(err)
-	}
 	r := f.computed(t)
 	if r.LifetimeN != 0 {
 		t.Fatalf("lifetime = %d, want 0 (only a lost live row, which is at its end)", r.LifetimeN)
+	}
+	// The control: a running live lease beside the lost one counts.
+	f.addLive(t, "run-1", "u-honey", "go-base", "running", 512, f.now.Add(-time.Hour))
+	r = f.computed(t)
+	if r.LifetimeN != 1 {
+		t.Fatalf("lifetime = %d, want 1 (the running lease)", r.LifetimeN)
 	}
 }
