@@ -39,6 +39,7 @@ SPOOND · spoond.example.com                              up 9m, 12:00:00
 │ image            vcpu  mem      live  uses   baked                   │
 │ go-base          2     2 GiB    2     51     2d ago                  │
 │ py-base          1     1 GiB    1     7      9h ago                  │
+│ total                           3     58                             │
 └──────────────────────────────────────────────────────────────────────┘
 ┌─ services ───────────────────────────────────────────────────────────┐
 │ spoond-backend        ✓ active                                       │
