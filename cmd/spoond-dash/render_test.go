@@ -423,7 +423,9 @@ func TestFooterProjectURL(t *testing.T) {
 }
 
 // TestFooterDropsNarrow: on a narrow frame the date drops first; the
-// version and the GitHub mark always stay.
+// version and the GitHub mark always stay. The /images page's footer
+// carries "· images" between version and mark; the date drops before
+// it, the clause stays.
 func TestFooterDropsNarrow(t *testing.T) {
 	f := footerParts{version: "v2.7.1", date: "2026-10-07"}
 	// Wide enough for the whole line.
@@ -433,6 +435,14 @@ func TestFooterDropsNarrow(t *testing.T) {
 	// Too narrow for the date: version and mark stay.
 	if got := segsText(footerSegs(f, 20)); got != "Spoond v2.7.1 · GitHub" {
 		t.Fatalf("date-dropped footer = %q", got)
+	}
+	// The images clause, whole and with the date dropped.
+	fi := footerParts{version: "v2.7.1", date: "2026-10-07", images: true}
+	if got := segsText(footerSegs(fi, 104)); got != "Spoond v2.7.1 (2026-10-07) · images · GitHub" {
+		t.Fatalf("images footer = %q", got)
+	}
+	if got := segsText(footerSegs(fi, 26)); got != "Spoond v2.7.1 · images · GitHub" {
+		t.Fatalf("date-dropped images footer = %q", got)
 	}
 }
 
