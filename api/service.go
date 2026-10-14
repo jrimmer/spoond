@@ -456,10 +456,12 @@ type ServiceConfig struct {
 	// MemoryFloorMiB is MEMORY_FLOOR_MIB (spoond-l3lq): the free hugepage
 	// memory the backend keeps on the box, checked every 15 s by the
 	// low-memory loop (api/pressure.go). Below the floor it pauses one
-	// lease through the ordinary take-back rules (memVictims over the
-	// fair-share views — pinned leases and owners inside their slice are
-	// never touched) and repeats on the next tick. The backend passes
-	// DefaultMemoryFloorMiB when unset; 0 disables the check.
+	// lease through pressureVictim (the least recently used unpinned
+	// lease of the owner furthest over their fair slice — pinned leases
+	// and owners inside their slice are never touched) and repeats on the
+	// next tick; admission counts the floor as headroom (memoryHeadroom).
+	// The backend passes DefaultMemoryFloorMiB when unset; 0 disables the
+	// check.
 	MemoryFloorMiB int
 	// MaxKeptPerLease is the per-lease kept-checkpoint cap (#126): a
 	// keep on a lease already holding this many kept builds answers 409
