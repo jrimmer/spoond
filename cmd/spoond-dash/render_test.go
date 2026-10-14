@@ -2309,3 +2309,196 @@ func TestNoHugepagesNotice(t *testing.T) {
 		}
 	}
 }
+
+// imagesPanel pulls the images panel's box out of a plain frame: the
+// rows from its ┌ title row to its └ bottom edge.
+func imagesPanel(t *testing.T, p string) []string {
+	t.Helper()
+	lines := strings.Split(p, "\n")
+	start := -1
+	for i, r := range lines {
+		if strings.HasPrefix(r, "┌─ images ") {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		t.Fatalf("no images panel in the frame:\n%s", p)
+	}
+	for i := start + 1; i < len(lines); i++ {
+		if strings.HasPrefix(lines[i], "└") {
+			return lines[start : i+1]
+		}
+	}
+	t.Fatalf("images panel never closes:\n%s", p)
+	return nil
+}
+
+// capSnapshot builds a snapshot with n images, live and uses stamped
+// per image so the fold row's sums are checkable: image i carries i
+// live leases and i uses.
+func capSnapshot(n int) Snapshot {
+	s := sampleSnapshot()
+	s.Images = nil
+	for i := 0; i < n; i++ {
+		s.Images = append(s.Images, ImageRow{
+			Name: fmt.Sprintf("img-%02d", i), Live: i, Uses: 2 * i,
+			VCPU: 2, MemMB: 2048, Updated: "3d ago",
+		})
+	}
+	return s
+}
+
+// TestImagesPanelCap: the panel shows at most eight image rows; a
+// longer catalog folds into one "+N more" row whose live and uses
+// cells sum the hidden images, then the total row over every image.
+func TestImagesPanelCap(t *testing.T) {
+	for n, fold := range map[int]int{8: 0, 9: 1, 15: 7} {
+		p := Draw(capSnapshot(n), DefaultWidth, fixedNow, "h").Plain()
+		panel := imagesPanel(t, p)
+		// The title counts every image; the rows are the title, the
+		// header, the shown images (at most the cap), the fold row when
+		// folded, the total and the bottom edge.
+		wantRows := 2 + min(n, maxImageRows) + boolInt(fold > 0) + 2
+		if len(panel) != wantRows {
+			t.Fatalf("%d images: panel is %d rows, want %d:\n%s", n, len(panel), wantRows, p)
+		}
+		if !strings.Contains(panel[0], fmt.Sprintf("images · %d · by use", n)) {
+			t.Fatalf("%d images: title wrong: %q", n, panel[0])
+		}
+		// The terminal's fold row names the list; the tail cuts to fit
+		// the name column ("+N more · spoond images" at 23 cells).
+		foldText := fmt.Sprintf("+%d more · spoond images", fold)
+		if fold > 0 && !strings.Contains(p, foldText) {
+			t.Fatalf("%d images: fold row %q missing:\n%s", n, foldText, p)
+		}
+		if fold == 0 && strings.Contains(p, "more") {
+			t.Fatalf("%d images: no fold expected:\n%s", n, p)
+		}
+		if fold > 0 {
+			// The hidden images are 8..n-1: their live sum
+			// Σ8..n-1 = (8+n-1)(n-8)/2, uses twice that.
+			live, uses := 0, 0
+			for i := maxImageRows; i < n; i++ {
+				live, uses = live+i, uses+2*i
+			}
+			foldRow := panel[2+maxImageRows]
+			if !strings.Contains(foldRow, fmt.Sprintf("%d", live)) ||
+				!strings.Contains(foldRow, fmt.Sprintf("%d", uses)) {
+				t.Fatalf("%d images: fold row %q lacks sums live %d uses %d", n, foldRow, live, uses)
+			}
+		}
+		// The total row: every image, folded or not. Σ0..n-1 = n(n-1)/2.
+		total := panel[len(panel)-2]
+		live, uses := n*(n-1)/2, n*(n-1)
+		if !strings.Contains(total, fmt.Sprintf("%d", live)) || !strings.Contains(total, fmt.Sprintf("%d", uses)) {
+			t.Fatalf("%d images: total row %q lacks live %d uses %d:\n%s", n, total, live, uses, p)
+		}
+	}
+}
+
+// TestImagesPanelCapNarrow: the 72-cell frame uses the same cap and
+// columns — eight image rows, then the fold.
+func TestImagesPanelCapNarrow(t *testing.T) {
+	p := Draw(capSnapshot(11), minW, fixedNow, "h").Plain()
+	panel := imagesPanel(t, p)
+	if len(panel) != 2+maxImageRows+1+2 {
+		t.Fatalf("narrow panel is %d rows, want the capped height:\n%s", len(panel), p)
+	}
+	if !strings.Contains(p, "+3 more · spoond images") { // the list tail cut to fit the column
+		t.Fatalf("narrow frame lost the fold row:\n%s", p)
+	}
+	if !strings.Contains(panel[0], "images · 11 · by use") {
+		t.Fatalf("narrow title wrong: %q", panel[0])
+	}
+}
+
+// TestImagesPanelBakedFits: the baked column still fits "12d ago" at
+// the 61-cell side-by-side panel.
+func TestImagesPanelBakedFits(t *testing.T) {
+	s := sampleSnapshot()
+	s.Images = []ImageRow{{Name: "go-base", Updated: "12d ago", VCPU: 2, MemMB: 2048}}
+	p := Draw(s, DefaultWidth, fixedNow, "h").Plain()
+	if !strings.Contains(p, "12d ago") {
+		t.Fatalf("baked age cut at the wide panel:\n%s", p)
+	}
+}
+
+// TestImagesPageView: the /images frame draws the images panel alone,
+// full width and uncapped — every row, no fold, the total row, the
+// footer's "· images" clause.
+func TestImagesPageView(t *testing.T) {
+	s := capSnapshot(15)
+	g := drawView(s, sampleHist(), DefaultWidth, "spoond.example.com", fixedNow, dashInterval, viewImages)
+	p := g.Plain()
+	if n := strings.Count(p, "┌"); n != 1 {
+		t.Fatalf("/images frame draws %d panels, want the images panel alone:\n%s", n, p)
+	}
+	panel := imagesPanel(t, p)
+	if len(panel) != 2+15+2 { // title, header, 15 rows, total, edge
+		t.Fatalf("/images panel is %d rows, want all 15 uncapped:\n%s", len(panel), p)
+	}
+	if !strings.Contains(p, "img-14") || strings.Contains(p, "more") {
+		t.Fatalf("/images must show every row and never fold:\n%s", p)
+	}
+	if !strings.Contains(panel[0], "images · 15 · by use") {
+		t.Fatalf("/images title wrong: %q", panel[0])
+	}
+	if !strings.Contains(p, "· images · GitHub") {
+		t.Fatalf("/images footer lacks the way back:\n%s", p)
+	}
+	// Full width: the panel spans the frame.
+	if !strings.HasPrefix(panel[0], "┌") || !strings.HasSuffix(panel[0], "┐") || len([]rune(panel[0])) != DefaultWidth {
+		t.Fatalf("/images panel is not full width: %q", panel[0])
+	}
+	// The dashboard view keeps its fold for the same snapshot.
+	if dp := Draw(s, DefaultWidth, fixedNow, "h").Plain(); !strings.Contains(dp, "+7 more") {
+		t.Fatalf("dashboard view lost its cap:\n%s", dp)
+	}
+}
+
+// TestMoreLinkRowPinsTheFoldRow: moreLink lands on the panel's fold row
+// — the row the grid carries the link-styled "+N more" text on — and is
+// nil when nothing was folded.
+func TestMoreLinkRowPinsTheFoldRow(t *testing.T) {
+	s := capSnapshot(11)
+	w := DefaultWidth
+	links := moreLink(s, w, fixedNow)
+	if len(links) != 1 || links[0].url != "/images" || links[0].text != "+3 more" {
+		t.Fatalf("moreLink = %+v", links)
+	}
+	g := drawView(s, nil, w, "h", fixedNow, 0, viewDashboard)
+	row := strings.Split(g.Plain(), "\n")[links[0].row]
+	if !strings.Contains(row, "+3 more") {
+		t.Fatalf("moreLink row %d is not the fold row: %q", links[0].row, row)
+	}
+	if links2 := moreLink(capSnapshot(8), w, fixedNow); links2 != nil {
+		t.Fatalf("moreLink with nothing folded = %+v, want nil", links2)
+	}
+}
+
+// TestPageMoreImagesLink: the page swaps the fold row's link-styled
+// span for a real anchor to /images, and the link appears in the page
+// links — never in the terminal's plain output beyond its text.
+func TestPageMoreImagesLink(t *testing.T) {
+	s := capSnapshot(11)
+	g := drawView(s, nil, DefaultWidth, "h", fixedNow, 0, viewDashboard)
+	links := moreLink(s, DefaultWidth, fixedNow)
+	if len(links) != 1 {
+		t.Fatalf("moreLink = %+v", links)
+	}
+	plain := strings.Split(g.Plain(), "\n")[links[0].row]
+	page := applyLinks(strings.Split(g.HTML(), "\n")[links[0].row], links[0].row, links)
+	if !strings.Contains(page, `<a class="g-link" href="/images"`) {
+		t.Fatalf("fold row is not an anchor to /images:\n%s", page)
+	}
+	text := html.UnescapeString(regexp.MustCompile(`<[^>]*>`).ReplaceAllString(page, ""))
+	if text != plain {
+		t.Fatalf("linked row's text changed:\n got %q\nwant %q", text, plain)
+	}
+	// The anchor, not the span, carries the text — the plain frame shows
+	// the row without any link machinery.
+	if strings.Contains(plain, "<a ") || strings.Contains(plain, `href=`) {
+		t.Fatalf("plain output must carry no link: %q", plain)
+	}
+}
