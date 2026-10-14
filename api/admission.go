@@ -70,6 +70,16 @@ func (s *Service) admit(ctx context.Context, memoryMB int) error {
 	return nil
 }
 
+// noFloorKey marks a context whose admission skips the low-memory floor
+// headroom: the lease was running a moment ago (a take-back pause that
+// lost to a pin, an undrain after a restart), so bringing it back
+// restores what the box already held instead of a new promise.
+type noFloorKey struct{}
+
+func withoutFloor(ctx context.Context) context.Context {
+	return context.WithValue(ctx, noFloorKey{}, true)
+}
+
 func (s *Service) admitCapacity(ctx context.Context, memoryMB int) error {
 	info, err := s.sub.NodeInfo(ctx)
 	if err != nil {
@@ -79,7 +89,11 @@ func (s *Service) admitCapacity(ctx context.Context, memoryMB int) error {
 	if info.Status != "healthy" {
 		return fmt.Errorf("%w: node status %s", substrate.ErrCapacity, info.Status)
 	}
-	needBytes := uint64(memoryMB+s.cfg.MemoryFloorMiB) * 1024 * 1024
+	floor := s.cfg.MemoryFloorMiB
+	if ctx.Value(noFloorKey{}) != nil {
+		floor = 0
+	}
+	needBytes := uint64(memoryMB+floor) * 1024 * 1024
 	if free < needBytes {
 		return fmt.Errorf("%w: %d bytes of hugepage memory free, need %d", substrate.ErrCapacity, free, needBytes)
 	}

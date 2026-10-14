@@ -34,6 +34,10 @@ summarised from README "Status".
   back for raises the new `memory_floor` event at most once per 10
   minutes. New metrics `spoond_memory_committed_mib` (set every tick,
   even with the floor off) and `spoond_memory_pressure_takebacks_total`.
+  Busy leases (a running job or operation) are passed over, so an
+  all-busy top borrower never stalls the loop; a lease returning to
+  what the box already held (a take-back that lost to a pin, an
+  undrain after a restart) is admitted without the floor headroom.
 
 ### Changed
 

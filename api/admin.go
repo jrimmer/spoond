@@ -629,7 +629,9 @@ func (s *Service) resumeDrainedLease(ctx context.Context, l *Lease, acquire, rel
 		if s.draining.Load() {
 			return errDraining, attempt
 		}
-		_, err = s.resumeLease(ctx, l)
+		// A drained lease was running before the restart: undrain
+		// restores it without the floor headroom.
+		_, err = s.resumeLease(withoutFloor(ctx), l)
 		if err == nil {
 			return nil, attempt
 		}

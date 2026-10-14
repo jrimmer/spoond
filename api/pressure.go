@@ -58,7 +58,12 @@ func (s *Service) pressureLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			s.pressureCheck(ctx)
+			if s.pressureCheck(ctx) {
+				// A pause just ran (up to 35 s): start a fresh interval
+				// so the next reading sees its freed pages, rather than
+				// the tick that queued during the pause.
+				t.Reset(s.pressureCheckInterval)
+			}
 		}
 	}
 }
@@ -84,13 +89,14 @@ func (s *Service) pressureSkip(floor int) bool {
 	return s.draining.Load()
 }
 
-// pressureCheck is one tick of the low-memory loop: read the node
+// pressureCheck is one tick of the low-memory loop (true when it paused
+// a lease): read the node
 // fresh, and below the floor pause one lease — pressureVictim's pick:
 // the least recently used unpinned lease of the owner furthest over
 // their fair slice, non-busy before busy. Leases still marked Drained
 // are skipped like pinned ones (an undrain owns their resume), so a
 // lease stuck Drained cannot switch the floor off for good.
-func (s *Service) pressureCheck(ctx context.Context) {
+func (s *Service) pressureCheck(ctx context.Context) bool {
 	// What the box has promised to live VMs, for the gauge. The store
 	// read needs no node round trip, so the gauge moves every tick —
 	// with the floor off, while draining, and while the orchestrator is
@@ -100,7 +106,7 @@ func (s *Service) pressureCheck(ctx context.Context) {
 	}
 	floor := s.cfg.MemoryFloorMiB
 	if s.pressureSkip(floor) {
-		return
+		return false
 	}
 	// A fresh reading, not the admission cache: the floor is a standing
 	// condition, and the credits and debits inside the cache's TTL would
@@ -108,17 +114,17 @@ func (s *Service) pressureCheck(ctx context.Context) {
 	info, err := s.sub.NodeInfo(ctx)
 	if err != nil {
 		s.log.Printf("memory floor: node info: %v", err)
-		return
+		return false
 	}
 	// Bad readings are not a floor breach (round 2): an orchestrator
 	// still booting or wedged reports no pages (or lies with a draining
 	// status), and taking back on that would pause leases for nothing.
 	if info.Status != "healthy" || info.HugepagesTotal == 0 {
-		return
+		return false
 	}
 	free := int(info.FreeHugepageBytes() / (1024 * 1024))
 	if free >= floor {
-		return
+		return false
 	}
 	short := floor - free
 
@@ -131,9 +137,16 @@ func (s *Service) pressureCheck(ctx context.Context) {
 	s.preemptMu.Lock()
 	defer s.preemptMu.Unlock()
 	if s.draining.Load() {
-		return
+		return false
 	}
 
+	// The slices come from the fair-share snapshot: while it is unknown
+	// (a cold node cache just after a start, a failed store read) every
+	// slice reads 0 and nothing would look takeable, so wait for the
+	// next tick instead of raising a false "nothing can be taken" alert.
+	if !s.fairShares(ctx).capacityKnown {
+		return false
+	}
 	owners := s.takeBackOwners(ctx)
 	v, ok := pressureVictim(owners)
 	if !ok {
@@ -147,11 +160,11 @@ func (s *Service) pressureCheck(ctx context.Context) {
 			s.pressureAlertAt = now
 			s.pressureFloorAlert(short)
 		}
-		return
+		return false
 	}
 	l := s.lookupAny(v.LeaseID)
 	if l == nil {
-		return // released between the views and the pause
+		return false // released between the views and the pause
 	}
 	// The pause must not die with a shutdown that cancels ctx
 	// mid-snapshot: a half-written snapshot would be the one state the
@@ -165,13 +178,14 @@ func (s *Service) pressureCheck(ctx context.Context) {
 		}
 		// Refused (a pin, release or job won the race): leave it to the
 		// next tick to re-plan on fresh views.
-		return
+		return false
 	}
 	if s.metrics != nil {
 		s.metrics.MemoryPressureTakebacksTotal.Inc()
 	}
 	s.log.Printf("memory floor: %d MiB free of a %d MiB floor: took back lease %s (%d MiB, owner ratio %.2f)",
 		free, floor, v.LeaseID, v.MemoryMiB, v.Ratio)
+	return true
 }
 
 // pressureFloorAlert raises the low-memory loop's alert when nothing

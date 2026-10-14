@@ -273,7 +273,15 @@ func (s *Service) computeFairShares(ctx context.Context) *fairShareSnapshot {
 	// admission in flight — not every identity (2026-10-14 owner
 	// decision).
 	active, memUsed := s.ownersActiveFor()
-	n := len(active)
+	// N counts only listed owners: a lease whose owner is no longer an
+	// identity or token (a deleted user's leases still releasing) must
+	// not shrink everyone's slice.
+	n := 0
+	for _, o := range owners {
+		if _, ok := active[o]; ok {
+			n++
+		}
+	}
 
 	capacityKnown := true
 	memTotalMiB, memOK := s.totalHugepageMiB()

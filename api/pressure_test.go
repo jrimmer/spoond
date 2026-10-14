@@ -728,3 +728,79 @@ func TestAdmitFloorHeadroom(t *testing.T) {
 		t.Fatalf("floor off: 6 GiB request refused: %v", err)
 	}
 }
+
+// TestPressureBusyTopOwnerFallsToNextOwner: every lease of the owner
+// furthest over is busy (takeBackPause refuses busy leases), so the tick
+// must pass that owner over and pause the next owner's idle lease — not
+// offer the busy one each tick and stall. With every lease busy the
+// tick pauses nothing and raises the memory_floor alert.
+func TestPressureBusyTopOwnerFallsToNextOwner(t *testing.T) {
+	svc, sub, ctx := newPressureService(t)
+	alice := preemptOwner(t, svc, "alice")
+	bob := preemptOwner(t, svc, "bob")
+	// A 4096 MiB slice each of the 8192 MiB pool: alice's three 8192
+	// MiB leases (6x, all busy) and bob's one (2x, idle).
+	busy := make([]*Lease, 0, 3)
+	for i := 0; i < 3; i++ {
+		l, err := svc.grantLease(ctx, leaseRequest{owner: alice, image: "big", ttl: time.Hour, persistent: true})
+		if err != nil {
+			t.Fatalf("grant alice %d: %v", i, err)
+		}
+		busy = append(busy, l)
+	}
+	bobL, err := svc.grantLease(ctx, leaseRequest{owner: bob, image: "big", ttl: time.Hour, persistent: true})
+	if err != nil {
+		t.Fatalf("grant bob: %v", err)
+	}
+	svc.store.mu.Lock()
+	for _, l := range busy {
+		l.busy = true
+	}
+	svc.store.mu.Unlock()
+	installDynamicNode(t, svc, sub, 4096, 0, 512)
+	svc.cfg.MemoryFloorMiB = 6144
+	warmFairShares(svc, ctx)
+
+	if !svc.pressureCheck(ctx) {
+		t.Fatal("tick paused nothing; want bob's idle lease")
+	}
+	if susp := suspendedLeases(svc); len(susp) != 1 || !susp[bobL.ID] {
+		t.Fatalf("suspended = %v, want exactly bob's lease %s", susp, bobL.ID)
+	}
+
+	// Now every running lease is busy: nothing to pause, and the alert.
+	events := svc.Subscribe(EventFilter{})
+	defer events.Close()
+	warmFairShares(svc, ctx)
+	if svc.pressureCheck(ctx) {
+		t.Fatal("tick paused a lease although every running lease is busy")
+	}
+	for _, l := range busy {
+		if l.Suspended {
+			t.Fatal("a busy lease was paused")
+		}
+	}
+	if kinds := collectEventKinds(t, events); kinds[LeaseMemoryFloor] != 1 {
+		t.Fatalf("events = %v, want one memory_floor alert", kinds)
+	}
+}
+
+// TestAdmitCapacityWithoutFloor: a lease coming back to what the box
+// already held (un-take-back, undrain) is admitted without the floor
+// headroom; a new request still needs it.
+func TestAdmitCapacityWithoutFloor(t *testing.T) {
+	svc, sub, ctx := newPressureService(t)
+	svc.cfg.MemoryFloorMiB = 2048
+	sub.SetNodeInfo(substrate.NodeInfo{
+		Status:            "healthy",
+		HugepagesTotal:    4096,
+		HugepagesUsed:     1024, // 6144 MiB free
+		HugepageSizeBytes: 2 << 20,
+	}, nil)
+	if err := svc.admitCapacity(ctx, 6144); err == nil {
+		t.Fatal("new 6 GiB request admitted without the 2 GiB floor free on top")
+	}
+	if err := svc.admitCapacity(withoutFloor(ctx), 6144); err != nil {
+		t.Fatalf("returning 6 GiB lease refused: %v", err)
+	}
+}

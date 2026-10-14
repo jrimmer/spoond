@@ -81,11 +81,21 @@ func pressureVictim(owners []takeBackOwner) (takeBackVictim, bool) {
 	sort.SliceStable(ranked, func(a, b int) bool { return ranked[a].ratio > ranked[b].ratio })
 	for _, c := range ranked {
 		o := &owners[c.idx]
-		li := tbPickLease(o.Leases)
-		if li < 0 {
-			continue // every lease of the owner is pinned (or Drained)
+		// Busy leases are left out, not ranked last: takeBackPause
+		// refuses a busy lease, so offering one would stall every tick
+		// on the same refusal and never reach the next owner (or the
+		// alert when the whole box is busy).
+		idle := make([]takeBackLease, 0, len(o.Leases))
+		for _, l := range o.Leases {
+			if !l.Busy {
+				idle = append(idle, l)
+			}
 		}
-		l := o.Leases[li]
+		li := tbPickLease(idle)
+		if li < 0 {
+			continue // every lease of the owner is pinned, Drained or busy
+		}
+		l := idle[li]
 		return takeBackVictim{Owner: o.Owner, LeaseID: l.ID, Ratio: c.ratio, MemoryMiB: l.MemoryMiB}, true
 	}
 	return takeBackVictim{}, false
@@ -361,7 +371,9 @@ func (s *Service) unTakeBackResume(ctx context.Context, l *Lease, buildID string
 		return errLeaseReleased
 	}
 	l.ResumeBuildID = buildID
-	if _, err := s.resumeLeaseBody(ctx, l); err != nil {
+	// The lease was running a moment ago: its return is not held to the
+	// floor headroom, or a pin that won the race could leave it paused.
+	if _, err := s.resumeLeaseBody(withoutFloor(ctx), l); err != nil {
 		// Busy stays set: the lease is suspended and unchanged, and
 		// takeBackPause's single defer clears it. Clearing it here too
 		// would drop the flag early and open the busy window while this
