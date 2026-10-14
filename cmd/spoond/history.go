@@ -173,6 +173,17 @@ func importHistory(ctx context.Context, db *store.DB, r io.Reader) (imported, sk
 			skipped++
 			continue
 		}
+		// An end line without a field (older lines carry no memory_mib)
+		// takes the create line's.
+		if e.memoryMB == 0 {
+			e.memoryMB = c.memoryMB
+		}
+		if e.owner == "" {
+			e.owner = c.owner
+		}
+		if e.image == "" {
+			e.image = c.image
+		}
 		inserted, err := db.InsertLeaseHistory(ctx, store.LeaseHistoryRow{
 			LeaseID:   e.id,
 			Owner:     e.owner,
@@ -246,7 +257,13 @@ func parseJournalStamp(s string) (time.Time, bool) {
 // both spellings. nil when the body is not a lease journal line (no
 // op=…).
 func parseJournalBody(body string) map[string]string {
-	body = strings.TrimPrefix(body, "lease journal: ")
+	// Only the backend's lease journal lines: whatever precedes the
+	// marker (the syslog identifier, the log package's own stamp) is
+	// dropped, and a line without it is not one.
+	_, body, ok := strings.Cut(body, "lease journal: ")
+	if !ok {
+		return nil
+	}
 	fields := map[string]string{}
 	for _, tok := range splitJournalTokens(body) {
 		k, v, ok := strings.Cut(tok, "=")
@@ -272,14 +289,19 @@ func splitJournalTokens(s string) []string {
 			cur.Reset()
 		}
 	}
+	// Quotes and escapes stay in the token, so unquoteJournalValue
+	// resolves them with strconv.Unquote (\n, \t, \" as the writer's %q
+	// wrote them).
 	for _, r := range s {
 		switch {
 		case escaped:
 			cur.WriteRune(r)
 			escaped = false
 		case r == '\\' && inQuote:
+			cur.WriteRune(r)
 			escaped = true
 		case r == '"':
+			cur.WriteRune(r)
 			inQuote = !inQuote
 		case r == ' ' && !inQuote:
 			flush()

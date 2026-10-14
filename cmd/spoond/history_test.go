@@ -262,3 +262,29 @@ func mustRows(t *testing.T, db *store.DB) []store.LeaseHistoryRow {
 	}
 	return rows
 }
+
+// TestHistoryImportRealFormatAndFallbacks: a real-shaped line (syslog
+// identifier and the log package's stamp before the marker, no
+// memory_mib on the end line) imports with the create line's memory; a
+// %q-escaped reason unquotes; a line with op= and lease_id= but no
+// "lease journal: " marker is not a lease line.
+func TestHistoryImportRealFormatAndFallbacks(t *testing.T) {
+	db := historyTestDB(t)
+	ctx := context.Background()
+	in := `2026-10-09T04:12:09.993851-07:00 sandbox spoond[153401]: 2026/10/09 04:12:09 lease journal: op=create lease_id=r-1 owner=u-a sandbox=s image=py-base memory_mib=2048 class=guaranteed reason=new
+2026-10-09T04:12:10.064145-07:00 sandbox spoond[153401]: 2026/10/09 04:12:10 lease journal: op=release lease_id=r-1 owner=u-a sandbox=s image=py-base class=guaranteed reason="line one\nline two"
+2026-10-09T04:12:11.000000-07:00 sandbox other[1]: op=create lease_id=x-1 owner=u-a image=py-base
+2026-10-09T04:12:12.000000-07:00 sandbox other[1]: op=release lease_id=x-1 owner=u-a image=py-base
+`
+	imported, _, err := importHistory(ctx, db, strings.NewReader(in))
+	if err != nil || imported != 1 {
+		t.Fatalf("import = %d, %v; want 1 (r-1 only)", imported, err)
+	}
+	h, err := db.GetLeaseHistory(ctx, "r-1")
+	if err != nil {
+		t.Fatalf("get r-1: %v", err)
+	}
+	if h.MemoryMB != 2048 || h.Reason != "line one\nline two" || h.Outcome != "released" {
+		t.Fatalf("r-1 = memory %d reason %q outcome %q", h.MemoryMB, h.Reason, h.Outcome)
+	}
+}

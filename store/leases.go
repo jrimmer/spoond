@@ -258,49 +258,6 @@ func scanLeaseHistory(scan func(dest ...any) error) (LeaseHistoryRow, error) {
 	return h, nil
 }
 
-// SetLeaseStartMS stamps one lease row's create-to-grant latency
-// (records A) without touching any other column. A missing row is not
-// an error: the lease ended before the stamp landed.
-func (db *DB) SetLeaseStartMS(ctx context.Context, id string, startMS int64) error {
-	_, err := db.w.ExecContext(ctx,
-		`UPDATE leases SET start_ms = ? WHERE id = ?`, startMS, id)
-	if err != nil {
-		return fmt.Errorf("store: set start_ms %s: %w", id, err)
-	}
-	return nil
-}
-
-// SuspendNap stamps when the lease's current sleep began, on every
-// suspend path (records A). A missing row is not an error: the lease
-// was released while its pause was in flight.
-func (db *DB) SuspendNap(ctx context.Context, id string, at time.Time) error {
-	_, err := db.w.ExecContext(ctx,
-		`UPDATE leases SET nap_since = ? WHERE id = ?`, formatTime(at), id)
-	if err != nil {
-		return fmt.Errorf("store: suspend nap %s: %w", id, err)
-	}
-	return nil
-}
-
-// ResumeNap closes the lease's current sleep: max_nap_secs becomes the
-// larger of itself and the sleep's length (now − nap_since, computed in
-// the statement so the write is atomic), and nap_since is cleared. A row
-// whose nap_since is empty (no sleep in flight) is left alone — a
-// lease released while suspended never counts that final sleep. A
-// missing row is not an error. The caller names when the sleep ended;
-// the stamp the sleep began with is the row's own.
-func (db *DB) ResumeNap(ctx context.Context, id string, endedAt time.Time) error {
-	_, err := db.w.ExecContext(ctx, `UPDATE leases SET
-		max_nap_secs = CAST(MAX(max_nap_secs,
-			CAST(strftime('%s', ?) AS INTEGER) - CAST(strftime('%s', nap_since) AS INTEGER)) AS INTEGER),
-		nap_since = ''
-	 WHERE id = ? AND nap_since != ''`, formatTime(endedAt), id)
-	if err != nil {
-		return fmt.Errorf("store: resume nap %s: %w", id, err)
-	}
-	return nil
-}
-
 // UpsertLease inserts the lease row, or updates every column of the
 // existing row when the id already exists.
 func (db *DB) UpsertLease(ctx context.Context, l LeaseRow) error {

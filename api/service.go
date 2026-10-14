@@ -3056,18 +3056,15 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 		return nil, errOwnerGone
 	}
 	s.store.leases[lease.ID] = lease
+	// The create-to-grant latency (records A), stamped before the commit's
+	// save so the row (and a release racing in) carries it.
+	lease.StartMS = time.Since(start).Milliseconds()
 	s.saveLeaseLocked(lease)
 	s.store.mu.Unlock()
 	// The lease now claims the sandbox: the orphan sweep may see it as
 	// owned even before the next List. spoond-abc.
 	s.endCreatingSandbox(lease.SandboxID)
 	s.countImageUse(image)
-	// The lease's create-to-grant latency is the value the LeaseGrantDur
-	// histogram observes (records A): stamp it on the lease (and its row,
-	// via the save above) so its history row can name how long the grant
-	// took. Best effort: a failed stamp is logged and never fails the
-	// grant.
-	s.stampLeaseStart(lease, time.Since(start).Milliseconds())
 	if len(lease.ExposePorts) > 0 {
 		s.refreshPeersAsync(ctx)
 	}
@@ -3344,19 +3341,7 @@ func (s *Service) pauseLeaseBody(ctx context.Context, l *Lease, drained bool, po
 	// A successful resume closes it and raises max_nap_secs; a lease
 	// released while suspended keeps the stamp, so that final sleep is
 	// never counted.
-	l.NapSince = l.LastActionAt
-	// The durable stamp rides the save below (the whole-row write carries
-	// nap_since); the explicit write beside it keeps the stamp on the row
-	// even when the save is dropped for a lease released mid-pause —
-	// harmless there, since that release deletes the row. Its own bounded,
-	// detached context (saveLeaseLocked's pattern): a pause whose caller
-	// is going away (the drain hook gave up) still leaves its stamp.
-	// Best effort: a failed write is logged and never fails the pause.
-	napCtx, napCancel := s.detachStoreCtx()
-	defer napCancel()
-	if err := s.db.SuspendNap(napCtx, l.ID, l.NapSince); err != nil {
-		s.storeError("suspend_nap", l.ID, err)
-	}
+	l.NapSince = l.LastActionAt // the whole-row save below carries it
 	// The structured suspension facts (#145 D6): the reason
 	// (idle_suspend|preempt|resume_failed), the pressure
 	// order's step, the pause build it wrote and when describe an
@@ -3576,28 +3561,8 @@ func (s *Service) resumeLeaseBody(ctx context.Context, l *Lease) (*Lease, error)
 	preempted := !l.PreemptedAt.IsZero()
 	l.setState("running")
 	l.Suspended = false
-	// The nap clock closes here (records A): the raise-and-clear runs
-	// under the same lock that saves, so the row never shows a cleared
-	// stamp with an uncounted sleep. A lease with no stamp (suspended
-	// before the column existed) changes nothing; a lease released while
-	// suspended keeps its stamp instead, so that final sleep is never
-	// counted.
 	napEnd := s.now()
-	if !l.NapSince.IsZero() {
-		nap := int64(napEnd.Sub(l.NapSince).Round(time.Second).Seconds())
-		if nap < 0 {
-			nap = 0
-		}
-		l.MaxNapSecs = max(l.MaxNapSecs, nap)
-		l.NapSince = time.Time{}
-		// The row write rides the same bounded context as the save below
-		// (saveLeaseLocked's pattern): a failed write is logged and never
-		// fails the resume — the in-memory lease already carries the
-		// record, and the save names it too.
-		if err := s.db.ResumeNap(ctx, l.ID, napEnd); err != nil {
-			s.storeError("resume_nap", l.ID, err)
-		}
-	}
+	s.closeNapLocked(l, napEnd)
 	// The drain paused this lease into its pause build; an owner's own
 	// resume (or any other resume) brings it back running, so the flag
 	// must not linger — otherwise it stays disabled for resume-on-next-
@@ -3783,6 +3748,7 @@ func (s *Service) restart(ctx context.Context, owner, id, mode string) (*Lease, 
 	l.DiskMB = diskMB
 	l.setState("running")
 	l.Suspended = false
+	s.closeNapLocked(l, s.now())
 	l.LastActive = time.Now()
 	s.bumpGenerationLocked(l)
 	s.saveLeaseLocked(l)
@@ -3902,6 +3868,7 @@ func (s *Service) restartCold(ctx context.Context, owner string, l *Lease) (*Lea
 	l.BuildID = b.BuildID
 	l.setState("running")
 	l.Suspended = false
+	s.closeNapLocked(l, s.now())
 	// The lease keeps its own size (#151 Z4); an unstamped one takes the
 	// build's — the number the check above was admitted with.
 	l.MemoryMB = memoryMB
@@ -4220,12 +4187,12 @@ func (s *Service) clone(ctx context.Context, owner, srcID string) (*Lease, strin
 		return nil, "", errOwnerGone
 	}
 	s.store.leases[lease.ID] = lease
+	// The clone's create-to-grant latency (records A), from before the
+	// source's checkpoint, stamped before the commit's save.
+	lease.StartMS = time.Since(cloneStart).Milliseconds()
 	s.saveLeaseLocked(lease)
 	s.store.mu.Unlock()
 	s.endCreatingSandbox(sb.ID)
-	// The clone's create-to-grant latency (records A): the clock the
-	// shared create path observes, from before the source's checkpoint.
-	s.stampLeaseStart(lease, time.Since(cloneStart).Milliseconds())
 	if len(lease.ExposePorts) > 0 {
 		s.refreshPeersAsync(ctx)
 	}
@@ -4420,14 +4387,13 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 			return rollback(errOwnerGone)
 		}
 		s.store.leases[lease.ID] = lease
+		// This child's create-to-grant latency (records A), from before
+		// the source's checkpoint, stamped before its commit's save.
+		lease.StartMS = time.Since(forkStart).Milliseconds()
 		s.saveLeaseLocked(lease)
 		s.store.mu.Unlock()
 		s.endCreatingSandbox(sb.ID)
 		s.endAppliedEgress(lease.ID)
-		// This child's create-to-grant latency (records A): the clock the
-		// shared create path observes, from before the source's
-		// checkpoint; each child is stamped as it commits.
-		s.stampLeaseStart(lease, time.Since(forkStart).Milliseconds())
 		s.emitLeaseEvent(lease.ID, owner, LeaseCreated, fmt.Sprintf("forked from %s (build %s)", srcID, b.BuildID))
 		s.journalLease(journalOpCreate, lease, journalCreateReason("", "", srcID))
 		created = append(created, lease)
@@ -5383,34 +5349,20 @@ func (s *Service) storeError(op, id string, err error) {
 	}
 }
 
-// stampLeaseStart stamps a just-granted lease's create-to-grant latency
-// (records A): the value the LeaseGrantDur histogram observes, kept on
-// the lease and written to its row so the release's history row can name
-// how long the grant took. The save in the grant path already carried it
-// only if it ran after this stamp, so the row write here is what pins it
-// for every caller. Best effort: a failed write is logged and never
-// fails the grant. Call without s.store.mu held (the store's writer
-// needs it).
-func (s *Service) stampLeaseStart(l *Lease, grantMS int64) {
-	// The lease is already published: set the field under the lock its
-	// readers (release, markLost) hold.
-	s.store.mu.Lock()
-	l.StartMS = grantMS
-	s.store.mu.Unlock()
-	ctx, cancel := s.detachStoreCtx()
-	defer cancel()
-	if err := s.db.SetLeaseStartMS(ctx, l.ID, grantMS); err != nil {
-		s.storeError("set_lease_start_ms", l.ID, err)
+// closeNapLocked ends a lease's open sleep (records A) on every path
+// that takes a suspended lease back to running — resume, warm and cold
+// restart, restore: it raises MaxNapSecs to the sleep just ended and
+// clears NapSince. A lease with no open sleep changes nothing; a lease
+// released while suspended never reaches here, so its final sleep is
+// not counted. The caller's whole-row save carries both fields. Call
+// with s.store.mu held.
+func (s *Service) closeNapLocked(l *Lease, now time.Time) {
+	if l.NapSince.IsZero() {
+		return
 	}
-}
-
-// detachStoreCtx is the bounded, detached context the store helpers
-// write through: detached, so a caller going away (an HTTP client that
-// gave up, a cancelled drain hook) still leaves its stamp behind, and
-// bounded, so a wedged writer cannot hold a helper forever
-// (saveLeaseLocked's pattern, named once for the callers outside it).
-func (s *Service) detachStoreCtx() (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), storeWriteTimeout)
+	nap := int64(now.Sub(l.NapSince).Round(time.Second).Seconds())
+	l.MaxNapSecs = max(l.MaxNapSecs, max(nap, 0))
+	l.NapSince = time.Time{}
 }
 
 // The store helpers below are called with s.store.mu held (the sandbox

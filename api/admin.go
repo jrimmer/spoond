@@ -999,12 +999,7 @@ func (s *Service) markResumeFailed(l *Lease) bool {
 	// already-open sleep is not reopened (the stamp keeps its first
 	// moment).
 	if l.NapSince.IsZero() {
-		l.NapSince = l.SuspendedAt
-		napCtx, napCancel := s.detachStoreCtx()
-		defer napCancel()
-		if err := s.db.SuspendNap(napCtx, l.ID, l.NapSince); err != nil {
-			s.storeError("suspend_nap", l.ID, err)
-		}
+		l.NapSince = l.SuspendedAt // the save below carries it
 	}
 	s.saveLeaseLocked(l)
 	if !changed {

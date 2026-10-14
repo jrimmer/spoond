@@ -331,3 +331,26 @@ func TestLeaseHistoryFinalSleepNotCounted(t *testing.T) {
 		t.Fatalf("history max_nap_secs = %d, want 60 (the completed nap; the final sleep counts nothing)", rows[0].MaxNapSecs)
 	}
 }
+
+// TestCloseNapLocked: every suspended→running path (resume, restart,
+// cold restart, restore) closes the open sleep through closeNapLocked:
+// the longest sleep wins, the stamp clears, and a lease with no open
+// sleep changes nothing.
+func TestCloseNapLocked(t *testing.T) {
+	s := &Service{}
+	at := time.Date(2026, 10, 14, 1, 0, 0, 0, time.UTC)
+	l := &Lease{NapSince: at, MaxNapSecs: 30}
+	s.closeNapLocked(l, at.Add(90*time.Second))
+	if !l.NapSince.IsZero() || l.MaxNapSecs != 90 {
+		t.Fatalf("after a 90 s sleep: nap_since %v max %d, want zero and 90", l.NapSince, l.MaxNapSecs)
+	}
+	l.NapSince = at
+	s.closeNapLocked(l, at.Add(10*time.Second))
+	if l.MaxNapSecs != 90 {
+		t.Fatalf("a shorter sleep lowered the record to %d", l.MaxNapSecs)
+	}
+	s.closeNapLocked(l, at.Add(time.Hour))
+	if l.MaxNapSecs != 90 {
+		t.Fatalf("no open sleep changed the record to %d", l.MaxNapSecs)
+	}
+}
