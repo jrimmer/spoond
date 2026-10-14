@@ -88,7 +88,7 @@ func sampleHist() map[string][]float64 {
 // drawSample renders the sample frame at w, with the sample history so
 // the sparklines are drawn too.
 func drawSample(w int) *grid.Grid {
-	g, err := drawFrame(sampleSnapshot(), sampleHist(), w, "spoond.example.com", fixedNow, dashInterval)
+	g, err := drawFrame(sampleSnapshot(), sampleHist(), w, "spoond.example.com", fixedNow, dashInterval, viewDashboard)
 	if err != nil {
 		panic(err)
 	}
@@ -131,7 +131,7 @@ func TestGoldenPlain(t *testing.T) {
 // uses, so a rune missing from Extra fails here, not in spoond top.
 func TestGoldenCheck(t *testing.T) {
 	for _, w := range []int{104, 72} {
-		if _, err := drawFrame(sampleSnapshot(), sampleHist(), w, "spoond.example.com", fixedNow, dashInterval); err != nil {
+		if _, err := drawFrame(sampleSnapshot(), sampleHist(), w, "spoond.example.com", fixedNow, dashInterval, viewDashboard); err != nil {
 			t.Fatalf("width %d: %v", w, err)
 		}
 	}
@@ -243,7 +243,7 @@ func TestDownUnitFramePassesCheck(t *testing.T) {
 	s := sampleSnapshot()
 	s.Services = append(s.Services, Service{Name: "spoond-runner", State: "failed"})
 	for _, w := range []int{DefaultWidth, minW} {
-		if _, err := drawFrame(s, nil, w, "h", fixedNow, 0); err != nil {
+		if _, err := drawFrame(s, nil, w, "h", fixedNow, 0, viewDashboard); err != nil {
 			t.Fatalf("width %d: frame with a failed unit failed Check: %v", w, err)
 		}
 		if p := Draw(s, w, fixedNow, "h").Plain(); !strings.Contains(p, "✗ failed") {
@@ -278,7 +278,7 @@ func TestServicesPanelOverflowRow(t *testing.T) {
 	if !strings.Contains(p, fmt.Sprintf("unit-%02d", maxServiceRows-1)) || strings.Contains(p, "unit-90") {
 		t.Fatalf("kept or dropped units wrong:\n%s", p)
 	}
-	if _, err := drawFrame(s, nil, DefaultWidth, "h", fixedNow, 0); err != nil {
+	if _, err := drawFrame(s, nil, DefaultWidth, "h", fixedNow, 0, viewDashboard); err != nil {
 		t.Fatalf("overflow frame failed Check: %v", err)
 	}
 }
@@ -1112,7 +1112,7 @@ func TestWriteFramePatchesChangedRows(t *testing.T) {
 
 	st := &streamState{rows: map[int]string{}}
 	w := &recWriter{}
-	if err := d.writeFrame(w, st, d.last, sampleHist()); err != nil {
+	if err := d.writeFrame(w, st, d.last, sampleHist(), viewDashboard); err != nil {
 		t.Fatal(err)
 	}
 	full := w.b.String()
@@ -1127,7 +1127,7 @@ func TestWriteFramePatchesChangedRows(t *testing.T) {
 
 	// Same frame again: nothing changed, only the signal patch flies.
 	w.b.Reset()
-	if err := d.writeFrame(w, st, d.last, sampleHist()); err != nil {
+	if err := d.writeFrame(w, st, d.last, sampleHist(), viewDashboard); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(w.b.String(), "datastar-patch-elements") {
@@ -1142,7 +1142,7 @@ func TestWriteFramePatchesChangedRows(t *testing.T) {
 	changed.Rows = append([]LeaseRow(nil), d.last.Rows...)
 	changed.Rows[0].State = "suspended"
 	w.b.Reset()
-	if err := d.writeFrame(w, st, changed, sampleHist()); err != nil {
+	if err := d.writeFrame(w, st, changed, sampleHist(), viewDashboard); err != nil {
 		t.Fatal(err)
 	}
 	body := w.b.String()
@@ -1170,10 +1170,10 @@ func TestWriteFrameStreamStatesAreIndependent(t *testing.T) {
 
 	a, b := &streamState{rows: map[int]string{}}, &streamState{rows: map[int]string{}}
 	wa, wb := &recWriter{}, &recWriter{}
-	if err := d.writeFrame(wa, a, d.last, sampleHist()); err != nil {
+	if err := d.writeFrame(wa, a, d.last, sampleHist(), viewDashboard); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.writeFrame(wb, b, d.last, sampleHist()); err != nil {
+	if err := d.writeFrame(wb, b, d.last, sampleHist(), viewDashboard); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1184,7 +1184,7 @@ func TestWriteFrameStreamStatesAreIndependent(t *testing.T) {
 	changed := d.last
 	changed.Rows = append([]LeaseRow(nil), d.last.Rows...)
 	changed.Rows[0].State = "suspended"
-	if err := d.writeFrame(wa, a, changed, sampleHist()); err != nil {
+	if err := d.writeFrame(wa, a, changed, sampleHist(), viewDashboard); err != nil {
 		t.Fatal(err)
 	}
 	if n := strings.Count(wa.b.String(), "data: selector #r"); n != 2 {
@@ -1194,7 +1194,7 @@ func TestWriteFrameStreamStatesAreIndependent(t *testing.T) {
 	// Viewer b, still on the first frame, must be patched against its
 	// own state — the row it never received is sent now.
 	wb.b.Reset()
-	if err := d.writeFrame(wb, b, changed, sampleHist()); err != nil {
+	if err := d.writeFrame(wb, b, changed, sampleHist(), viewDashboard); err != nil {
 		t.Fatal(err)
 	}
 	if n := strings.Count(wb.b.String(), "data: selector #r"); n != 2 {
@@ -1553,7 +1553,7 @@ func TestNonASCIINamesDrawn(t *testing.T) {
 	}
 	s.Rows[0].Owner = "josé"
 	s.Rows[0].Image = "流-base"
-	g, err := drawFrame(s, nil, 104, "host", fixedNow, 0)
+	g, err := drawFrame(s, nil, 104, "host", fixedNow, 0, viewDashboard)
 	if err != nil {
 		t.Fatalf("drawFrame with non-ASCII names: %v", err)
 	}
