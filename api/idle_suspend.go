@@ -214,7 +214,7 @@ func writeResumeRefusal(w http.ResponseWriter, log interface{ Printf(string, ...
 		// candidate is pinned (FS5): the same 429 box_full refusal a create
 		// is answered with, not a 500 a client would read as a permanent
 		// lease failure (spoond-k0uz R3-2). Nothing was paused or released.
-		writeErrorCode(w, http.StatusTooManyRequests, "box_full", err.Error())
+		writeBoxFull(w, err)
 	case resumeNoRoom(err):
 		writeErrorCodeAfter(w, http.StatusServiceUnavailable, capacityRetryAfterSecs, "capacity_wait", resumeNoRoomMessage(err))
 	case errors.Is(err, substrate.ErrUnavailable):

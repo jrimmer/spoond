@@ -15,6 +15,7 @@ import (
 // takeBackLease is one running lease as the selector sees it.
 type takeBackLease struct {
 	ID         string
+	Name       string    // the lease's tag, echoed in the box_full own_leases body
 	MemoryMiB  int
 	Pinned     bool      // a pinned lease is never taken
 	Busy       bool      // a running job (or in-flight operation); taken last
@@ -415,6 +416,7 @@ func (s *Service) takeBackOwners(ctx context.Context) []takeBackOwner {
 		v := &out[i]
 		v.Leases = append(v.Leases, takeBackLease{
 			ID:         l.ID,
+			Name:       l.Name,
 			MemoryMiB:  l.MemoryMB,
 			Pinned:     l.Pinned,
 			Busy:       l.busy || s.hasRunningJobLocked(l.ID),
