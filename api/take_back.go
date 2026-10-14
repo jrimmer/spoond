@@ -18,6 +18,7 @@ type takeBackLease struct {
 	MemoryMiB  int
 	Pinned     bool      // a pinned lease is never taken
 	Busy       bool      // a running job (or in-flight operation); taken last
+	Drained    bool      // an undrain still owns its resume; taken never
 	LastActive time.Time // older means less recently used
 }
 
@@ -42,6 +43,52 @@ func tbRatio(used, slice int) float64 {
 		return 0
 	}
 	return float64(used) / float64(slice)
+}
+
+// pressureVictim picks the one lease the low-memory loop pauses
+// (MEMORY_FLOOR_MIB, no requester in mind): the owner with the highest
+// used/slice ratio among owners over their slice (used > slice, slice >
+// 0 — a zero slice has no ratio and an owner at or under it is never
+// touched), and inside that owner the least recently used unpinned
+// lease, non-busy before busy (tbPickLease). A lease still marked
+// Drained (an undrain pending on it) is never picked, the way pinned
+// ones are not: the undrain owns its resume, but the rest of the box
+// stays under the floor. A single-lease owner over
+// its slice IS a candidate: that lease is the one that goes. When the
+// top owner has no unpinned lease (every lease pinned), the next owner
+// down the ranking is tried, and so on. The requester argument of
+// memVictims does not exist here (the loop is nobody's fairness case),
+// so unlike memVictims there is no after-pick ratio floor: only the
+// owners' own over-slice condition decides. ok is false when no owner
+// is over their slice or every lease of every over-slice owner is
+// pinned or Drained — a busy lease is still takeable, only ranked last.
+func pressureVictim(owners []takeBackOwner) (takeBackVictim, bool) {
+	// Rank the over-slice owners by ratio, highest first (stable, so a
+	// tie keeps the view's owner order); then walk down the ranking and
+	// take the first owner that still has a lease worth pausing.
+	type cand struct {
+		idx   int
+		ratio float64
+	}
+	var ranked []cand
+	for i := range owners {
+		o := &owners[i]
+		if o.SliceMiB <= 0 || o.UsedMiB <= o.SliceMiB {
+			continue
+		}
+		ranked = append(ranked, cand{idx: i, ratio: tbRatio(o.UsedMiB, o.SliceMiB)})
+	}
+	sort.SliceStable(ranked, func(a, b int) bool { return ranked[a].ratio > ranked[b].ratio })
+	for _, c := range ranked {
+		o := &owners[c.idx]
+		li := tbPickLease(o.Leases)
+		if li < 0 {
+			continue // every lease of the owner is pinned (or Drained)
+		}
+		l := o.Leases[li]
+		return takeBackVictim{Owner: o.Owner, LeaseID: l.ID, Ratio: c.ratio, MemoryMiB: l.MemoryMiB}, true
+	}
+	return takeBackVictim{}, false
 }
 
 // memVictims picks the leases to pause so requester can have needMiB.
@@ -128,8 +175,9 @@ func memVictims(owners []takeBackOwner, requester string, needMiB, requestMiB in
 func tbPickLeaseFor(o *takeBackOwner, reqAfter float64) int {
 	order := make([]int, 0, len(o.Leases))
 	for i := range o.Leases {
-		if o.Leases[i].Pinned {
-			// A pinned lease is never a take-back candidate (FS5), not
+		if o.Leases[i].Pinned || o.Leases[i].Drained {
+			// A pinned lease is never a take-back candidate (FS5), and
+			// neither is a Drained one (its undrain owns the resume), not
 			// even in the fall-through: sorting it last is not enough,
 			// it must be skipped outright.
 			continue
@@ -155,12 +203,12 @@ func tbPickLeaseFor(o *takeBackOwner, reqAfter float64) int {
 }
 
 // tbPickLease returns the index of the lease to take next: unpinned,
-// non-busy before busy, least recently used first (ID breaks ties). -1
-// when nothing is takeable.
+// not Drained (an undrain owns its resume), non-busy before busy, least
+// recently used first (ID breaks ties). -1 when nothing is takeable.
 func tbPickLease(ls []takeBackLease) int {
 	best := -1
 	for i, l := range ls {
-		if l.Pinned {
+		if l.Pinned || l.Drained {
 			continue
 		}
 		if best < 0 {
@@ -370,6 +418,7 @@ func (s *Service) takeBackOwners(ctx context.Context) []takeBackOwner {
 			MemoryMiB:  l.MemoryMB,
 			Pinned:     l.Pinned,
 			Busy:       l.busy || s.hasRunningJobLocked(l.ID),
+			Drained:    l.Drained,
 			LastActive: l.LastActive,
 		})
 	}

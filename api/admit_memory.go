@@ -25,6 +25,16 @@ import (
 // resuming lease is suspended, so it is never its own victim; the
 // requester's own leases are skipped by memVictims.
 //
+// Anti-cycling with the low-memory floor (MEMORY_FLOOR_MIB, round 2):
+// admission counts the floor as headroom — wherever it compares free
+// hugepages with the request, free memory must cover the request plus
+// the floor (memoryHeadroom), and take-back stops on that larger
+// shortfall. A lease the floor loop paused therefore cannot be resumed
+// straight into another floor breach: the resume first takes back from
+// a third party (or waits) until the floor is free over and above the
+// request. With the floor off (MEMORY_FLOOR_MIB=0) memoryHeadroom is
+// the identity and admission behaves exactly as before.
+//
 // preemptMu is held across a take-back pause, which writes a whole
 // snapshot (about 9 s for a 4 GiB lease on sb, up to 35 s under I/O
 // load), so every admission on the box waits for it. That wait is
@@ -75,6 +85,14 @@ func (s *Service) admitMemory(ctx context.Context, owner string, memoryMB int) (
 	}, nil
 }
 
+// memoryHeadroom is the memory an admission really competes for: its
+// own request plus the floor it must leave free (MEMORY_FLOOR_MIB, the
+// low-memory loop's standing condition), so a resume does not undo a
+// floor pause at once. 0 with the floor off.
+func (s *Service) memoryHeadroom(memoryMB int) int {
+	return memoryMB + s.cfg.MemoryFloorMiB
+}
+
 // takeBackForAdmission is the take-back loop of admitMemory. The caller
 // holds preemptMu and performs the debit.
 func (s *Service) takeBackForAdmission(ctx context.Context, owner string, memoryMB int) error {
@@ -95,7 +113,16 @@ func (s *Service) takeBackForAdmission(ctx context.Context, owner string, memory
 		s.log.Printf("preempt: node info: %v", err)
 		return nil
 	}
-	need := uint64(memoryMB)
+	// The floor is part of every need from here on (round 2): take-back
+	// frees the request AND the floor, so a floor-paused lease's memory
+	// is not resumed into a fresh breach. The head stays only in need
+	// and shortfall: takeBackOwnersFor and memVictims get the plain
+	// request (round 3), because the floor is box headroom and not the
+	// requester's usage — counting it into their views would understate
+	// the requester's own pending reservation and inflate the fairness
+	// bar other owners must stay above.
+	head := s.memoryHeadroom(memoryMB)
+	need := uint64(head)
 	owners := s.takeBackOwnersFor(ctx, owner, memoryMB)
 	takeable, pinned := takeBackPool(owners, owner)
 	// Over the overcommit cap, take-back must also free capShort MiB of
@@ -126,9 +153,12 @@ func (s *Service) takeBackForAdmission(ctx context.Context, owner string, memory
 	// every pause: earlier pauses moved usage, so the biggest borrower
 	// may have changed (and a taken-back lease must never be picked
 	// again — it is suspended and leaves the running-lease views). The
-	// need it stops on is the SHORTFALL (memoryMB minus what is free
-	// now); the requester's after-request ratio is still computed for
-	// the whole memoryMB inside memVictims. A pass in which every
+	// need it stops on is the SHORTFALL against the headroom (head
+	// minus what is free now — the request plus the floor). The head
+	// stays only in need and shortfall, because memVictims' fairness
+	// bar is the requester's ratio after their PLAIN request: the floor
+	// is headroom for the box, not the requester's usage (round 3). A
+	// pass in which every
 	// candidate is refused (a pin or an exec won each one) re-plans on
 	// fresh views and fresh free memory. Only refused rounds count
 	// against the bound: a round that pauses something made progress,
@@ -148,7 +178,7 @@ func (s *Service) takeBackForAdmission(ctx context.Context, owner string, memory
 			s.log.Printf("preempt: node info: %v", err)
 			return nil
 		}
-		shortfall := max(memoryMB-int(freeMiB), s.overcommitShortfall(memoryMB))
+		shortfall := max(head-int(freeMiB), s.overcommitShortfall(memoryMB))
 		if shortfall <= 0 {
 			return nil
 		}

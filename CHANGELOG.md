@@ -10,6 +10,31 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Added
+
+- **Low-memory floor (`MEMORY_FLOOR_MIB`, spoond-l3lq).** Every 15 s
+  the backend reads the node's free hugepages fresh and, below the
+  floor (default 2048 MiB; 0 disables the check), pauses exactly one
+  lease — the least recently used unpinned lease of the owner furthest
+  over their fair slice (a single-lease owner over their slice is a
+  candidate, an all-pinned top owner is passed over for the next one,
+  and busy leases rank last); pinned leases and owners inside their
+  slice are never touched, and the lease resumes on its holder's next
+  work call. Admission counts the floor as headroom in every
+  free-vs-request comparison, so a paused lease resumes only with the
+  floor free on top of its own memory. The overcommit cap
+  (`MEMORY_OVERCOMMIT`) keeps admission from lending memory out; the
+  floor is the running counterpart that sheds load when the free
+  pages sit low without a request needing room. The tick stands down
+  while draining and on bad node readings; a lease still marked
+  `Drained` (an undrain pending on it) is never picked, but the tick
+  itself runs on, so a lease stuck `Drained` cannot switch the floor
+  off for good. A pause survives a shutdown in flight (the pause's
+  snapshot write is never cut in half). A floor nothing can be taken
+  back for raises the new `memory_floor` event at most once per 10
+  minutes. New metrics `spoond_memory_committed_mib` (set every tick,
+  even with the floor off) and `spoond_memory_pressure_takebacks_total`.
+
 ## [3.8.1] - 2026-10-14
 
 3.8.1 stops admission from lending out memory a running VM may fault

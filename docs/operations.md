@@ -1018,6 +1018,39 @@ running and recovered leases plus admissions whose leases are not live
 yet. Warm-pool sandboxes are not counted yet (the pool is empty unless
 `POOL_SIZE` is set).
 
+**Low-memory floor** (`MEMORY_FLOOR_MIB`, spoond-l3lq). The overcommit
+cap guards admission; the floor is the running counterpart: every 15 s
+the backend reads the node's free hugepages fresh (never the admission
+cache, whose credits and debits blur a standing condition) and, below
+the floor, pauses exactly one lease — repeating on the next tick, after
+the pause's snapshot write has actually freed the pages. Default
+`2048` (MiB); `0` disables the check. The victim is the lease
+pressureVictim picks: the owner with the highest used/slice among the
+owners over their slice, and inside that owner the least recently used
+unpinned lease, non-busy before busy — so a single-lease owner over
+their slice IS a candidate, pinned leases and owners inside their
+slice are never touched, and an all-pinned top owner is passed over
+for the next owner down. A lease still marked `Drained` (an undrain
+pending on it) is never picked either, but unlike `draining` it does
+not skip the tick: the floor keeps taking back around it, since a
+lease stuck `Drained` would otherwise switch the floor off for good.
+The lease resumes on its holder's next work
+call like any take-back; admission counts the floor as headroom in
+every free-vs-request comparison, so a paused lease resumes only with
+the floor free on top of its own memory and is not paused again at
+once. The tick stands down while the node is draining and on bad node
+readings (a status other than `healthy`, or no pages reported) and —
+for the pause itself — the loop's context is abandoned: a shutdown
+cannot cut a snapshot write in half. A floor nothing can be taken back
+for (every candidate pinned, `Drained` or busy, or no owner over their
+slice) raises the
+`memory_floor` alert (a `lease.memory_floor` event, notifications
+critical, "spoond memory below floor") at most once per 10 minutes
+instead of every tick.
+`spoond_memory_committed_mib` shows the memory promised to live leases
+as the loop last measured it (every tick, with the floor off too) and
+`spoond_memory_pressure_takebacks_total` counts its pauses.
+
 **Saturation gate** (#136 stage 2): spoond admits by memory, but a box
 can be saturated with memory to spare — parallel snapshot work pins the
 disk, and CPU-heavy guests overcommit the cores. While the host's I/O
@@ -1284,7 +1317,9 @@ guest activity) is older than `PINNED_IDLE_NOTICE_DAYS` (default `7`)
 **Take-back touches only unpinned leases.** If nothing unpinned can be
 taken for a request, the request answers `429` with code `box_full` and
 an alert (`lease.box_full`, critical). Nothing is paused or released by
-a refused request.
+a refused request. The low-memory floor's own variant (a floor breach
+with no refused request) is its own kind, `lease.memory_floor`, at most
+once per 10 min (see [Low-memory floor](#low-memory-floor-memory_floor_mib-spoond-l3lq)).
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -1750,6 +1785,8 @@ marker. The substrate-specific series:
 | `spoond_box_full_total` | requests refused `box_full`: a request needed room and take-back could free none — every candidate was pinned, or the requester was itself the biggest borrower (v3.0 FS5, FS2b) |
 | `spoond_deprecated_requests_total{kind}` | requests served through a surface 4.0 removes (#139 groundwork): `sandboxes_alias` — an authenticated call on the `/api/sandboxes` spelling of the lease API (which also answers with `Deprecation`/`Link` headers) — or `llm_keyless` — an LLM-gateway request served only because `LLM_OPEN_LEGACY=1` kept a keyless owner open. Read it to decide whether removing either in 4.0 would break callers |
 | `spoond_take_backs_total` | leases paused by memory take-back so another owner's request could fit (v3.0 FS2a) |
+| `spoond_memory_committed_mib` | memory promised to live leases (running and recovered), in MiB, as the low-memory loop (`MEMORY_FLOOR_MIB`, spoond-l3lq) last measured it |
+| `spoond_memory_pressure_takebacks_total` | leases paused by the low-memory loop to hold the free hugepages at `MEMORY_FLOOR_MIB` (spoond-l3lq) |
 | `spoond_guest_dials_active` | open guest port dials (WebSocket→guest TCP bridges) |
 | `spoond_guest_dials_total{result}` | guest port dial attempts: `ok`, `refused` (the per-owner 16-dial cap) or `error` (the guest dial failed) |
 | `spoond_jobs_running` | background exec jobs currently running (2.6, #135) |

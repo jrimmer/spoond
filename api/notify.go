@@ -124,6 +124,19 @@ func (s *Service) notifyLeaseEvent(ev LeaseEvent) {
 			Body:     joinBody([]string{ev.Detail, "nothing was paused or released; unpin or release leases to make room"}),
 			At:       ev.At,
 		})
+	case LeaseMemoryFloor:
+		// The low-memory loop's floor breach with nothing left to take
+		// back (MEMORY_FLOOR_MIB): free hugepages sit under the floor and
+		// every candidate is pinned or no owner is over their slice. A
+		// person must free room (unpin or release leases); nothing was
+		// paused or released by spoond. Raised at most once per 10 min.
+		s.notifier.Enqueue(notify.Event{
+			Key:      "memory.floor",
+			Severity: notify.Critical,
+			Title:    "spoond memory below floor",
+			Body:     joinBody([]string{ev.Detail, "nothing was paused or released; unpin or release leases to make room"}),
+			At:       ev.At,
+		})
 	case LeasePausedExpiring:
 		// A paused lease is 24 h from release by the one clock (FS5).
 		s.notifier.Enqueue(notify.Event{
