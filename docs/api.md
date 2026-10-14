@@ -356,8 +356,12 @@ HTTP/1.1 429
 
 A row carries the lease `id`, its `name` tag (omitted when untagged),
 `memory_mb`, `last_active`, and whether it is `pinned` or `busy` with an
-in-flight operation or a running job — the same view take-back itself
-picks from, so "pause the first row" is always safe.
+in-flight operation or a running job. The rows are plain LRU, not the
+take-back selector's own ranking: the first row can be `pinned` or
+`busy`. Pausing a pinned lease is still safe (its hugepages are freed;
+but it will not resume while room is short), and pausing a `busy` one
+gets `409` `lease_busy` back rather than a pause, so read the flags
+before choosing.
 
 The create fields `burst` and `priority` and the lease field `class` no
 longer exist (a create that sends them has them ignored). The lease

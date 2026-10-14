@@ -42,9 +42,6 @@ func ownLeasesOf(t *testing.T, body map[string]any) []map[string]any {
 	return out
 }
 
-// asMemBoxFull aliases errors.As for the refusal type.
-func asMemBoxFull(err error, bf **memBoxFullError) bool { return errors.As(err, bf) }
-
 // TestBoxFullOwnLeasesHTTP: a create refused with the biggest-borrower
 // box_full carries own_leases over HTTP — the requester's own running
 // leases, LRU first, with pinned flagged and the name echoed — and never
@@ -189,7 +186,7 @@ func TestBoxFullOwnLeasesNoOtherOwners(t *testing.T) {
 		t.Fatal("refusal = nil, want box_full")
 	}
 	var bf *memBoxFullError
-	if !asMemBoxFull(err, &bf) {
+	if !errors.As(err, &bf) {
 		t.Fatalf("refusal %v is not a *memBoxFullError", err)
 	}
 	got := make([]string, 0, len(bf.Leases))
@@ -282,11 +279,11 @@ func TestBoxFullPinnedNoOwnLeasesKey(t *testing.T) {
 // — the shapes behind the pinned/disk box_full bodies.
 func TestBoxFullLeaselessErrorHasNoKey(t *testing.T) {
 	var bf *memBoxFullError
-	if asMemBoxFull(errBoxFull, &bf) {
+	if errors.As(errBoxFull, &bf) {
 		t.Fatal("bare errBoxFull must not decode as a *memBoxFullError")
 	}
 	wrapped := &memBoxFullError{Owner: "req", UsedMiB: 4096, SliceMiB: 2048, RequestMiB: 1024}
-	if !asMemBoxFull(fmt.Errorf("wrapped: %w", wrapped), &bf) || len(bf.Leases) != 0 {
+	if !errors.As(fmt.Errorf("wrapped: %w", wrapped), &bf) || len(bf.Leases) != 0 {
 		t.Fatalf("wrapped refusal not decoded or leases non-empty: %v", bf)
 	}
 }

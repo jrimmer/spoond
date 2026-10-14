@@ -1378,15 +1378,11 @@ func (s *Server) writeCreateRefusal(w http.ResponseWriter, image, snapshot strin
 		// The requester is itself the biggest borrower (FS2b): 429
 		// box_full whose body lists its own running leases (own_leases,
 		// LRU first), so it can see what holds its memory and pause one
-		// itself. Nothing was paused or released.
-		if retryAfter > 0 {
-			w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
-		}
-		body := map[string]any{"error": err.Error(), "code": "box_full", "own_leases": boxErr.Leases}
-		if waited > 0 {
-			body["waited_ms"] = waited.Milliseconds()
-		}
-		writeJSON(w, http.StatusTooManyRequests, body)
+		// itself. Nothing was paused or released. writeBoxFull429 does
+		// not carry waited_ms, so the wait stamp goes on beside it
+		// (a memory refusal sets no Retry-After).
+		writeBoxFull429(w, err)
+		appendWaited(w, waited)
 		return
 	case isBoxFull(err):
 		// Take-back could not make room: every candidate was pinned
@@ -1877,7 +1873,7 @@ func (s *Server) handleSuspend(w http.ResponseWriter, r *http.Request) {
 				// The snapshot write could not fit and take-back had
 				// nothing to reclaim (FS3b): the same 429 box_full refusal
 				// a create is answered with. The lease stays as it was.
-				writeBoxFull(w, err)
+				writeBoxFull429(w, err)
 				return
 			}
 			if errors.Is(err, substrate.ErrCapacity) {
@@ -1937,7 +1933,7 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 			// of pinned leases refuses it with the create body's 429
 			// box_full, not a 500 (spoond-k0uz R3-2). The lease stays as it
 			// was.
-			writeBoxFull(w, err)
+			writeBoxFull429(w, err)
 		case errors.Is(err, substrate.ErrCapacity):
 			// The restart's re-admission or sandbox start found no room:
 			// a wait like every other path, not a failed restart.
@@ -2701,7 +2697,7 @@ func (s *Server) handleClone(w http.ResponseWriter, r *http.Request) {
 			// The clone's own class admission is box_full when every
 			// take-back candidate is pinned (FS5): 429 like create, not a
 			// 500 (spoond-k0uz R3-2).
-			writeBoxFull(w, err)
+			writeBoxFull429(w, err)
 		case errors.Is(err, substrate.ErrCapacity):
 			writeErrorCodeAfter(w, http.StatusServiceUnavailable, capacityRetryAfterSecs, "capacity_wait", "capacity: "+err.Error())
 		case errors.Is(err, errOwnerGone):
@@ -2770,7 +2766,7 @@ func (s *Server) handleFork(w http.ResponseWriter, r *http.Request) {
 			// A fork child's class admission is box_full when every
 			// take-back candidate is pinned (FS5): 429 like create, not a
 			// 500 (spoond-k0uz R3-2).
-			writeBoxFull(w, err)
+			writeBoxFull429(w, err)
 		case errors.Is(err, substrate.ErrCapacity):
 			writeErrorCodeAfter(w, http.StatusServiceUnavailable, capacityRetryAfterSecs, "capacity_wait", "capacity: "+err.Error())
 		case errors.Is(err, errOwnerGone):
@@ -2936,20 +2932,32 @@ func writeErrorCode(w http.ResponseWriter, status int, code, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg, "code": code})
 }
 
-// writeBoxFull writes the 429 box_full refusal every re-admission path
-// answers with. When the refusal is the memory one for the biggest
-// borrower (memBoxFullError) the body also carries own_leases: the
-// requester's own running leases, least recently used first, so the
-// caller can see what holds its memory and pause one itself (nothing new
-// is paused). A disk/pinned box_full (boxFullError, errBoxFull) has no
-// leases and answers without the key.
-func writeBoxFull(w http.ResponseWriter, err error) {
+// writeBoxFull429 writes the 429 box_full refusal every re-admission
+// path answers with, including the create path: writeCreateRefusal
+// calls it first and stamps waited_ms beside it, so the memory refusal
+// body is written from one place. When the refusal is the memory one
+// for the biggest borrower (memBoxFullError) the body also carries
+// own_leases: the requester's own running leases, least recently used
+// first, so the caller can see what holds its memory and pause one
+// itself (nothing new is paused). A disk/pinned box_full (boxFullError,
+// errBoxFull) has no leases and answers without the key.
+func writeBoxFull429(w http.ResponseWriter, err error) {
 	body := map[string]any{"error": err.Error(), "code": "box_full"}
 	var bf *memBoxFullError
 	if errors.As(err, &bf) && len(bf.Leases) > 0 {
 		body["own_leases"] = bf.Leases
 	}
 	writeJSON(w, http.StatusTooManyRequests, body)
+}
+
+// appendWaited stamps waited_ms onto an already written JSON body, for
+// a create that waited for admission before it was refused: a client
+// reading waited_ms sees how long the wait itself took.
+func appendWaited(w http.ResponseWriter, waited time.Duration) {
+	if waited <= 0 {
+		return
+	}
+	_, _ = w.Write([]byte(fmt.Sprintf(",\"waited_ms\":%d}", waited.Milliseconds())))
 }
 
 // writeErrorAfter is writeError with a Retry-After header (seconds):
