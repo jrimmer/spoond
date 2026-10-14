@@ -518,6 +518,7 @@ func drawFrame(s Snapshot, hist map[string][]float64, w int, host string, now ti
 		histFn:   func(k string) []float64 { return hist[k] },
 		histN:    len(hist["running"]),
 		interval: interval,
+		exclude:  recordsExcludeNames(),
 	}
 	g := l.assemble()
 	if err := g.Check(glyphs()); err != nil {
@@ -548,6 +549,10 @@ type layout struct {
 	// histN is the history's length in points; 0 (no history yet) leaves
 	// the window out of the throughput panel's title.
 	histN int
+	// exclude is the records panel's excluded owner names
+	// (DASH_RECORDS_EXCLUDE); the footer's "test leases not counted"
+	// clause drops when it is empty.
+	exclude []string
 }
 
 // assemble draws the header, the notifications panel and every panel
@@ -2163,7 +2168,7 @@ func (l *layout) drawRecords(g *grid.Grid, x, y, w, h int) int {
 	// list is not empty, " · test leases not counted". Right-aligned,
 	// one column clear of the border.
 	foot := "since " + recDay(rec.FirstCreated)
-	if len(recordsExclude()) > 0 {
+	if len(l.recordsExclude()) > 0 {
 		foot += " · test leases not counted"
 	}
 	g.Right(x+w-3, top+h-2, []grid.Seg{{Text: foot, Style: "dim"}})
@@ -2457,3 +2462,7 @@ func clamp(v, lo, hi int) int {
 	}
 	return v
 }
+
+// recordsExclude is the layout's excluded owner names for the records
+// footer's "test leases not counted" clause.
+func (l *layout) recordsExclude() []string { return l.exclude }

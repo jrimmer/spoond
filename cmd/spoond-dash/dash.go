@@ -43,6 +43,12 @@
 //	DASH_DISK_DEVICE     block device shown for I/O (default auto-detected
 //	                     from the storage path's mount)
 //	DASH_SERVICES        systemd units to show (comma-separated)
+//	DASH_RECORDS_EXCLUDE owner names kept out of the records panel's
+//	                     all-time stats (comma list; default
+//	                     conformance,test-consumer — the conformance
+//	                     suite's and the load generator's leases would
+//	                     otherwise own every record). Set it empty to
+//	                     count every owner.
 //	DASH_INTERVAL        refresh interval (default 2s)
 //	DASH_HISTORY         sparkline points kept (default 150, i.e. 5 min at 2s; max 200)
 //	DASH_WIDTH           frame width in cells (default 104, 72–104; the

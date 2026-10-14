@@ -26,11 +26,12 @@ const DefaultRecordsExclude = "conformance,test-consumer"
 // keeps the 2 s refresh cheap.
 const recordsTTL = time.Minute
 
-// recordsExclude reads the excluded owner names (DASH_RECORDS_EXCLUDE,
-// a comma list of names): unset or empty means the default test owners.
-func recordsExclude() []string {
-	v := os.Getenv("DASH_RECORDS_EXCLUDE")
-	if v == "" {
+// recordsExcludeNames reads the excluded owner names
+// (DASH_RECORDS_EXCLUDE, a comma list of names): unset means the
+// default test owners; set but empty means count every owner.
+func recordsExcludeNames() []string {
+	v, ok := os.LookupEnv("DASH_RECORDS_EXCLUDE")
+	if !ok {
 		v = DefaultRecordsExclude
 	}
 	var out []string
@@ -326,7 +327,7 @@ func (c *collector) collectRecords(ctx context.Context, now time.Time) (rec reco
 		return c.rec, c.recAvail, false
 	}
 	exclude := make(map[string]bool)
-	for _, name := range recordsExclude() {
+	for _, name := range recordsExcludeNames() {
 		exclude[name] = true
 	}
 	names := c.userNames()
