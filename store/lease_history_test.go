@@ -104,7 +104,8 @@ func TestLeaseStartMSStamp(t *testing.T) {
 }
 
 // TestLeaseNapStamps: SuspendNap stamps nap_since; ResumeNap raises
-// max_nap_secs to the caller-computed value and clears nap_since; a
+// max_nap_secs to the sleep's length when that is the longer so far and
+// clears nap_since; a resume with no sleep in flight changes nothing; a
 // lease released while suspended keeps nap_since (nothing cleared it).
 func TestLeaseNapStamps(t *testing.T) {
 	db, _ := openTestDB(t)
@@ -127,7 +128,7 @@ func TestLeaseNapStamps(t *testing.T) {
 	if !row.NapSince.Equal(at) || row.MaxNapSecs != 0 {
 		t.Fatalf("after suspend = nap_since %v max_nap_secs %d, want %v and 0", row.NapSince, row.MaxNapSecs, at)
 	}
-	if err := db.ResumeNap(ctx, "l-nap", 90); err != nil {
+	if err := db.ResumeNap(ctx, "l-nap", at.Add(90*time.Second)); err != nil {
 		t.Fatalf("resume nap: %v", err)
 	}
 	row, err = db.GetLease(ctx, "l-nap")
@@ -137,6 +138,18 @@ func TestLeaseNapStamps(t *testing.T) {
 	if !row.NapSince.IsZero() || row.MaxNapSecs != 90 {
 		t.Fatalf("after resume = nap_since %v max_nap_secs %d, want zero and 90", row.NapSince, row.MaxNapSecs)
 	}
+	// A second resume with no sleep in flight changes nothing: the stamp
+	// stays cleared and the record stands.
+	if err := db.ResumeNap(ctx, "l-nap", at.Add(time.Hour)); err != nil {
+		t.Fatalf("resume with no sleep in flight: %v", err)
+	}
+	again, err := db.GetLease(ctx, "l-nap")
+	if err != nil {
+		t.Fatalf("get after empty resume: %v", err)
+	}
+	if !again.NapSince.IsZero() || again.MaxNapSecs != 90 {
+		t.Fatalf("after empty resume = nap_since %v max_nap_secs %d, want zero and 90", again.NapSince, again.MaxNapSecs)
+	}
 	// UpsertLease writes all three columns back (the api service saves
 	// the whole row through it).
 	row.NapSince = at.Add(time.Minute)
@@ -145,7 +158,7 @@ func TestLeaseNapStamps(t *testing.T) {
 	if err := db.UpsertLease(ctx, row); err != nil {
 		t.Fatalf("upsert with nap stamps: %v", err)
 	}
-	again, err := db.GetLease(ctx, "l-nap")
+	again, err = db.GetLease(ctx, "l-nap")
 	if err != nil {
 		t.Fatalf("get after upsert: %v", err)
 	}
