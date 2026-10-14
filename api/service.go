@@ -2918,13 +2918,23 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 	//
 	// ok guards the admission debit: until it is set true, the deferred
 	// undo gives the memory back (a failed grant never took the
-	// hugepages). The warm-pool path below calls it too, because a
-	// pooled sandbox already holds its memory and so needs no new debit.
+	// hugepages).
+	//
+	// A create a stocked pool sandbox can serve (no snapshot, no
+	// requested size — the shape the pool loop below pops for) adds no
+	// committed memory: it takes over a VM whose hugepages are already
+	// inside runningMemoryMiB (spoond-41tk). Charging it up front would
+	// count the same memory twice — take back a lease for it, and
+	// refuse the grant at the overcommit cap exactly on the full box
+	// the pool exists to serve. The admission therefore runs AFTER the
+	// pool loop, and only when it pooled nothing: the usual pool hit is
+	// admitted with nothing to debit and no take-back, while an empty
+	// pool (or one whose every member failed validation) passes the
+	// ordinary admission for the real request. undo wraps the real
+	// undo so the deferred call can always run.
 	ok := false
-	undo, err := s.admitMemory(ctx, owner, memoryMB)
-	if err != nil {
-		return nil, err
-	}
+	undoFn := func(bool) {}
+	undo := func(failed bool) { undoFn(failed) }
 	defer func() { undo(!ok) }()
 	// Hold the lease's egress memo in flight from before any sandbox is
 	// created until it is registered in the store (or the grant fails and
@@ -2951,19 +2961,14 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 				id = pool[0]
 				s.store.pool[image] = pool[1:]
 				s.removePoolLocked(id)
-				// The pool VM's hugepages were part of runningMemoryMiB
-				// (spoond-41tk), so the admission above must not keep a
-				// debit for them: credit the memory back now — with
-				// nodeInfoMu taken after dropping the store lock, the
-				// two locks never nest — while the pool entry is gone
-				// from runningMemoryMiB and the lease's own stamp is not
-				// live yet. The pooled case's `undo(true)` below then
-				// only drops the in-flight-admission counter. undo is
-				// once-safe, so the deferred call on a later failure is
-				// a no-op.
-				s.store.mu.Unlock()
-				s.creditNodeInfoLockedWrapper(memoryMB)
-				s.store.mu.Lock()
+				// The pop takes the VM's MiB out of runningMemoryMiB
+				// while the lease's own charge is not live yet — the
+				// committed total dips for the loop's length, and the
+				// cache reading is left alone (no admission has run
+				// yet: the one below never sees this pop as a promise
+				// to double). nodeInfoMu is never taken inside the
+				// store lock.
+				//
 				// The pool entry is gone before the lease row names the
 				// sandbox: hold it in flight, in the same critical
 				// section, so the orphan sweep never sees it unclaimed
@@ -3027,17 +3032,22 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 			break
 		}
 	}
-	// A pooled sandbox was created (and its hugepages debited) by an
-	// earlier warm-pool grant, so this grant must not hold a second
-	// debit for the same memory: the pop inside the pool loop above
-	// already credited that debit back under nodeInfoMu (spoond-41tk:
-	// by then the pool entry is gone from runningMemoryMiB and the
-	// lease's own stamp is not live yet, so something must carry the
-	// memory across that seam). undo here only drops the in-flight
-	// counter. undo is once-safe, so a later failure's deferred call is
-	// a no-op.
-	if lease.pooled {
-		undo(true)
+	// Nothing pooled — an empty pool, or every member failed
+	// validation — falls through to the ordinary admission for the
+	// request the cold create below really makes: take-back included,
+	// and the overcommit cap with it (spoond-41tk: the pops above
+	// already took their VMs' MiB out of runningMemoryMiB, so the cap
+	// charges this request once, as a new promise, not again for memory
+	// a pool VM held). A refusal answers before any sandbox exists.
+	// undoFn takes the admission's undo, so the deferred call credits a
+	// failure's debit and drops the in-flight counter when one ran; a
+	// pooled grant leaves it a no-op (nothing was debited).
+	if lease.SandboxID == "" {
+		u, aerr := s.admitMemory(ctx, owner, memoryMB)
+		if aerr != nil {
+			return nil, aerr
+		}
+		undoFn = u
 	}
 
 	if lease.SandboxID == "" {
@@ -5707,18 +5717,6 @@ func (s *Service) addPoolLocked(id, image string, memMiB int) {
 // the lease's own charge takes over) or gone from the substrate, and
 // either way the cap must not count it twice or count a ghost. Call
 // with s.store.mu held.
-// creditNodeInfoLockedWrapper takes nodeInfoMu and calls
-// creditNodeInfoLocked on it. It exists only for the pooled grant's
-// pop path inside grantLease, which holds the store lock and cannot
-// call creditNodeInfo (a plain nodeInfoMu take) directly without
-// dropping the store lock first; the wrapper keeps that odd shape out
-// of preempt.go. No-op when nothing is cached.
-func (s *Service) creditNodeInfoLockedWrapper(memoryMB int) {
-	s.nodeInfoMu.Lock()
-	s.creditNodeInfoLocked(memoryMB)
-	s.nodeInfoMu.Unlock()
-}
-
 func (s *Service) removePoolLocked(id string) {
 	delete(s.store.poolMiB, id)
 	ctx, cancel := context.WithTimeout(context.Background(), storeWriteTimeout)
