@@ -80,7 +80,7 @@ Everything that refuses a request in 3.0:
 | `410` | `lease_lost` | the substrate lost the lease's sandbox |
 | `429` | `box_full` | a request needed room and take-back can free none: every candidate is pinned, or the requester is itself the biggest borrower; nothing was paused or released. The biggest-borrower body adds `own_leases` (the requester's own running leases, LRU first) |
 | `503` | | `draining`: a planned restart is draining the node; `Retry-After` says when to come back |
-| `503` | `capacity_wait` | no room yet (hugepages, snapshot disk, orchestrator capacity) and take-back cannot close the gap now; carries `Retry-After: 30`; a wait, never a loss. The same shape on every path (create, resume, restart, clone, fork, restore, checkpoint, named save, files); a create can wait it out with `wait` |
+| `503` | `capacity_wait` | no room yet (hugepages, snapshot disk, orchestrator capacity, or the host itself out of memory while it loaded a sandbox's snapshot — the ENOMEM create/resume answers with the same shape and is counted like any other capacity refusal) and take-back cannot close the gap now; carries `Retry-After: 30`; a wait, never a loss. The same shape on every path (create, resume, restart, clone, fork, restore, checkpoint, named save, files); a create can wait it out with `wait` |
 | `503` | `substrate_unavailable` | the orchestrator could not confirm the sandbox's state; carries `Retry-After: 5` |
 
 Smaller limits keep their own `409`/`429` answers (`snapshot_limit`,
