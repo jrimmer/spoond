@@ -573,8 +573,12 @@ func resumeRetryable(err error) bool {
 
 // undrainDeferred reports whether a failed undrain resume must leave
 // the lease Drained for a later attempt rather than marking it lost. An
-// admission refusal, a capacity answer, an orchestrator-unavailable
-// error and a cancelled or bounded context are transient conditions
+// admission refusal, a capacity answer (subCreate wraps the host's
+// ENOMEM text in substrate.ErrCapacity, spoond-6ayi; a raw text match
+// here would also keep a guest-side OOM drained, and that is
+// permanent), an
+// orchestrator-unavailable error and a cancelled or bounded context are
+// transient conditions
 // the next undrain (or the self-heal loop) can retry; a sandbox that
 // will not come back is not covered and still becomes lost.
 func (s *Service) undrainDeferred(err error) bool {
@@ -582,7 +586,6 @@ func (s *Service) undrainDeferred(err error) bool {
 		undrainNotReady(err) ||
 		errors.Is(err, errLeaseBusy) ||
 		errors.Is(err, substrate.ErrCapacity) ||
-		isHostMemoryExhausted(err) ||
 		errors.Is(err, context.Canceled) ||
 		errors.Is(err, context.DeadlineExceeded) ||
 		errors.Is(err, errDraining)

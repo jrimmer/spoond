@@ -1608,7 +1608,7 @@ func (s *Service) subCreate(ctx context.Context, req substrate.CreateRequest) (s
 	sb, err := s.sub.Create(ctx, req)
 	if isHostMemoryExhausted(err) {
 		s.countHostENOMEM(err)
-		return substrate.Sandbox{}, fmt.Errorf("%w: %s", substrate.ErrCapacity, err.Error())
+		return substrate.Sandbox{}, fmt.Errorf("%w: %s", substrate.ErrCapacity, err)
 	}
 	return sb, err
 }
@@ -2954,6 +2954,14 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 	undoFn := func(bool) {}
 	undo := func(failed bool) { undoFn(failed) }
 	defer func() { undo(!ok) }()
+	// pooledInflight sums the MiB of every pool VM this grant popped
+	// (spoond-fi5v): each pop is added to inflightAdmitMiB right after it
+	// leaves the pool, and undoFn subtracts the whole lot exactly once when
+	// the grant settles — the lease it committed counts the surviving VM
+	// from then on; a discarded one counts nothing. No debit or credit of
+	// the node cache accompanies it: the free pages never changed from the
+	// moment the VM was stocked (no admission ran for the takeover).
+	pooledInflight := 0
 	// Hold the lease's egress memo in flight from before any sandbox is
 	// created until it is registered in the store (or the grant fails and
 	// cleans up). createSandbox records the memo before the lease row
@@ -2972,14 +2980,26 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 	// already reserved by reserveQuota above) BEFORE any pool sandbox is
 	// popped: it answers box_full with own_leases and the alert, and
 	// nothing is taken back, nothing debited, the pool entry left stocked
-	// for a request it may still serve. Run only where the pop below
-	// would really serve (poolCanServe): any other shape falls through to
-	// the ordinary admission, which refuses there. A pool that empties
-	// between this check and the pop falls through to the same admission.
+	// for a request it may still serve.
+	//
+	// The gate fires only where a COLD create would be refused too
+	// (spoond-fi5v): the pooled grant commits no new hugepages, and the
+	// cached free reading (already net of the debits inside its window)
+	// is what the cold admission would have to cover on this very box.
+	// A box with room in the cache serves every pop through the pool —
+	// the pool is the point — and any other shape falls through to the
+	// ordinary admission, which refuses there.
 	if s.poolCanServe(image, sized, snap) {
-		if bf := biggestBorrowerRefusal(s.takeBackOwnersFor(ctx, owner, memoryMB), owner, memoryMB); bf != nil {
-			s.boxFullAlert(owner, memoryMB, "the requester is the biggest borrower")
-			return nil, bf
+		// A pooled grant is refused only where a cold create would be
+		// refused too: the cached free pages must not cover the request
+		// plus the floor (spoond-fi5v). A box with room serves every pop
+		// the pool can stock, whatever the fairness view says.
+		free, ferr := s.cachedFreeHugepageMiB(ctx)
+		if ferr == nil && free < uint64(memoryMB+s.floorFor(ctx)) {
+			if bf := biggestBorrowerRefusal(s.takeBackOwnersFor(ctx, owner, memoryMB), owner, memoryMB); bf != nil {
+				s.boxFullAlert(owner, memoryMB, "the requester is the biggest borrower")
+				return nil, bf
+			}
 		}
 	}
 	// Pool: pop the oldest entry for the image. The pool serves
@@ -2995,8 +3015,10 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 			s.store.mu.Lock()
 			pool := s.store.pool[image]
 			var id string
+			var memOf int
 			if len(pool) > 0 {
 				id = pool[0]
+				memOf = s.store.poolMiB[id]
 				s.store.pool[image] = pool[1:]
 				s.removePoolLocked(id)
 				// The pop takes the VM's MiB out of runningMemoryMiB
@@ -3005,7 +3027,8 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 				// cache reading is left alone (no admission has run
 				// yet: the one below never sees this pop as a promise
 				// to double). nodeInfoMu is never taken inside the
-				// store lock.
+				// store lock (the read above precedes removePoolLocked's
+				// delete).
 				//
 				// The pool entry is gone before the lease row names the
 				// sandbox: hold it in flight, in the same critical
@@ -3016,6 +3039,24 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 			s.store.mu.Unlock()
 			if id == "" {
 				break
+			}
+			// The popped VM is invisible to the overcommit cap until the
+			// lease row is committed: the pop took its MiB out of
+			// runningMemoryMiB, no admission has debited anything, and the
+			// cache reads the same box as when the VM was stocked. Raise it
+			// into the in-flight figure under one nodeInfoMu section (the
+			// same counter the admissions raise), no debit beside it
+			// (spoond-fi5v); undoFn above subtracts every pop of this
+			// grant exactly once when the grant returns — success or
+			// failure, nothing is ever credited back.
+			s.nodeInfoMu.Lock()
+			s.inflightAdmitMiB += memOf
+			s.nodeInfoMu.Unlock()
+			pooledInflight += memOf
+			undoFn = func(bool) {
+				s.nodeInfoMu.Lock()
+				s.inflightAdmitMiB = max(s.inflightAdmitMiB-pooledInflight, 0)
+				s.nodeInfoMu.Unlock()
 			}
 			row, err := s.db.GetSandbox(ctx, id)
 			if errors.Is(err, store.ErrNotFound) {
@@ -3077,15 +3118,33 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 	// already took their VMs' MiB out of runningMemoryMiB, so the cap
 	// charges this request once, as a new promise, not again for memory
 	// a pool VM held). A refusal answers before any sandbox exists.
-	// undoFn takes the admission's undo, so the deferred call credits a
-	// failure's debit and drops the in-flight counter when one ran; a
-	// pooled grant leaves it a no-op (nothing was debited).
+	// undoFn chains the pooled pops' in-flight hold (above) with the
+	// admission's undo: the deferred call credits a failure's debit,
+	// drops the in-flight counter when the admission ran, and always
+	// subtracts whatever pops were made; a pooled grant leaves the
+	// admission's own undo out (nothing was debited).
 	if lease.SandboxID == "" {
+		// The pool shape passed the saturation gate at the top (a pop
+		// boots nothing), but a fall-through here cold-creates: gate it
+		// like any other new boot (spoond-fi5v). The shape is already
+		// known — poolCanServe passed — so a pool entry stocked between
+		// then and now does not re-open the gate.
+		if err := s.checkSaturation(req.retry); err != nil {
+			return nil, err
+		}
 		u, aerr := s.admitMemory(ctx, owner, memoryMB)
 		if aerr != nil {
 			return nil, aerr
 		}
-		undoFn = u
+		if pooledInflight > 0 {
+			poolUndo := undoFn
+			undoFn = func(failed bool) {
+				u(failed)
+				poolUndo(failed)
+			}
+		} else {
+			undoFn = u
+		}
 	}
 
 	if lease.SandboxID == "" {
@@ -5356,20 +5415,49 @@ func (s *Service) warmPool(ctx context.Context, img store.ImageRow) {
 		// and holds no VM, while it waits), but a stock parks a VM that
 		// holds its hugepages for good — letting it sink the box under
 		// 2 GiB free must not wait for the loop's tick.
-		if short := s.overcommitShortfall(memMiB); short > 0 {
+		//
+		// The cap check and the free check share one nodeInfoMu section
+		// with the in-flight hold below (spoond-fi5v): from the moment
+		// the fill decides to stock, the VM's MiB counts as a promise —
+		// a cold admission racing this create sees it in the cap — and
+		// no admission can slip between the reading and the hold. No
+		// debit of the node cache rides along: the box's free pages do
+		// not change while the VM boots (the fill never debits). The
+		// hold is released once the pool entry (and its poolMiB ledger)
+		// is in place — runningMemoryMiB counts the stock from then on —
+		// or at once on any failure or return, so exactly one view of
+		// the promise exists at any moment.
+		running := s.runningMemoryMiB()
+		s.nodeInfoMu.Lock()
+		if short := s.overcommitShortfallLocked(running, memMiB); short > 0 {
+			s.nodeInfoMu.Unlock()
 			s.log.Printf("warmPool: %s: stopping at %d of %d sandboxes: one more %d MiB VM would sit %d MiB over the overcommit cap (MEMORY_OVERCOMMIT)", img.Name, i-cur, s.cfg.PoolSize-(i-cur), memMiB, short)
 			return
 		}
-		if free, err := s.cachedFreeHugepageMiB(ctx); err == nil && free < uint64(memMiB+s.poolFloorMiB()) {
+		free, ferr := s.freeHugepageMiBLocked(ctx)
+		if ferr == nil && free < uint64(memMiB+s.poolFloorMiB()) {
+			s.nodeInfoMu.Unlock()
 			s.log.Printf("warmPool: %s: stopping at %d of %d sandboxes: %d MiB free, want %d (memory + floor)", img.Name, i-cur, s.cfg.PoolSize-(i-cur), free, memMiB+s.poolFloorMiB())
 			return
 		}
+		s.inflightAdmitMiB += memMiB
+		s.nodeInfoMu.Unlock()
+		// releaseHold drops the promise exactly once, wherever the fill
+		// stops for this VM: stocked (runningMemoryMiB counts it now) or
+		// failed (nothing to count).
+		releaseHold := func() {
+			s.nodeInfoMu.Lock()
+			s.inflightAdmitMiB = max(s.inflightAdmitMiB-memMiB, 0)
+			s.nodeInfoMu.Unlock()
+		}
 		sb, err := s.createSandbox(ctx, img, b, false, "", placeholder)
 		if err != nil {
+			releaseHold()
 			s.log.Printf("warmPool: create %s: %v", img.Name, err)
 			return
 		}
 		if err := s.probeSandbox(ctx, sb.ID); err != nil {
+			releaseHold()
 			s.log.Printf("warmPool: %s sandbox %s failed the integrity probe, recycling: %v", img.Name, sb.ID, err)
 			_ = s.sub.Delete(ctx, sb.ID)
 			s.deleteSandboxRow(sb.ID)
@@ -5381,6 +5469,7 @@ func (s *Service) warmPool(ctx context.Context, img store.ImageRow) {
 		s.addPoolLocked(sb.ID, img.Name, memMiB)
 		s.store.mu.Unlock()
 		s.endCreatingSandbox(sb.ID)
+		releaseHold()
 	}
 }
 
