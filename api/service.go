@@ -2941,7 +2941,7 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 	// committed memory: it takes over a VM whose hugepages are already
 	// inside runningMemoryMiB (spoond-41tk). Charging it up front would
 	// count the same memory twice — take back a lease for it, and
-	// refused the grant at the overcommit cap exactly on the full box
+	// refuse the grant at the overcommit cap exactly on the full box
 	// the pool exists to serve. The admission therefore runs AFTER the
 	// pool loop, and only when it pooled nothing: the usual pool hit is
 	// admitted with nothing to debit and no take-back — its fairness is
