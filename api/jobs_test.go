@@ -104,14 +104,14 @@ const jobWatchTimeout = 10 * time.Second
 // yet; polling (never a fixed sleep) removes that race.
 func waitForSecretGone(t *testing.T, sub *testSub, sandboxID, name string) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(jobWatchTimeout)
 	for {
 		if _, err := sub.ReadFile(context.Background(), sandboxID, secretPath(name), 1024); errors.Is(err, substrate.ErrNotFound) {
 			return
 		}
 		if time.Now().After(deadline) {
 			_, err := sub.ReadFile(context.Background(), sandboxID, secretPath(name), 1024)
-			t.Fatalf("secret %s still present after 10s: %v", name, err)
+			t.Fatalf("secret %s still present after %s: %v", name, jobWatchTimeout, err)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
