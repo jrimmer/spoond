@@ -44,6 +44,18 @@ summarised from README "Status".
   This also removes a double credit the pooled pop could fire (the
   debit refunded at the pop and again through the undo), which read
   the cache up to 2 GiB freer than the box was for up to 15 s.
+- **The biggest-borrower `box_full` refusal honours a stocked pool
+  (spoond-18xe).** The pooled grant's admission (above) runs only when
+  nothing was pooled, so it skipped the biggest-borrower refusal and an
+  owner over its fair slice could take a stocked pool VM, the request
+  its cold create would have been refused. The refusal is now judged
+  before the pool pop on the same take-back view the ordinary admission
+  builds: the biggest borrower (over its slice after the request, with
+  no other owner further over) is refused `429 box_full` with
+  `own_leases` and nothing taken back, debited or popped — the pool
+  entry stays stocked — while an owner inside its slice is served from
+  the pool as before. No effect at `POOL_SIZE=0` (production): the
+  pooled path is the only one that changed.
 
 - **Host ENOMEM on a create or resume answers `503 capacity_wait`, not
   `500` (spoond-6ayi).** On 2026-10-14 a create whose snapshot load

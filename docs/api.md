@@ -330,7 +330,11 @@ Two refusals tell the caller what is in the way:
 
 - `429` `box_full` — only pinned leases stand in the way (nothing
   unpinned can be taken), or the requester is itself the biggest
-  borrower.
+  borrower. A create a stocked warm pool could serve is judged by the
+  same refusal before the pool VM is handed over (a takeover debits
+  nothing and takes nothing back): the biggest borrower is refused with
+  the pool left stocked, and an owner inside its slice is served as
+  before.
 - `503` `capacity_wait` with `Retry-After: 30` — a structural shortfall
   that take-back cannot close.
 
