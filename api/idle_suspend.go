@@ -173,9 +173,10 @@ func (s *Server) writeResumeRefusal(w http.ResponseWriter, id string, err error)
 }
 
 // resumeNoRoom reports whether a failed resume was refused for a
-// structural shortage of host resources (hugepages, a draining node).
-// Per the 2026-10-08 owner contract such a refusal is a wait, never a
-// loss: the caller gets 503 capacity_wait with a Retry-After.
+// structural shortage of host resources (hugepages, a draining node,
+// host memory exhausted while the sandbox came back). Per the
+// 2026-10-08 owner contract such a refusal is a wait, never a loss: the
+// caller gets 503 capacity_wait with a Retry-After.
 func resumeNoRoom(err error) bool {
 	return errors.Is(err, substrate.ErrCapacity) || errors.Is(err, errDraining)
 }

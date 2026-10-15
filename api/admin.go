@@ -582,6 +582,7 @@ func (s *Service) undrainDeferred(err error) bool {
 		undrainNotReady(err) ||
 		errors.Is(err, errLeaseBusy) ||
 		errors.Is(err, substrate.ErrCapacity) ||
+		isHostMemoryExhausted(err) ||
 		errors.Is(err, context.Canceled) ||
 		errors.Is(err, context.DeadlineExceeded) ||
 		errors.Is(err, errDraining)

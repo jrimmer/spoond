@@ -45,6 +45,22 @@ summarised from README "Status".
   debit refunded at the pop and again through the undo), which read
   the cache up to 2 GiB freer than the box was for up to 15 s.
 
+- **Host ENOMEM on a create or resume answers `503 capacity_wait`, not
+  `500` (spoond-6ayi).** On 2026-10-14 a create whose snapshot load
+  failed on host ENOMEM (`failed to start FC: error loading snapshot
+  ... mmap memfd: cannot allocate memory`, `failed uffdio copy: cannot
+  allocate memory`) answered `500 "failed to grant lease"`, which
+  clients read as a permanent failure and do not retry. The
+  orchestrator's gRPC error carries no code for it, only text, so
+  spoond now recognises the kernel's `cannot allocate memory` message
+  (case-insensitive) on every lease-creating substrate call and answers
+  it the capacity refusal it is: `503` with `code: capacity_wait` and
+  `Retry-After: 30` on every path (create, resume, restart, clone,
+  fork, restore, recovery), waitable out with `wait` like any other
+  capacity wait, and counted in `spoond_capacity_rejections_total`.
+  The failed create's quota reservation and admission debit are undone
+  exactly as on any other failed create.
+
 ## [3.9.0] - 2026-10-14
 
 ### Added

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jrimmer/spoond/v3/substrate"
@@ -37,6 +38,20 @@ func (s *Service) freeHugepageMiBLocked(ctx context.Context) (uint64, error) {
 	return s.nodeInfoCache.FreeHugepageBytes() / (1024 * 1024), nil
 }
 
+// isHostMemoryExhausted reports whether err is the host running out of
+// memory while the orchestrator started a sandbox: a snapshot load that
+// cannot mmap its memfd, or a uffdio copy the kernel refused. The gRPC
+// error carries no code for it, only text, so it is recognised by the
+// kernel's message (case-insensitive, the case varies by source). Such a
+// create or resume is a capacity refusal, not a failure: the node is
+// out of room, so the caller waits like any other capacity answer.
+func isHostMemoryExhausted(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "cannot allocate memory")
+}
+
 // debitNodeInfoLocked marks memoryMB MiB of hugepages used in the cached
 // NodeInfo when a lease is admitted, so the next admission inside the
 // same cache window sees them gone: without it, several admissions in a
@@ -68,6 +83,15 @@ func (s *Service) admit(ctx context.Context, memoryMB int) error {
 		return err
 	}
 	return nil
+}
+
+// countHostENOMEM records one host-memory-exhausted substrate refusal:
+// the same capacity-refusal counter admission's own refusals use (U11).
+func (s *Service) countHostENOMEM(err error) {
+	if s.metrics != nil {
+		s.metrics.CapacityRej.Inc()
+	}
+	s.log.Printf("create: host memory exhausted (ENOMEM), answering capacity_wait: %v", err)
 }
 
 // noFloorKey marks a context whose admission skips the low-memory floor

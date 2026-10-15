@@ -208,7 +208,7 @@ func (s *Service) clearRecoveryRetries(l *Lease) {
 // is a failure that a retry could clear, so it is counted (spoond-dxq
 // S4).
 func recoveryWaitForCapacity(err error) bool {
-	return err != nil && errors.Is(err, substrate.ErrCapacity)
+	return err != nil && (errors.Is(err, substrate.ErrCapacity) || isHostMemoryExhausted(err))
 }
 
 // recoveryFailurePermanent reports whether err can never succeed on a

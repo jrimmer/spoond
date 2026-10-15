@@ -58,17 +58,21 @@ func (s *Service) markOwnerDeleted(owner string) {
 }
 
 // waitRefusal reports whether err is one a create may wait out (#129):
-// substrate capacity (hugepages full and take-back could not help yet).
+// substrate capacity (hugepages full and take-back could not help yet,
+// or the host ran out of memory while the sandbox started — spoond-6ayi).
 // There are no per-owner caps to wait on any more (3.0 FS4); box_full,
 // bad requests, auth and unknown images answer at once.
 func waitRefusal(err error) bool {
-	return err != nil && errors.Is(err, substrate.ErrCapacity)
+	return err != nil && (errors.Is(err, substrate.ErrCapacity) || isHostMemoryExhausted(err))
 }
 
 // waitRefusalDetail is the refusal the `queued` event names.
 func waitRefusalDetail(err error) string {
 	if d := saturationDetail(err); d != "" {
 		return d
+	}
+	if isHostMemoryExhausted(err) {
+		return "host memory exhausted (ENOMEM)"
 	}
 	return "capacity"
 }
