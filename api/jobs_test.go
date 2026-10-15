@@ -155,7 +155,7 @@ func TestBackgroundExecStartAndExitViaStream(t *testing.T) {
 	writeJobFile(t, sub, sandbox, jobID, "rc", "7\n")
 	proc.Push(substrate.ProcessEvent{Kind: substrate.EventExit, ExitCode: 7})
 
-	row = waitJobState(t, db, jobID, "exited", 3*time.Second)
+	row = waitJobState(t, db, jobID, "exited", jobWatchTimeout)
 	if row.ExitCode == nil || *row.ExitCode != 7 {
 		t.Fatalf("exit code = %v, want 7", row.ExitCode)
 	}
@@ -978,7 +978,7 @@ func TestJobStartContextDetached(t *testing.T) {
 	// stream was not canceled with the request.
 	writeJobFile(t, sub, sandbox, jobID, "rc", "0\n")
 	p.Push(substrate.ProcessEvent{Kind: substrate.EventExit, ExitCode: 0})
-	waitJobState(t, db, jobID, "exited", 3*time.Second)
+	waitJobState(t, db, jobID, "exited", jobWatchTimeout)
 	_ = svc
 }
 
