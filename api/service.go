@@ -2995,6 +2995,7 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 		// plus the floor (spoond-fi5v). A box with room serves every pop
 		// the pool can stock, whatever the fairness view says.
 		free, ferr := s.cachedFreeHugepageMiB(ctx)
+		println("DBG gate: free=%d ferr=%v memoryMB=%d floor=%d", free, ferr, memoryMB, s.floorFor(ctx))
 		if ferr == nil && free < uint64(memoryMB+s.floorFor(ctx)) {
 			if bf := biggestBorrowerRefusal(s.takeBackOwnersFor(ctx, owner, memoryMB), owner, memoryMB); bf != nil {
 				s.boxFullAlert(owner, memoryMB, "the requester is the biggest borrower")

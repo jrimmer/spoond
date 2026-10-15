@@ -59,9 +59,11 @@ func serveFixedNode(sub *testSub, node *fixedNode) {
 
 // TestBoxFullBiggestBorrowerRefusesStockedPool: an owner holding its
 // whole slice, with no other owner borrowing more, is refused 429
-// box_full by a create a stocked pool COULD serve — the same refusal a
-// cold create gives — and the pool entry survives for the next request:
-// no take-back, no debit, nothing popped.
+// box_full by a create a stocked pool COULD serve — but only where a
+// cold create would be refused too (spoond-fi5v): the box's cached free
+// pages sit below the request plus the floor, the shape the cold
+// admission answers box_full on. The pool entry survives for the next
+// request: no take-back, no debit, nothing popped.
 func TestBoxFullBiggestBorrowerRefusesStockedPool(t *testing.T) {
 	svc, db, sub, ids := newFairShareService(t)
 	alice := addIdentityUser(t, ids, "alice")
@@ -373,6 +375,101 @@ func TestBoxFullStockedPoolHTTP429OwnLeases(t *testing.T) {
 	for _, l := range al {
 		if l.Suspended {
 			t.Fatalf("lease %s was paused by a box_full listing", l.ID)
+		}
+	}
+}
+
+// TestBoxFullStockedPoolServesWhenMemoryCovers (spoond-fi5v): the same
+// over-slice owner is SERVED from the pool when the box's cached free
+// pages cover the request plus the floor. The takeover commits no new
+// hugepages, so the gate stays shut: no box_full, no take-back, no debit,
+// and the pop hands the VM over — the refusal never hides behind
+// poolCanServe on a box with room.
+func TestBoxFullStockedPoolServesWhenMemoryCovers(t *testing.T) {
+	svc, db, sub, ids := newFairShareService(t)
+	alice := addIdentityUser(t, ids, "alice")
+	bob := addIdentityUser(t, ids, "bob")
+	svc.SetMetrics(metrics.NewBackendMetrics())
+	svc.probeEnabled = false
+	ctx := context.Background()
+	img := seedImage(t, db, "mid", 1024)
+	roomyDisk(svc)
+	// 8192 MiB box, each sandbox 1024 MiB: two 4096 MiB slices.
+	installDynamicNode(t, svc, sub, 4096, 0, 512)
+
+	// Alice exactly holds her slice (four 1024 MiB leases); bob keeps an
+	// active but suspended lease so the fair view splits the box — alice
+	// would be the biggest borrower on any cold admission.
+	var al []*Lease
+	for i := 0; i < 4; i++ {
+		l, err := svc.grantLease(ctx, leaseRequest{owner: alice.ID, image: "mid", ttl: time.Hour, persistent: true})
+		if err != nil {
+			t.Fatalf("grant alice %d: %v", i+1, err)
+		}
+		al = append(al, l)
+	}
+	if _, err := svc.grantLease(ctx, leaseRequest{owner: bob.ID, image: "mid", ttl: time.Hour, persistent: true}); err != nil {
+		t.Fatalf("grant bob: %v", err)
+	}
+	svc.store.mu.Lock()
+	var bl *Lease
+	for _, ll := range svc.store.leases {
+		if ll.Owner == bob.ID {
+			bl = ll
+		}
+	}
+	svc.store.mu.Unlock()
+	if _, err := svc.suspend(ctx, bob.ID, bl.ID); err != nil {
+		t.Fatalf("suspend bob: %v", err)
+	}
+	dropNodeCache(svc)
+	warmFairShares(svc, ctx)
+
+	// Stock the pool with the box's pages back, then pin the fixture the
+	// grant reads: 6144 MiB free (2048 used pages of the 8192 held —
+	// four of alice's leases plus the pool VM read 2560, but this
+	// fixture leaves one page-set reported back: free covers the
+	// request plus the floor, so a cold create would fit and the pool
+	// must serve the takeover).
+	fullFreeNode(t, svc, sub)
+	installDynamicNode(t, svc, sub, 4096, 0, 512)
+	svc.cfg.PoolSize = 1
+	svc.warmPool(ctx, img)
+	svc.store.mu.Lock()
+	poolLen := len(svc.store.pool["mid"])
+	svc.store.mu.Unlock()
+	if poolLen != 1 {
+		t.Fatalf("setup: the pool holds %d sandbox(es), want 1", poolLen)
+	}
+	// Pin the reading the grant's gate judges: 5 live sandboxes (four of
+	// alice's leases plus the pool VM) hold 2560 of the 4096 pages —
+	// 3072 MiB free — and the dynamic fixture above reports exactly
+	// that; free covers the request plus the floor, so a cold create
+	// would fit and the pool must serve the takeover.
+	cachedNode(t, svc, substrate.NodeInfo{
+		Status: "healthy", HugepagesTotal: 4096, HugepageSizeBytes: 2 << 20, HugepagesUsed: 2560,
+	})
+	warmFairShares(svc, ctx)
+
+	granted, err := svc.grantLease(ctx, leaseRequest{owner: alice.ID, image: "mid", ttl: time.Hour, persistent: true})
+	if err != nil {
+		t.Fatalf("the over-slice create on a box with room = %v, want served from the pool", err)
+	}
+	if !granted.pooled {
+		t.Fatal("the over-slice grant on a box with room did not come from the pool")
+	}
+	if got := cachedUsedPages(svc); got != 2560 {
+		t.Fatalf("after the pooled grant the cache reads %d pages used, want 2560 (no debit)", got)
+	}
+	svc.store.mu.Lock()
+	poolLen = len(svc.store.pool["mid"])
+	svc.store.mu.Unlock()
+	if poolLen != 0 {
+		t.Fatalf("the grant left %d pool sandbox(es), want 0 (served from the pool)", poolLen)
+	}
+	for _, l := range al {
+		if l.Suspended {
+			t.Fatalf("the served grant paused lease %s (the pool takeover takes nobody back)", l.ID)
 		}
 	}
 }
