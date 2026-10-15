@@ -139,15 +139,18 @@ func TestBoxFullBiggestBorrowerRefusesStockedPool(t *testing.T) {
 		t.Fatalf("setup: the pool holds %d sandbox(es), want 1", poolLen)
 	}
 
-	// The grant faces the box as it stands: cache warm on the dynamic
-	// node (5120 MiB of the 8192 held, 3072 free). That is below the
-	// 3073 MiB a cold create needs on top (the stock left it there) —
-	// the shape box_full answers on — so the gate fires and the pooled
-	// refusal answers the biggest borrower.
-	cachedNode(t, svc, substrate.NodeInfo{
-		Status: "healthy", HugepagesTotal: 4096, HugepageSizeBytes: 2 << 20, HugepagesUsed: 2560,
-	})
+	// The grant faces the box as it stands: cache warm on the fixed
+	// node (5120 MiB of the 8192 held). A short box is one a cold create
+	// on it would refuse — its free 3072 sits exactly at the
+	// request-plus-floor line (3072), not below it — so the fixture
+	// pins Used at 3584 pages (1024 free). A cold create on that
+	// reading waits on its 5120 MiB free-memory need (shortfall 4096,
+	// every candidate pinned): the gate fires under the same condition
+	// and the pooled refusal answers the biggest borrower.
 	warmFairShares(svc, ctx)
+	cachedNode(t, svc, substrate.NodeInfo{
+		Status: "healthy", HugepagesTotal: 4096, HugepageSizeBytes: 2 << 20, HugepagesUsed: 3584,
+	})
 	refusalsBefore := counterValue(t, svc.metrics.BoxFullTotal)
 
 	err := func() error {
@@ -163,8 +166,8 @@ func TestBoxFullBiggestBorrowerRefusesStockedPool(t *testing.T) {
 
 	// Nothing was paused, nothing debited, and the pool entry is still
 	// stocked: the refusal takes no VM it does not deserve.
-	if got := cachedUsedPages(svc); got != 2560 {
-		t.Fatalf("after the refused grant the cache reads %d pages used, want 2560 (no debit)", got)
+	if got := cachedUsedPages(svc); got != 3584 {
+		t.Fatalf("after the refused grant the cache reads %d pages used, want 3584 (no debit)", got)
 	}
 	svc.store.mu.Lock()
 	poolLen = len(svc.store.pool["mid"])
@@ -176,6 +179,12 @@ func TestBoxFullBiggestBorrowerRefusesStockedPool(t *testing.T) {
 		if l.Suspended {
 			t.Fatalf("the refusal paused lease %s (a box_full never takes back)", l.ID)
 		}
+	}
+	// Alice still holds five running leases (her own four plus the one
+	// bob's pool VM became; the refusal took no take-back), and the
+	// pinned reading stays at 3584 pages used: nothing debited it.
+	if got := cachedUsedPages(svc); got != 3584 {
+		t.Fatalf("after the refusal the cache reads %d pages used, want 3584 (no debit)", got)
 	}
 	if n := len(sub.sandboxesLive(t)); n != 5 {
 		t.Fatalf("%d sandboxes live after the refusal, want 5 (alice's four leases + the pool VM)", n)
@@ -346,17 +355,17 @@ func TestBoxFullStockedPoolHTTP429OwnLeases(t *testing.T) {
 	if poolLen != 1 {
 		t.Fatalf("setup: the pool holds %d sandbox(es), want 1", poolLen)
 	}
-	node.set(substrate.NodeInfo{Status: "healthy", HugepagesTotal: 4096, HugepageSizeBytes: 2 << 20, HugepagesUsed: 2560})
+	node.set(substrate.NodeInfo{Status: "healthy", HugepagesTotal: 4096, HugepageSizeBytes: 2 << 20, HugepagesUsed: 3584})
 	warmFairShares(svc, ctx)
 	// Alice holds her whole slice; the fixed fixture holds the
-	// admission reading at 5120 MiB used (3072 free). That is below
-	// the 3073 a cold create needs on top (the stock above left the
-	// box there — the fill read 3072 over the stock's 3072 edge), so
-	// the gate fires exactly where a cold create would refuse, and a
-	// grant that wrongly skipped the gate would serve — the pooled
-	// refusal is the one answer.
+	// admission reading at 7168 MiB used (1024 free). A cold create on
+	// that reading waits on its 5120 MiB need (4096 short, every
+	// candidate pinned), so the gate fires exactly where a cold create
+	// would refuse, and a grant that wrongly skipped the gate would
+	// still find its 1024 free pages and serve: the pooled refusal is
+	// the one answer.
 	cachedNode(t, svc, substrate.NodeInfo{
-		Status: "healthy", HugepagesTotal: 4096, HugepageSizeBytes: 2 << 20, HugepagesUsed: 2560,
+		Status: "healthy", HugepagesTotal: 4096, HugepageSizeBytes: 2 << 20, HugepagesUsed: 3584,
 	})
 
 	ts := httptest.NewServer(NewServer(svc, NewImageRegistry(db)).Handler())
