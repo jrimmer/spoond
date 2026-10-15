@@ -2941,13 +2941,15 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 	// committed memory: it takes over a VM whose hugepages are already
 	// inside runningMemoryMiB (spoond-41tk). Charging it up front would
 	// count the same memory twice — take back a lease for it, and
-	// refuse the grant at the overcommit cap exactly on the full box
+	// refused the grant at the overcommit cap exactly on the full box
 	// the pool exists to serve. The admission therefore runs AFTER the
 	// pool loop, and only when it pooled nothing: the usual pool hit is
-	// admitted with nothing to debit and no take-back, while an empty
-	// pool (or one whose every member failed validation) passes the
-	// ordinary admission for the real request. undo wraps the real
-	// undo so the deferred call can always run.
+	// admitted with nothing to debit and no take-back — its fairness is
+	// judged by the biggest-borrower refusal ahead of the pop
+	// (spoond-18xe), the one check the takeover admits nothing under —
+	// while an empty pool (or one whose every member failed validation)
+	// passes the ordinary admission for the real request. undo wraps the
+	// real undo so the deferred call can always run.
 	ok := false
 	undoFn := func(bool) {}
 	undo := func(failed bool) { undoFn(failed) }
@@ -2960,6 +2962,26 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 	s.beginAppliedEgress(lease.ID)
 	defer s.endAppliedEgress(lease.ID)
 
+	// The biggest-borrower refusal honours the pool (spoond-18xe): the
+	// takeover of a pooled sandbox is admission with nothing to debit and
+	// no take-back, so the only fairness check that could refuse this
+	// grant is this one — without it, an owner far over its fair slice
+	// takes a stocked pool VM that its cold create would have been
+	// refused. The refusal is therefore judged on the view the ordinary
+	// admission would build (takeBackOwnersFor counts the request once,
+	// already reserved by reserveQuota above) BEFORE any pool sandbox is
+	// popped: it answers box_full with own_leases and the alert, and
+	// nothing is taken back, nothing debited, the pool entry left stocked
+	// for a request it may still serve. Run only where the pop below
+	// would really serve (poolCanServe): any other shape falls through to
+	// the ordinary admission, which refuses there. A pool that empties
+	// between this check and the pop falls through to the same admission.
+	if s.poolCanServe(image, sized, snap) {
+		if bf := biggestBorrowerRefusal(s.takeBackOwnersFor(ctx, owner, memoryMB), owner, memoryMB); bf != nil {
+			s.boxFullAlert(owner, memoryMB, "the requester is the biggest borrower")
+			return nil, bf
+		}
+	}
 	// Pool: pop the oldest entry for the image. The pool serves
 	// persistent and non-persistent grants alike. A pooled sandbox was
 	// created for the "pool" placeholder lease, so its egress policy and
