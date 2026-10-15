@@ -1350,7 +1350,11 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 // writeCreateRefusal writes the failure response for a refused create,
 // including waited_ms when a wait timed out. It carries the same status,
 // body and Retry-After as the immediate refusal. image and snapshot are
-// the request's create source, for the log line.
+// the request's create source, for the log line. A host ENOMEM during the
+// substrate create is answered the capacity_wait the substrate's own
+// capacity refusals get (spoond-6ayi): subCreate wraps it in
+// substrate.ErrCapacity, so it is 503 with a retry hint — and waitable
+// through the queue — rather than a 500 a client would not retry.
 func (s *Server) writeCreateRefusal(w http.ResponseWriter, image, snapshot string, err error, waited time.Duration) {
 	status := http.StatusInternalServerError
 	msg := "failed to grant lease"
@@ -1393,9 +1397,11 @@ func (s *Server) writeCreateRefusal(w http.ResponseWriter, image, snapshot strin
 		// guess.
 		status, msg, retryAfter = http.StatusServiceUnavailable, "draining", drainRetryAfterSecs
 	case errors.Is(err, substrate.ErrCapacity):
-		// Hugepages full and preemption could not make room (or the node
-		// is not healthy): 503 capacity_wait with a retry hint, so a
-		// client that did not send "wait" still knows when to come back.
+		// Hugepages full and preemption could not make room, the node
+		// is not healthy, or the host itself ran out of memory while the
+		// snapshot load or the uffdio copies ran (host ENOMEM,
+		// spoond-6ayi): 503 capacity_wait with a retry hint, so a client
+		// that did not send "wait" still knows when to come back.
 		status, msg, retryAfter = http.StatusServiceUnavailable, "capacity: "+err.Error(), capacityRetryAfterSecs
 		code = "capacity_wait"
 	default:

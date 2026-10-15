@@ -1597,6 +1597,22 @@ func (s *Service) runRefreshPeers(ctx context.Context) {
 	s.refreshPeers(context.WithoutCancel(ctx))
 }
 
+// subCreate runs one substrate Create for a lease: the hook where a
+// host ENOMEM from the snapshot load or the uffdio copies (the
+// orchestrator's gRPC error carries only text) is recognised and
+// answered the capacity refusal it is, so every calling path — create,
+// resume, restart, clone, fork, restore, recovery — maps it to the
+// same 503 capacity_wait instead of a 500. Counted with the other
+// capacity refusals (U11).
+func (s *Service) subCreate(ctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error) {
+	sb, err := s.sub.Create(ctx, req)
+	if isHostMemoryExhausted(err) {
+		s.countHostENOMEM(err)
+		return substrate.Sandbox{}, fmt.Errorf("%w: %s", substrate.ErrCapacity, err.Error())
+	}
+	return sb, err
+}
+
 // createSandbox admits and creates one sandbox for lease l from build b.
 // sandboxID "" allocates a new E2B sandbox id; resume reuses the paused
 // sandbox's id. On success the sandboxes row is upserted (upsert because
@@ -1633,7 +1649,7 @@ func (s *Service) createSandbox(ctx context.Context, img store.ImageRow, b store
 	env["SPOOND_GATEWAY_URL"] = "http://" + s.cfg.HostGuestAddr + ":" + strconv.Itoa(s.cfg.HostGuestPort)
 	eg := s.egressFor(l)
 	start := time.Now()
-	sb, err = s.sub.Create(ctx, substrate.CreateRequest{
+	sb, err = s.subCreate(ctx, substrate.CreateRequest{
 		TemplateID:         b.TemplateID,
 		BuildID:            b.BuildID,
 		SandboxID:          sandboxID,
