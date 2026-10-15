@@ -288,6 +288,15 @@ stack does not exist yet.
 
 ## Status
 
+**v3.9.1: warm-pool correctness fixes.** Five review fixes to the warm
+pool and memory admission: the pooled `box_full` refusal fires only
+where a cold create would be refused too, a pool VM popped for a grant
+counts as in flight until the grant settles, warm-pool fills check the
+cap, free pages and take their hold under one lock, a guest-side OOM
+is never treated as a host-capacity wait, and a pooled grant that
+falls through to a cold create runs the saturation gate. No breaking
+changes, no schema change.
+
 **v3.9: spoond keeps itself out of memory trouble.** Every 15 s the
 backend checks free hugepages; below `MEMORY_FLOOR_MIB` (default 2048)
 it pauses one lease of the owner furthest over their fair share,
