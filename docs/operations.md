@@ -1020,7 +1020,12 @@ around the clock, so with `POOL_SIZE` set the pool's memory counts
 here. A grant served from a stocked pool adds no committed memory — it
 takes over a VM that was already counted — and is admitted without the
 cap check; a grant that cold-creates (empty pool) is charged the pool
-VM it no longer holds.
+VM it no longer holds. The takeover is still a fair-shares admission:
+the biggest borrower (over its slice, no other owner further over) is
+refused `429 box_full` before any pool VM is handed over — the same
+refusal its cold create would get, listing `own_leases` — so the pool
+cannot become the door an over-slice owner walks its memory through;
+an owner inside its slice is served as before.
 
 **Low-memory floor** (`MEMORY_FLOOR_MIB`, spoond-l3lq). The overcommit
 cap guards admission; the floor is the running counterpart: every 15 s
@@ -1127,7 +1132,10 @@ below the floor each tick drops one newest pooled sandbox (the
 substrate guest goes, the pool entry refills once the pressure clears)
 before it pauses any lease — a pool VM is nobody's lease, so nobody
 loses work. A pooled sandbox handed to a lease is counted once, as the
-lease.
+lease. The takeover is still a fair-shares admission: the biggest
+borrower's create is refused `429 box_full` before any pool VM is
+handed over (the pool entry stays stocked), so the pool cannot serve an
+owner an over-slice grant its cold create would have refused.
 
 A pooled sandbox is created under a placeholder lease with
 `SPOOND_LEASE_ID=pool`; when it is handed to a real lease, the backend

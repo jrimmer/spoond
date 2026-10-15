@@ -30,6 +30,15 @@ type testSub struct {
 	probeFailAll bool
 	execStdout   string // canned stdout for non-probe execs ("" = "ok\n")
 
+	// fakeFixed, when set, is the NodeInfo read serves wholesale (the
+	// stocked-pool fixtures, spoond-18xe): a reading a test resets
+	// between two stages, served fresh on every read so no read refreshes
+	// its way past the fixture. Installed with serveFixedNode
+	// (pool_box_full_test.go).
+	fakeFixed *fixedNode
+
+	// rootfsFail, keyed by sandbox id, makes the rootfs liveness probe
+
 	// rootfsFail, keyed by sandbox id, makes the rootfs liveness probe
 	// answer the given stderr with exit code 1 ("Input/output error" for
 	// a dead disk). rootfsErr, keyed the same way, makes it a transport
