@@ -1015,8 +1015,12 @@ a value outside 1.0–10, or not a number, refuses to start). A request over the
 the biggest borrower like any other shortfall; if nothing can be taken
 it waits (`503 capacity_wait`, or the admission queue). The cap counts
 running and recovered leases plus admissions whose leases are not live
-yet. Warm-pool sandboxes are not counted yet (the pool is empty unless
-`POOL_SIZE` is set).
+yet, and the warm pool's sandboxes: every pooled VM holds its hugepages
+around the clock, so with `POOL_SIZE` set the pool's memory counts
+here. A grant served from a stocked pool adds no committed memory — it
+takes over a VM that was already counted — and is admitted without the
+cap check; a grant that cold-creates (empty pool) is charged the pool
+VM it no longer holds.
 
 **Low-memory floor** (`MEMORY_FLOOR_MIB`, spoond-l3lq). The overcommit
 cap guards admission; the floor is the running counterpart: every 15 s
@@ -1112,6 +1116,18 @@ milliseconds, and pool sandboxes hold hugepage memory around the clock.
 If you do raise it, remember the pool's memory is `POOL_SIZE × images ×
 memory_mb` of hugepages held permanently, and that the drain deletes the
 pool (it refills afterwards).
+
+Pool VMs count toward the overcommit cap: their memory is part of what
+`MEMORY_OVERCOMMIT` sees, and warm-pool fills stop (and log) rather
+than stock a VM that would put the box over the cap or leave less than
+the floor headroom (the configured `MEMORY_FLOOR_MIB`, or the 2 GiB
+default when the floor is off) free — a fill never takes a lease back.
+The low-memory floor (`MEMORY_FLOOR_MIB`, above) sheds the pool first:
+below the floor each tick drops one newest pooled sandbox (the
+substrate guest goes, the pool entry refills once the pressure clears)
+before it pauses any lease — a pool VM is nobody's lease, so nobody
+loses work. A pooled sandbox handed to a lease is counted once, as the
+lease.
 
 A pooled sandbox is created under a placeholder lease with
 `SPOOND_LEASE_ID=pool`; when it is handed to a real lease, the backend

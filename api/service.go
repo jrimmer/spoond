@@ -322,6 +322,12 @@ type Store struct {
 	leases map[string]*Lease
 	// pool holds pre-created E2B sandbox ids per image name, oldest first.
 	pool map[string][]string
+	// poolMiB is the memory of every stocked pooled sandbox (sandbox id
+	// -> MiB, #41tk): a pool VM holds its hugepages around the clock, so
+	// the overcommit cap and the low-memory floor must see them
+	// (runningMemoryMiB sums it). Seeded by addPoolLocked and LoadState,
+	// dropped by removePoolLocked; guarded by mu.
+	poolMiB map[string]int
 	// shares maps lease id -> grantee id -> share (T6/#33).
 	shares map[string]map[string]*Share
 	// pending counts in-flight lease creations per owner (T4/#31 quota
@@ -370,6 +376,7 @@ func newStore() *Store {
 	return &Store{
 		leases:          make(map[string]*Lease),
 		pool:            make(map[string][]string),
+		poolMiB:         make(map[string]int),
 		shares:          make(map[string]map[string]*Share),
 		pending:         make(map[string]int),
 		pendingMiB:      make(map[string]int),
@@ -2911,13 +2918,23 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 	//
 	// ok guards the admission debit: until it is set true, the deferred
 	// undo gives the memory back (a failed grant never took the
-	// hugepages). The warm-pool path below calls it too, because a
-	// pooled sandbox already holds its memory and so needs no new debit.
+	// hugepages).
+	//
+	// A create a stocked pool sandbox can serve (no snapshot, no
+	// requested size — the shape the pool loop below pops for) adds no
+	// committed memory: it takes over a VM whose hugepages are already
+	// inside runningMemoryMiB (spoond-41tk). Charging it up front would
+	// count the same memory twice — take back a lease for it, and
+	// refuse the grant at the overcommit cap exactly on the full box
+	// the pool exists to serve. The admission therefore runs AFTER the
+	// pool loop, and only when it pooled nothing: the usual pool hit is
+	// admitted with nothing to debit and no take-back, while an empty
+	// pool (or one whose every member failed validation) passes the
+	// ordinary admission for the real request. undo wraps the real
+	// undo so the deferred call can always run.
 	ok := false
-	undo, err := s.admitMemory(ctx, owner, memoryMB)
-	if err != nil {
-		return nil, err
-	}
+	undoFn := func(bool) {}
+	undo := func(failed bool) { undoFn(failed) }
 	defer func() { undo(!ok) }()
 	// Hold the lease's egress memo in flight from before any sandbox is
 	// created until it is registered in the store (or the grant fails and
@@ -2944,6 +2961,14 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 				id = pool[0]
 				s.store.pool[image] = pool[1:]
 				s.removePoolLocked(id)
+				// The pop takes the VM's MiB out of runningMemoryMiB
+				// while the lease's own charge is not live yet — the
+				// committed total dips for the loop's length, and the
+				// cache reading is left alone (no admission has run
+				// yet: the one below never sees this pop as a promise
+				// to double). nodeInfoMu is never taken inside the
+				// store lock.
+				//
 				// The pool entry is gone before the lease row names the
 				// sandbox: hold it in flight, in the same critical
 				// section, so the orphan sweep never sees it unclaimed
@@ -3007,12 +3032,22 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 			break
 		}
 	}
-	// A pooled sandbox was created (and its hugepages debited) by an
-	// earlier warm-pool grant, so this grant must not hold a second
-	// debit for the same memory: give the admission's debit back now.
-	// undo is once-safe, so a later failure's deferred call is a no-op.
-	if lease.pooled {
-		undo(true)
+	// Nothing pooled — an empty pool, or every member failed
+	// validation — falls through to the ordinary admission for the
+	// request the cold create below really makes: take-back included,
+	// and the overcommit cap with it (spoond-41tk: the pops above
+	// already took their VMs' MiB out of runningMemoryMiB, so the cap
+	// charges this request once, as a new promise, not again for memory
+	// a pool VM held). A refusal answers before any sandbox exists.
+	// undoFn takes the admission's undo, so the deferred call credits a
+	// failure's debit and drops the in-flight counter when one ran; a
+	// pooled grant leaves it a no-op (nothing was debited).
+	if lease.SandboxID == "" {
+		u, aerr := s.admitMemory(ctx, owner, memoryMB)
+		if aerr != nil {
+			return nil, aerr
+		}
+		undoFn = u
 	}
 
 	if lease.SandboxID == "" {
@@ -5246,6 +5281,10 @@ func (s *Service) warmPool(ctx context.Context, img store.ImageRow) {
 		s.log.Printf("warmPool: %s: load build %s: %v", img.Name, img.CurrentBuildID, err)
 		return
 	}
+	// The pooled VM runs the build's size, and its hugepages are held
+	// from the moment the sandbox exists (#41tk): the same MiB the
+	// eventual lease will be charged.
+	memMiB := b.MemoryMB
 	placeholder := &Lease{
 		ID:         "pool",
 		Owner:      "pool",
@@ -5260,6 +5299,33 @@ func (s *Service) warmPool(ctx context.Context, img store.ImageRow) {
 	// build that fails the probe will keep failing it, and retrying
 	// creates a sandbox per attempt.
 	for i := cur; i < s.cfg.PoolSize; i++ {
+		// Do not overfill (#41tk, self-healing: spoond must never let
+		// itself crash): a pool VM holds its hugepages for good, so each
+		// fill stops when the VM would put the box over the overcommit
+		// cap or leave less than the floor (2 GiB) free. It must NOT run
+		// admitMemory here: the pool entry is already part of
+		// runningMemoryMiB (the cap's own running view), so a second
+		// debit would double-count the VM — and admitMemory may take
+		// leases back, which a cache-warming fill must never do.
+		// Warm-pool fills never trigger take-back — stopping, not
+		// pausing leases, is the pool's answer to a short box — and are
+		// retried by the next refill tick once leases have freed room.
+		// The free-memory check reads the admission cache (the cap's own
+		// view, untouched by this fill: nothing below debits it). The
+		// floor it keeps is the standing 2 GiB headroom (poolFloorMiB)
+		// whether or not the box-level floor loop is enabled: an
+		// admission may skip the floor (a resuming lease passes through
+		// and holds no VM, while it waits), but a stock parks a VM that
+		// holds its hugepages for good — letting it sink the box under
+		// 2 GiB free must not wait for the loop's tick.
+		if short := s.overcommitShortfall(memMiB); short > 0 {
+			s.log.Printf("warmPool: %s: stopping at %d of %d sandboxes: one more %d MiB VM would sit %d MiB over the overcommit cap (MEMORY_OVERCOMMIT)", img.Name, i-cur, s.cfg.PoolSize-(i-cur), memMiB, short)
+			return
+		}
+		if free, err := s.cachedFreeHugepageMiB(ctx); err == nil && free < uint64(memMiB+s.poolFloorMiB()) {
+			s.log.Printf("warmPool: %s: stopping at %d of %d sandboxes: %d MiB free, want %d (memory + floor)", img.Name, i-cur, s.cfg.PoolSize-(i-cur), free, memMiB+s.poolFloorMiB())
+			return
+		}
 		sb, err := s.createSandbox(ctx, img, b, false, "", placeholder)
 		if err != nil {
 			s.log.Printf("warmPool: create %s: %v", img.Name, err)
@@ -5274,10 +5340,24 @@ func (s *Service) warmPool(ctx context.Context, img store.ImageRow) {
 		}
 		s.store.mu.Lock()
 		s.store.pool[img.Name] = append(s.store.pool[img.Name], sb.ID)
-		s.addPoolLocked(sb.ID, img.Name)
+		s.addPoolLocked(sb.ID, img.Name, memMiB)
 		s.store.mu.Unlock()
 		s.endCreatingSandbox(sb.ID)
 	}
+}
+
+// poolFloorMiB is the headroom a warm-pool fill keeps on top of the
+// VMs it stocks: the configured floor (MEMORY_FLOOR_MIB), or the
+// default (2 GiB) when the box-level floor is off. An admission may
+// skip the floor — a resuming lease passes through and holds no VM
+// while it waits — but a stock parks a VM holding its hugepages for
+// good, so a fill always keeps the headroom rather than let the box
+// sink under 2 GiB free.
+func (s *Service) poolFloorMiB() int {
+	if s.cfg.MemoryFloorMiB > 0 {
+		return s.cfg.MemoryFloorMiB
+	}
+	return DefaultMemoryFloorMiB
 }
 
 // leaseToRow maps an in-memory lease to its store row. An empty State
@@ -5620,7 +5700,11 @@ func (s *Service) deleteShareLocked(leaseID, grantee string) {
 	}
 }
 
-func (s *Service) addPoolLocked(id, image string) {
+// addPoolLocked records a pooled sandbox: the pool row and its memory
+// in poolMiB (#41tk), so the cap and the floor count the VM the moment
+// it is stocked. Call with s.store.mu held.
+func (s *Service) addPoolLocked(id, image string, memMiB int) {
+	s.store.poolMiB[id] = memMiB
 	ctx, cancel := context.WithTimeout(context.Background(), storeWriteTimeout)
 	defer cancel()
 	if err := s.db.AddPool(ctx, id, image); err != nil {
@@ -5628,7 +5712,13 @@ func (s *Service) addPoolLocked(id, image string) {
 	}
 }
 
+// removePoolLocked drops a pooled sandbox entry and with it its poolMiB
+// entry (#41tk): the VM is either a lease's now (the grant popped it,
+// the lease's own charge takes over) or gone from the substrate, and
+// either way the cap must not count it twice or count a ghost. Call
+// with s.store.mu held.
 func (s *Service) removePoolLocked(id string) {
+	delete(s.store.poolMiB, id)
 	ctx, cancel := context.WithTimeout(context.Background(), storeWriteTimeout)
 	defer cancel()
 	if err := s.db.RemovePool(ctx, id); err != nil {
@@ -5726,6 +5816,20 @@ func (s *Service) LoadState(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("load pool: %w", err)
 	}
+	// Pool VMs hold hugepages around the clock (#41tk): each loaded
+	// entry's memory comes from its sandboxes row. An entry with no row
+	// (a grant would discard it) counts 0 MiB until a refill replaces it.
+	poolMem := make(map[string]int, len(pool))
+	for _, ids := range pool {
+		for _, id := range ids {
+			row, err := s.db.GetSandbox(ctx, id)
+			if err != nil {
+				s.log.Printf("load state: pooled sandbox %s: %v", id, err)
+				continue
+			}
+			poolMem[id] = row.MemoryMB
+		}
+	}
 	loaded := make(map[string]*Lease, len(leases))
 	loadedAt := time.Now()
 	var repairs []*Lease
@@ -5783,6 +5887,11 @@ func (s *Service) LoadState(ctx context.Context) error {
 	}
 	for img, ids := range pool {
 		s.store.pool[img] = ids
+		for _, id := range ids {
+			if mem, ok := poolMem[id]; ok {
+				s.store.poolMiB[id] = mem
+			}
+		}
 	}
 	// Running background jobs (2.6, #135): seed the in-memory counts the
 	// idle sweeps and the running gauge read, so a job that ended while

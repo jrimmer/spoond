@@ -36,8 +36,13 @@ func (s *Service) fits(ctx context.Context, memoryMB int) (bool, error) {
 const DefaultMemoryOvercommit = 1.25
 
 // runningMemoryMiB sums the memory of the live leases (running or
-// recovered; a suspended lease holds no hugepages): what spoond has promised to VMs that may
-// fault it in at any moment. Takes s.store.mu; call it without
+// recovered; a suspended lease holds no hugepages) plus the warm pool's
+// sandboxes (#41tk): what spoond has promised to VMs that may fault it
+// in at any moment. A pool VM holds its hugepages around the clock and
+// faults its whole image back at any serve, so the overcommit cap and
+// everything built on runningMemoryMiB must count it; a pooled sandbox
+// handed to a lease is counted once, as the lease.
+// Takes s.store.mu; call it without
 // nodeInfoMu (lock order: never store.mu inside nodeInfoMu).
 func (s *Service) runningMemoryMiB() int {
 	s.store.mu.Lock()
@@ -50,6 +55,9 @@ func (s *Service) runningMemoryMiB() int {
 		if !l.released && l.live() {
 			total += l.MemoryMB
 		}
+	}
+	for _, mem := range s.store.poolMiB {
+		total += mem
 	}
 	return total
 }
