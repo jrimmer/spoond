@@ -57,6 +57,57 @@ summarised from README "Status".
   the pool as before. No effect at `POOL_SIZE=0` (production): the
   pooled path is the only one that changed.
 
+- **The pooled `box_full` gate refuses only where a cold create would
+  be refused too (spoond-fi5v).** The gate added above (spoond-18xe)
+  ran before the pool pop, so it fired on the cached node view alone
+  and refused an owner whose cold create the box could still have
+  served — the request plus the floor headroom still fit in the
+  cached free hugepages. The gate now refuses only where a cold
+  create would also be refused (cached free hugepages below the
+  request plus the floor headroom), so a stocked pool is never
+  barricaded by memory the box still has.
+
+- **A pool VM popped for a grant counts as in flight until the grant
+  settles (spoond-fi5v).** The pop removed the VM's MiB from the
+  pool's committed figure the moment it left the pool, but the lease
+  row only counted it at commit, so between the two the overcommit
+  cap saw that memory nowhere: a cold create racing the grant could be
+  admitted into memory the popped VM was already holding. The popped
+  VM's MiB is now raised into the in-flight admission figure
+  (`inflightAdmitMiB`) in the same `nodeInfoMu` section the admissions
+  use, right after the pop, and subtracted exactly once by the grant's
+  undo — a discarded pop counts nothing, a committed one is counted by
+  its lease from then on, so the memory is never invisible and never
+  double-counted.
+
+- **Warm-pool fills decide and hold under one lock (spoond-fi5v).** A
+  fill's overcommit check, free-page check and the take of its own MiB
+  ran as separate steps, so a cold admission racing the fill could
+  slip between them into memory the fill was about to take. The fill
+  now does all three in one `nodeInfoMu` section — from the moment it
+  decides to stock, the VM's MiB counts as a promise a racing
+  admission sees in the cap — and the hold is released whole when the
+  fill stocks or fails.
+
+- **A guest-side OOM is never treated as a wait (spoond-fi5v).** The
+  raw `cannot allocate memory` text match spoond-6ayi added beside
+  `errors.Is(err, substrate.ErrCapacity)` also caught the same kernel
+  text raised from inside a guest — a permanent failure — so a create
+  that OOMed its guest was drained, undrained or retried as if the
+  host had merely run out of room. `subCreate` already wraps the
+  host's ENOMEM as `substrate.ErrCapacity`, so the raw text matches
+  are gone from the admission gate (`admitqueue.go`), the undrain rule
+  (`admin.go`) and the recovery retry (`retry.go`); the 6ayi `503
+  capacity_wait` answer itself is unchanged, and a guest-side OOM now
+  fails permanently.
+
+- **A pooled grant that falls through to a cold create runs the
+  saturation gate (spoond-fi5v).** A pool hit boots nothing, so the
+  saturation check was skipped for the pooled shape — but a pool that
+  empties (or fails validation) falls through to a cold create on the
+  same request, and that cold create never saw the gate. The
+  fall-through now runs `checkSaturation` like every cold create.
+
 - **Host ENOMEM on a create or resume answers `503 capacity_wait`, not
   `500` (spoond-6ayi).** On 2026-10-14 a create whose snapshot load
   failed on host ENOMEM (`failed to start FC: error loading snapshot
