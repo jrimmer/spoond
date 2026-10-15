@@ -2995,7 +2995,6 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 		// plus the floor (spoond-fi5v). A box with room serves every pop
 		// the pool can stock, whatever the fairness view says.
 		free, ferr := s.cachedFreeHugepageMiB(ctx)
-		println("DBG gate: free=%d ferr=%v memoryMB=%d floor=%d", free, ferr, memoryMB, s.floorFor(ctx))
 		if ferr == nil && free < uint64(memoryMB+s.floorFor(ctx)) {
 			if bf := biggestBorrowerRefusal(s.takeBackOwnersFor(ctx, owner, memoryMB), owner, memoryMB); bf != nil {
 				s.boxFullAlert(owner, memoryMB, "the requester is the biggest borrower")
@@ -3019,6 +3018,7 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 			var memOf int
 			if len(pool) > 0 {
 				id = pool[0]
+				memOf = s.store.poolMiB[id]
 				s.store.pool[image] = pool[1:]
 				s.removePoolLocked(id)
 				// The pop takes the VM's MiB out of runningMemoryMiB
@@ -3027,9 +3027,8 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 				// cache reading is left alone (no admission has run
 				// yet: the one below never sees this pop as a promise
 				// to double). nodeInfoMu is never taken inside the
-				// store lock. Read the VM's charge here, before
-				// removePoolLocked drops the ledger entry.
-				memOf = s.store.poolMiB[id]
+				// store lock (the read above precedes removePoolLocked's
+				// delete).
 				//
 				// The pool entry is gone before the lease row names the
 				// sandbox: hold it in flight, in the same critical
@@ -3083,7 +3082,6 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 				s.endCreatingSandbox(id)
 				continue
 			}
-			_ = id
 			eg := s.egressFor(lease)
 			if err := s.sub.UpdateEgress(ctx, id, eg); err != nil {
 				s.discardPoolSandbox(ctx, id)

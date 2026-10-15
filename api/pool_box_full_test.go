@@ -81,8 +81,10 @@ func TestBoxFullBiggestBorrowerRefusesStockedPool(t *testing.T) {
 	// splits the box in two — with nobody else holding hugepages, alice
 	// after this file's next 1024 MiB request (5120/4096 = 1.25) is the
 	// biggest borrower. The stock needs free pages and cap room: cap
-	// off here, and free 4096 MiB over the 3072 (memory + the 2 GiB
-	// floor headroom) one stock needs.
+	// off here. The whole test runs with the service's 2 GiB floor
+	// (MEMORY_FLOOR_MIB) in place — what the backend passes when unset —
+	// so the gate's free check is the check a real box runs.
+	svc.cfg.MemoryFloorMiB = DefaultMemoryFloorMiB
 	var al []*Lease
 	for i := 0; i < 4; i++ {
 		l, err := svc.grantLease(ctx, leaseRequest{owner: alice.ID, image: "mid", ttl: time.Hour, persistent: true})
@@ -123,8 +125,9 @@ func TestBoxFullBiggestBorrowerRefusesStockedPool(t *testing.T) {
 
 	// Stock the pool after alice is at her slice: the cap is off, so
 	// the stock reads the dynamic node — 2560 pages (5120 MiB) of the
-	// 8192 held, 3072 free, over the 3072 (memory + the 2 GiB floor
-	// headroom) one stock needs...
+	// 8192 held, 3072 free, not over the 3072 (memory + the floor) one
+	// stock needs — exactly at the stock's edge, so the entry stocks
+	// and the box is left short with the VM held.
 	fullFreeNode(t, svc, sub)
 	installDynamicNode(t, svc, sub, 4096, 0, 512) // the pool VM brings it back to 2560 used
 	svc.cfg.PoolSize = 1
@@ -137,9 +140,10 @@ func TestBoxFullBiggestBorrowerRefusesStockedPool(t *testing.T) {
 	}
 
 	// The grant faces the box as it stands: cache warm on the dynamic
-	// node (5120 MiB of the 8192 held, 3072 free — below the 4096 MiB a
-	// cold create needs over the floor, the shape box_full answers on),
-	// the snapshot over it.
+	// node (5120 MiB of the 8192 held, 3072 free). That is below the
+	// 3073 MiB a cold create needs on top (the stock left it there) —
+	// the shape box_full answers on — so the gate fires and the pooled
+	// refusal answers the biggest borrower.
 	cachedNode(t, svc, substrate.NodeInfo{
 		Status: "healthy", HugepagesTotal: 4096, HugepageSizeBytes: 2 << 20, HugepagesUsed: 2560,
 	})
@@ -293,7 +297,11 @@ func TestBoxFullStockedPoolHTTP429OwnLeases(t *testing.T) {
 
 	// Alice exactly holds her slice: four 1024 MiB leases (4096 of
 	// 4096). Bob starts with a lease that is suspended below, so fair
-	// shares splits the box in two while he holds no hugepages.
+	// shares splits the box in two while he holds no hugepages. The
+	// whole test runs with the service's 2 GiB floor (MEMORY_FLOOR_MIB)
+	// in place — what the backend passes when unset — so the gate's
+	// free check is the check a real box runs.
+	svc.cfg.MemoryFloorMiB = DefaultMemoryFloorMiB
 	var al []*Lease
 	for i := 0; i < 4; i++ {
 		l, err := svc.grantLease(ctx, leaseRequest{owner: alice.ID, image: "mid", ttl: time.Hour, persistent: true})
@@ -341,11 +349,12 @@ func TestBoxFullStockedPoolHTTP429OwnLeases(t *testing.T) {
 	node.set(substrate.NodeInfo{Status: "healthy", HugepagesTotal: 4096, HugepageSizeBytes: 2 << 20, HugepagesUsed: 2560})
 	warmFairShares(svc, ctx)
 	// Alice holds her whole slice; the fixed fixture holds the
-	// admission reading at 5120 MiB used (3072 free — below the 4096 a
-	// cold create needs over the floor, so the pre-pop refusal is
-	// judged exactly where a cold create would refuse), so a grant that
-	// wrongly ran the admission first would take back, debit or refuse
-	// — the pool must serve it with none of those.
+	// admission reading at 5120 MiB used (3072 free). That is below
+	// the 3073 a cold create needs on top (the stock above left the
+	// box there — the fill read 3072 over the stock's 3072 edge), so
+	// the gate fires exactly where a cold create would refuse, and a
+	// grant that wrongly skipped the gate would serve — the pooled
+	// refusal is the one answer.
 	cachedNode(t, svc, substrate.NodeInfo{
 		Status: "healthy", HugepagesTotal: 4096, HugepageSizeBytes: 2 << 20, HugepagesUsed: 2560,
 	})
@@ -399,7 +408,11 @@ func TestBoxFullStockedPoolServesWhenMemoryCovers(t *testing.T) {
 
 	// Alice exactly holds her slice (four 1024 MiB leases); bob keeps an
 	// active but suspended lease so the fair view splits the box — alice
-	// would be the biggest borrower on any cold admission.
+	// would be the biggest borrower on any cold admission. The whole
+	// test runs with the service's 2 GiB floor (MEMORY_FLOOR_MIB) in
+	// place, like its refused siblings — so what differs is the box's
+	// room, not the floor.
+	svc.cfg.MemoryFloorMiB = DefaultMemoryFloorMiB
 	var al []*Lease
 	for i := 0; i < 4; i++ {
 		l, err := svc.grantLease(ctx, leaseRequest{owner: alice.ID, image: "mid", ttl: time.Hour, persistent: true})
@@ -425,12 +438,11 @@ func TestBoxFullStockedPoolServesWhenMemoryCovers(t *testing.T) {
 	dropNodeCache(svc)
 	warmFairShares(svc, ctx)
 
-	// Stock the pool with the box's pages back, then pin the fixture the
-	// grant reads: 6144 MiB free (2048 used pages of the 8192 held —
-	// four of alice's leases plus the pool VM read 2560, but this
-	// fixture leaves one page-set reported back: free covers the
-	// request plus the floor, so a cold create would fit and the pool
-	// must serve the takeover).
+	// Stock the pool with the box's pages back: the stock reads the
+	// dynamic node (four of alice's leases hold 2048 of the 4096
+	// pages, bob's suspended lease holds none), 6144 free over the
+	// 3072 (memory + the floor) one stock needs, and leaves the box at
+	// 2560 used.
 	fullFreeNode(t, svc, sub)
 	installDynamicNode(t, svc, sub, 4096, 0, 512)
 	svc.cfg.PoolSize = 1
@@ -441,15 +453,17 @@ func TestBoxFullStockedPoolServesWhenMemoryCovers(t *testing.T) {
 	if poolLen != 1 {
 		t.Fatalf("setup: the pool holds %d sandbox(es), want 1", poolLen)
 	}
-	// Pin the reading the grant's gate judges: 5 live sandboxes (four of
-	// alice's leases plus the pool VM) hold 2560 of the 4096 pages —
-	// 3072 MiB free — and the dynamic fixture above reports exactly
-	// that; free covers the request plus the floor, so a cold create
-	// would fit and the pool must serve the takeover.
-	cachedNode(t, svc, substrate.NodeInfo{
-		Status: "healthy", HugepagesTotal: 4096, HugepageSizeBytes: 2 << 20, HugepagesUsed: 2560,
-	})
+	// Pin the reading the grant's gate judges LAST, after the fair
+	// refresh: 5 live sandboxes (four of alice's leases plus the pool
+	// VM) hold 2560 of the 4096 pages in the dynamic fixture — 3072
+	// free, one MiB below the gate's need (3073) — so the pinned read
+	// gives the gate room: 2048 pages used, 4096 free, over the 3072 a
+	// cold create needs with the floor. A box that short is served —
+	// the refusal must only fire where a cold create would refuse too.
 	warmFairShares(svc, ctx)
+	cachedNode(t, svc, substrate.NodeInfo{
+		Status: "healthy", HugepagesTotal: 4096, HugepageSizeBytes: 2 << 20, HugepagesUsed: 2048,
+	})
 
 	granted, err := svc.grantLease(ctx, leaseRequest{owner: alice.ID, image: "mid", ttl: time.Hour, persistent: true})
 	if err != nil {
@@ -458,8 +472,8 @@ func TestBoxFullStockedPoolServesWhenMemoryCovers(t *testing.T) {
 	if !granted.pooled {
 		t.Fatal("the over-slice grant on a box with room did not come from the pool")
 	}
-	if got := cachedUsedPages(svc); got != 2560 {
-		t.Fatalf("after the pooled grant the cache reads %d pages used, want 2560 (no debit)", got)
+	if got := cachedUsedPages(svc); got != 2048 {
+		t.Fatalf("after the pooled grant the cache reads %d pages used, want 2048 (no debit)", got)
 	}
 	svc.store.mu.Lock()
 	poolLen = len(svc.store.pool["mid"])

@@ -149,10 +149,7 @@ func TestWarmPoolStopsBelowFreeFloor(t *testing.T) {
 			svc.cfg.MemoryFloorMiB = tc.floor
 			svc.warmPool(context.Background(), img)
 
-			svc.store.mu.Lock()
-			n := len(svc.store.pool["py-base"])
-			svc.store.mu.Unlock()
-			if n != tc.wantN {
+			if n := len(svc.store.pool["py-base"]); n != tc.wantN {
 				t.Fatalf("warm pool stocked %d sandbox(es), want %d", n, tc.wantN)
 			}
 			if got := calls(sub.Fake, "Create"); got != tc.wantCre {

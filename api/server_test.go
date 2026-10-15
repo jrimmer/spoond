@@ -72,6 +72,12 @@ type testSub struct {
 	// setDrainingFn, when set, replaces the fake's SetDraining: a test
 	// makes SetDraining(false) fail once and then succeed (spoond-52c R1).
 	setDrainingFn func(ctx context.Context, draining bool) error
+	// healthFn, when set, replaces the fake's Health: a test parks the
+	// validation of a popped pool sandbox mid-grant (spoond-fi5v's
+	// in-flight tests). Guarded by healthMu so a deferred clear never
+	// races a Health still reading it.
+	healthMu sync.Mutex
+	healthFn func(ctx context.Context, sandboxID string) error
 
 	// lastStart records the most recent Start request (the stream tests
 	// pin the initial PTY size it carries).
@@ -125,6 +131,23 @@ func (ts *testSub) Pause(ctx context.Context, sandboxID, templateID string) (str
 	return ts.Fake.Pause(ctx, sandboxID, templateID)
 }
 
+// Health delegates to healthFn when set, the fake otherwise. A test
+// parks a Health to hold a pooled grant's pop validation mid-flight (the
+// pool in-flight tests, spoond-fi5v).
+func (ts *testSub) Health(ctx context.Context, sandboxID string) error {
+	if ts.healthFn != nil {
+		return ts.healthFn(ctx, sandboxID)
+	}
+	return ts.Fake.Health(ctx, sandboxID)
+}
+
+// setHealthFn installs (or with nil clears) the Health delegate.
+func (ts *testSub) setHealthFn(fn func(ctx context.Context, sandboxID string) error) {
+	ts.healthMu.Lock()
+	ts.healthFn = fn
+	ts.healthMu.Unlock()
+}
+
 // SetDraining delegates to setDrainingFn when set, the fake otherwise.
 func (ts *testSub) SetDraining(ctx context.Context, draining bool) error {
 	if ts.setDrainingFn != nil {
@@ -139,6 +162,15 @@ func (ts *testSub) Create(ctx context.Context, req substrate.CreateRequest) (sub
 		return ts.createFn(ctx, req)
 	}
 	return ts.Fake.Create(ctx, req)
+}
+
+// SetCreateFn installs (or with nil clears) the Create delegate. A
+// wrapper that parks before calling the fake holds a warm-pool fill
+// mid-create (the pool in-flight tests, spoond-fi5v); a wrapper must
+// read its gate before delegating, so the parked create exists in no
+// ledger but the in-flight hold.
+func (ts *testSub) SetCreateFn(fn func(ctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error)) {
+	ts.createFn = fn
 }
 
 // List delegates to listFn when set, the fake otherwise.
