@@ -58,21 +58,24 @@ func (s *Service) markOwnerDeleted(owner string) {
 }
 
 // waitRefusal reports whether err is one a create may wait out (#129):
-// substrate capacity (hugepages full and take-back could not help yet,
-// or the host ran out of memory while the sandbox started — spoond-6ayi).
+// substrate capacity — hugepages full and take-back could not help yet,
+// or the host ran out of memory while the sandbox started (spoond-6ayi:
+// subCreate wraps the host's ENOMEM text in substrate.ErrCapacity, so the
+// gate rides the errors.Is alone; a raw text match here would also catch
+// a guest-side OOM, which is permanent and must not wait).
 // There are no per-owner caps to wait on any more (3.0 FS4); box_full,
 // bad requests, auth and unknown images answer at once.
 func waitRefusal(err error) bool {
-	return err != nil && (errors.Is(err, substrate.ErrCapacity) || isHostMemoryExhausted(err))
+	return errors.Is(err, substrate.ErrCapacity)
 }
 
-// waitRefusalDetail is the refusal the `queued` event names.
+// waitRefusalDetail is the refusal the `queued` event names. Only the
+// saturation gate carries a detail today; every other waiting refusal is
+// a plain capacity answer (the host-ENOMEM text rides wrapped
+// (spoond-fi5v), and a guest-side OOM never queues — see waitRefusal).
 func waitRefusalDetail(err error) string {
 	if d := saturationDetail(err); d != "" {
 		return d
-	}
-	if isHostMemoryExhausted(err) {
-		return "host memory exhausted (ENOMEM)"
 	}
 	return "capacity"
 }

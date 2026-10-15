@@ -135,7 +135,9 @@ func TestBoxFullBiggestBorrowerRefusesStockedPool(t *testing.T) {
 	}
 
 	// The grant faces the box as it stands: cache warm on the dynamic
-	// node (5120 MiB of the 8192 held, 3072 free), the snapshot over it.
+	// node (5120 MiB of the 8192 held, 3072 free — below the 4096 MiB a
+	// cold create needs over the floor, the shape box_full answers on),
+	// the snapshot over it.
 	cachedNode(t, svc, substrate.NodeInfo{
 		Status: "healthy", HugepagesTotal: 4096, HugepageSizeBytes: 2 << 20, HugepagesUsed: 2560,
 	})
@@ -337,7 +339,9 @@ func TestBoxFullStockedPoolHTTP429OwnLeases(t *testing.T) {
 	node.set(substrate.NodeInfo{Status: "healthy", HugepagesTotal: 4096, HugepageSizeBytes: 2 << 20, HugepagesUsed: 2560})
 	warmFairShares(svc, ctx)
 	// Alice holds her whole slice; the fixed fixture holds the
-	// admission reading at 5120 MiB used (3072 free), so a grant that
+	// admission reading at 5120 MiB used (3072 free — below the 4096 a
+	// cold create needs over the floor, so the pre-pop refusal is
+	// judged exactly where a cold create would refuse), so a grant that
 	// wrongly ran the admission first would take back, debit or refuse
 	// — the pool must serve it with none of those.
 	cachedNode(t, svc, substrate.NodeInfo{

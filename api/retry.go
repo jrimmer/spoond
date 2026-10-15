@@ -202,13 +202,17 @@ func (s *Service) clearRecoveryRetries(l *Lease) {
 
 // recoveryWaitForCapacity reports whether a recovery failure is a
 // substrate capacity refusal — the only recovery error that waits for
-// capacity instead of counting an attempt. Other admission refusals
+// capacity instead of counting an attempt. subCreate wraps the host's
+// ENOMEM text in substrate.ErrCapacity (spoond-6ayi), so the errors.Is
+// alone answers it — and a guest-side OOM (the same kernel text, from a
+// guest that touched its memory) is never a wait (spoond-fi5v). Other
+// admission refusals
 // (box_full) cannot reach a live lease's recovery: recoverFromCheckpoint
 // skips admission for a running lease, and a suspended lease's refusal
 // is a failure that a retry could clear, so it is counted (spoond-dxq
 // S4).
 func recoveryWaitForCapacity(err error) bool {
-	return err != nil && (errors.Is(err, substrate.ErrCapacity) || isHostMemoryExhausted(err))
+	return errors.Is(err, substrate.ErrCapacity)
 }
 
 // recoveryFailurePermanent reports whether err can never succeed on a
