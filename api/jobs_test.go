@@ -91,6 +91,32 @@ func startBackgroundJob(t *testing.T, ts *httptest.Server, id string, req map[st
 	return jobID, started
 }
 
+// jobWatchTimeout is how long the jobs tests wait for a job record to
+// reach a state. Generous: under -race on a loaded host the watcher
+// goroutine can be scheduled late, and the poll loop still returns at
+// once once the state is there.
+const jobWatchTimeout = 10 * time.Second
+
+// waitForSecretGone polls the guest until a secret file is gone, i.e.
+// ReadFile answers substrate.ErrNotFound. The backend's exit path marks
+// the record exited before its best-effort cleanup removes the staged
+// files, so the state check alone does not guarantee the guest is clean
+// yet; polling (never a fixed sleep) removes that race.
+func waitForSecretGone(t *testing.T, sub *testSub, sandboxID, name string) {
+	t.Helper()
+	deadline := time.Now().Add(jobWatchTimeout)
+	for {
+		if _, err := sub.ReadFile(context.Background(), sandboxID, secretPath(name), 1024); errors.Is(err, substrate.ErrNotFound) {
+			return
+		}
+		if time.Now().After(deadline) {
+			_, err := sub.ReadFile(context.Background(), sandboxID, secretPath(name), 1024)
+			t.Fatalf("secret %s still present after %s: %v", name, jobWatchTimeout, err)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 // waitJobState polls a job record until it reaches state.
 func waitJobState(t *testing.T, db *store.DB, jobID, state string, timeout time.Duration) store.JobRow {
 	t.Helper()
@@ -118,7 +144,7 @@ func TestBackgroundExecStartAndExitViaStream(t *testing.T) {
 	installJobProcess(t, sub, proc)
 
 	jobID, _ := startBackgroundJob(t, ts, id, map[string]any{"cmd": "echo out; echo err >&2; exit 7"})
-	row := waitJobState(t, db, jobID, "running", 2*time.Second)
+	row := waitJobState(t, db, jobID, "running", jobWatchTimeout)
 	if row.Cmd != "echo out; echo err >&2; exit 7" {
 		t.Fatalf("record cmd = %q", row.Cmd)
 	}
@@ -156,7 +182,7 @@ func TestBackgroundExecReconcileAfterRestart(t *testing.T) {
 	writeJobFile(t, sub, sandbox, jobID, "rc", "3\n")
 
 	svc.reconcileJobs(context.Background())
-	row := waitJobState(t, db, jobID, "exited", 2*time.Second)
+	row := waitJobState(t, db, jobID, "exited", jobWatchTimeout)
 	if row.ExitCode == nil || *row.ExitCode != 3 {
 		t.Fatalf("exit code = %v, want 3", row.ExitCode)
 	}
@@ -190,12 +216,12 @@ func TestBackgroundExecSecretsRemovedAndNotInRecord(t *testing.T) {
 
 	writeJobFile(t, sub, sandbox, jobID, "rc", "0\n")
 	p.Push(substrate.ProcessEvent{Kind: substrate.EventExit, ExitCode: 0})
-	waitJobState(t, db, jobID, "exited", 2*time.Second)
+	waitJobState(t, db, jobID, "exited", jobWatchTimeout)
 
 	// The backend's cleanup removes it (the guest wrapper normally does).
-	if _, err := sub.ReadFile(context.Background(), sandbox, secretPath("TOKEN"), 1024); !errors.Is(err, substrate.ErrNotFound) {
-		t.Fatalf("secret still present after exit: %v", err)
-	}
+	// It runs after the record turns exited (UpdateJobExit precedes
+	// removeJobSecrets), so read after the wait by polling, not at once.
+	waitForSecretGone(t, sub, sandbox, "TOKEN")
 }
 
 // TestJobLongPoll: ?wait= returns at once for an exited job and, for a
@@ -227,7 +253,7 @@ func TestJobLongPoll(t *testing.T) {
 	writeJobFile(t, sub, sandbox, jobID, "stdout", "z\n")
 	writeJobFile(t, sub, sandbox, jobID, "rc", "0\n")
 	p.Push(substrate.ProcessEvent{Kind: substrate.EventExit, ExitCode: 0})
-	waitJobState(t, db, jobID, "exited", 2*time.Second)
+	waitJobState(t, db, jobID, "exited", jobWatchTimeout)
 
 	resp, body = doReq(t, "GET", ts.URL+"/api/sandboxes/"+id+"/jobs/"+jobID+"?wait=30", "token-a", nil)
 	if resp.StatusCode != 200 {
@@ -327,7 +353,7 @@ func TestJobUTF8SafeCuts(t *testing.T) {
 	writeJobFile(t, sub, sandbox, jobID, "stderr", "\xffoops")
 	writeJobFile(t, sub, sandbox, jobID, "rc", "1\n")
 	p.Push(substrate.ProcessEvent{Kind: substrate.EventExit, ExitCode: 1})
-	row := waitJobState(t, db, jobID, "exited", 2*time.Second)
+	row := waitJobState(t, db, jobID, "exited", jobWatchTimeout)
 	if !utf8.ValidString(row.StderrTail) {
 		t.Fatalf("stored stderr tail is not valid UTF-8: %q", row.StderrTail)
 	}
@@ -380,7 +406,7 @@ func TestJobSignalFinishedDoesNotResume(t *testing.T) {
 	jobID, _ := startBackgroundJob(t, ts, id, map[string]any{"cmd": "sleep 600"})
 	writeJobFile(t, sub, sandbox, jobID, "rc", "143\n")
 	p.Push(substrate.ProcessEvent{Kind: substrate.EventExit, ExitCode: 143})
-	waitJobState(t, db, jobID, "exited", 2*time.Second)
+	waitJobState(t, db, jobID, "exited", jobWatchTimeout)
 
 	if _, err := svc.suspend(context.Background(), "consumer-a", id); err != nil {
 		t.Fatalf("suspend: %v", err)
@@ -427,7 +453,7 @@ func TestJobSignal(t *testing.T) {
 	// Finish it; a second signal is 409.
 	writeJobFile(t, sub, sandbox, jobID, "rc", "143\n")
 	p.Push(substrate.ProcessEvent{Kind: substrate.EventExit, ExitCode: 143})
-	waitJobState(t, db, jobID, "exited", 2*time.Second)
+	waitJobState(t, db, jobID, "exited", jobWatchTimeout)
 
 	resp, _ = doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/jobs/"+jobID+"/signal", "token-a", map[string]any{"signal": "KILL"})
 	if resp.StatusCode != http.StatusConflict {
@@ -547,7 +573,7 @@ func TestJobLostOnColdRestart(t *testing.T) {
 	if _, err := svc.restart(context.Background(), lease.Owner, id, "cold"); err != nil {
 		t.Fatalf("cold restart: %v", err)
 	}
-	row := waitJobState(t, db, jobID, "lost", 2*time.Second)
+	row := waitJobState(t, db, jobID, "lost", jobWatchTimeout)
 	if row.EndedAt.IsZero() {
 		t.Fatalf("lost job has no ended_at")
 	}
@@ -731,7 +757,7 @@ func TestJobsListAndDetail(t *testing.T) {
 	first, _ := startBackgroundJob(t, ts, id, map[string]any{"cmd": "echo first"})
 	writeJobFile(t, sub, sandbox, first, "rc", "0\n")
 	p.Push(substrate.ProcessEvent{Kind: substrate.EventExit, ExitCode: 0})
-	waitJobState(t, svc.db, first, "exited", 2*time.Second)
+	waitJobState(t, svc.db, first, "exited", jobWatchTimeout)
 
 	second := fake.NewProcess(1011)
 	installJobProcess(t, sub, second)
@@ -860,7 +886,7 @@ func TestJobOutputSurvivesRestart(t *testing.T) {
 	// through the files.
 	svc.log = log.New(io.Discard, "", 0)
 	svc.reconcileJobs(context.Background())
-	row := waitJobState(t, db, jobID, "exited", 2*time.Second)
+	row := waitJobState(t, db, jobID, "exited", jobWatchTimeout)
 	if row.ExitCode == nil || *row.ExitCode != 0 {
 		t.Fatalf("exit = %v", row.ExitCode)
 	}
@@ -1020,7 +1046,7 @@ func TestJobMaxRuntimeKillsJob(t *testing.T) {
 	if n, _ := running(context.Background(), id); n != 0 {
 		t.Fatalf("running jobs after timeout = %d, want 0", n)
 	}
-	got := waitJobState(t, db, jobID, "exited", 2*time.Second)
+	got := waitJobState(t, db, jobID, "exited", jobWatchTimeout)
 	if got.Reason != "timed_out" {
 		t.Fatalf("reason = %q, want timed_out", got.Reason)
 	}
@@ -1209,7 +1235,7 @@ func TestJobMaxRuntimeAppliesToSuspendedLease(t *testing.T) {
 		t.Fatalf("resume: %v", err)
 	}
 	svc.reconcileJobs(context.Background())
-	got := waitJobState(t, db, jobID, "exited", 2*time.Second)
+	got := waitJobState(t, db, jobID, "exited", jobWatchTimeout)
 	if got.Reason != "timed_out" {
 		t.Fatalf("reason = %q, want timed_out", got.Reason)
 	}
@@ -1290,7 +1316,7 @@ func TestJobReconcileDoesNotMarkSuspendedLeaseActive(t *testing.T) {
 	}
 	writeJobFile(t, sub, sandbox, jobID, "rc", "0\n")
 	svc.reconcileJobs(context.Background())
-	waitJobState(t, db, jobID, "exited", 2*time.Second)
+	waitJobState(t, db, jobID, "exited", jobWatchTimeout)
 }
 
 // TestJobMaxRuntimeKillRetriesAfterFailure: if the cap's kill fails, the
@@ -1343,7 +1369,7 @@ func TestJobMaxRuntimeKillRetriesAfterFailure(t *testing.T) {
 
 	// The next reconcile retries and closes the record.
 	svc.reconcileJobs(context.Background())
-	got := waitJobState(t, db, jobID, "exited", 2*time.Second)
+	got := waitJobState(t, db, jobID, "exited", jobWatchTimeout)
 	if got.Reason != "timed_out" {
 		t.Fatalf("reason = %q, want timed_out", got.Reason)
 	}
@@ -1392,7 +1418,7 @@ func TestJobMaxRuntimeSkipsBusyLease(t *testing.T) {
 	svc.store.leases[id].busy = false
 	svc.store.mu.Unlock()
 	svc.reconcileJobs(context.Background())
-	got := waitJobState(t, db, jobID, "exited", 2*time.Second)
+	got := waitJobState(t, db, jobID, "exited", jobWatchTimeout)
 	if got.Reason != "timed_out" {
 		t.Fatalf("reason = %q, want timed_out", got.Reason)
 	}
@@ -1418,7 +1444,7 @@ func TestJobMaxRuntimeAppliesToPreUpgradeRecord(t *testing.T) {
 	writeJobFile(t, sub, sandbox, "j-pre-upgrade", "pid", "4242\n")
 
 	svc.reconcileJobs(context.Background())
-	got := waitJobState(t, db, "j-pre-upgrade", "exited", 2*time.Second)
+	got := waitJobState(t, db, "j-pre-upgrade", "exited", jobWatchTimeout)
 	if got.Reason != "timed_out" {
 		t.Fatalf("reason = %q, want timed_out", got.Reason)
 	}
@@ -1462,7 +1488,7 @@ func TestJobMaxRuntimeDoesNotRereadLeaseFieldsUnlocked(t *testing.T) {
 	}()
 	svc.reconcileJobs(context.Background())
 	wg.Wait()
-	got := waitJobState(t, db, jobID, "exited", 2*time.Second)
+	got := waitJobState(t, db, jobID, "exited", jobWatchTimeout)
 	if got.Reason != "timed_out" {
 		t.Fatalf("reason = %q, want timed_out", got.Reason)
 	}
@@ -1499,7 +1525,7 @@ func TestJobWatcherDoesNotRecordTimingOutExit(t *testing.T) {
 
 	// The cap closes it with its own reason and clears the flag.
 	svc.finishJobTimedOut(context.Background(), row, 124, "", sandbox, row.Generation)
-	got := waitJobState(t, db, jobID, "exited", 2*time.Second)
+	got := waitJobState(t, db, jobID, "exited", jobWatchTimeout)
 	if got.Reason != "timed_out" {
 		t.Fatalf("reason = %q, want timed_out", got.Reason)
 	}
