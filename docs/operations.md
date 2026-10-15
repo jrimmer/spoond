@@ -1132,7 +1132,10 @@ below the floor each tick drops one newest pooled sandbox (the
 substrate guest goes, the pool entry refills once the pressure clears)
 before it pauses any lease — a pool VM is nobody's lease, so nobody
 loses work. A pooled sandbox handed to a lease is counted once, as the
-lease.
+lease. The takeover is still a fair-shares admission: the biggest
+borrower's create is refused `429 box_full` before any pool VM is
+handed over (the pool entry stays stocked), so the pool cannot serve an
+owner an over-slice grant its cold create would have refused.
 
 A pooled sandbox is created under a placeholder lease with
 `SPOOND_LEASE_ID=pool`; when it is handed to a real lease, the backend
