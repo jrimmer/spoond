@@ -1556,3 +1556,200 @@ func TestSeedFromCryptoRandIs64Hex(t *testing.T) {
 	mr.Read(raw2[:]) // never used as a seed; only shape-checking the size
 	_ = raw2
 }
+
+// wantRow is one expected skip row.
+type wantRow struct {
+	name string
+	note string
+}
+
+// wantRows is the skip rows a --container run must carry: one row per
+// skipped group, each with its note.
+type wantRows []wantRow
+
+// mustWantRows fails unless items carry exactly one row per entry with
+// the wanted result and note.
+func mustWantRows(t *testing.T, items []Item, want wantRows) {
+	t.Helper()
+	byname := runtimeRows(t, items)
+	for _, w := range want {
+		row, ok := byname[w.name]
+		if !ok {
+			t.Errorf("no row for %s:\n%s", w.name, reportText(items))
+			continue
+		}
+		if row.Result != Skipped || row.Note != w.note {
+			t.Errorf("row %s = %+v, want skipped with note %q", w.name, row, w.note)
+		}
+	}
+}
+
+// containerWantRows is the skip table a --container run reports: the
+// binaries, the pinned artifacts and /fc-vm come from the image; the
+// guard and orchestrator units, systemd and the health wait are the
+// orchestrator container's job.
+func containerWantRows() wantRows {
+	want := wantRows{
+		{name: orchestratorBinPath, note: containerImageNote},
+	}
+	for _, art := range pinned {
+		want = append(want, struct {
+			name string
+			note string
+		}{art.path, containerImageNote})
+	}
+	want = append(want,
+		struct{ name, note string }{fcVMPath, containerImageNote},
+		struct{ name, note string }{guardUnitPath + " (unit)", containerRunsNote},
+		struct{ name, note string }{orchestratorUnitPath, containerRunsNote},
+		struct{ name, note string }{"systemctl", containerRunsNote},
+		struct{ name, note string }{"orchestrator /health", containerRunsNote},
+	)
+	return want
+}
+
+// containerRowsWritten are the four files plus the seed dir a --container
+// run writes.
+var containerRowsWritten = []string{
+	orchestratorEnvPath,
+	flagsJSONPath,
+	tokenSeedPath,
+	guardNftPath,
+	spoondDirPath,
+}
+
+// TestRuntimeContainerWritesConfigOnly: the phase writes the four config
+// files (orchestrator.env and flags.json with the store dir substituted,
+// the token seed, the guard nftables table) and the seed dir's 0700 mode;
+// every other group is skipped with its note; no command runs and
+// nothing is fetched; the report never prints the seed.
+func TestRuntimeContainerWritesConfigOnly(t *testing.T) {
+	env, out, runner, fetcher, _ := runtimeEnv(t)
+	env.Opt.Container = true
+	env.Opt.StoreDir = "/data/e2b-store"
+
+	items, text, err := runRuntime(t, env)
+	if err != nil {
+		t.Fatalf("container run: %v\n%s", err, text)
+	}
+
+	// The four files exist and the seed dir is 0700.
+	for _, path := range containerRowsWritten {
+		if _, err := os.Stat(env.Resolve(path)); err != nil {
+			t.Errorf("the container run did not write %s: %v", path, err)
+		}
+	}
+	if got := fileMode(t, env, spoondDirPath); got != 0o700 {
+		t.Errorf("%s mode = %#o, want 0700", spoondDirPath, got)
+	}
+	// The store dir was substituted in the operator-editable env.
+	b, err := os.ReadFile(env.Resolve(orchestratorEnvPath))
+	if err != nil {
+		t.Fatalf("read %s: %v", orchestratorEnvPath, err)
+	}
+	if !strings.Contains(string(b), "/data/e2b-store") {
+		t.Errorf("%s does not name --store-dir:\n%s", orchestratorEnvPath, b)
+	}
+	// Nothing else on disk: no binaries, no pinned artifacts, no /fc-vm,
+	// no units. The seed is 64 hex chars and never printed.
+	for _, path := range []string{orchestratorBinPath, envdBinPath, runtimeStampPath, fcVMPath, guardUnitPath, orchestratorUnitPath} {
+		mustNotExist(t, env, path)
+	}
+
+	// The skip rows, one per group, with the notes.
+	mustWantRows(t, items, containerWantRows())
+
+	// The written files are created rows (a second run shows kept ones).
+	byname := runtimeRows(t, items)
+	for _, path := range containerRowsWritten {
+		if row := byname[path]; row.Result != Created {
+			t.Errorf("row %s = %+v, want created", path, row)
+		}
+	}
+
+	// No command ran, nothing was fetched, the report printed no seed.
+	if len(runner.calls) != 0 {
+		t.Errorf("the container run ran commands: %v", runner.calls)
+	}
+	if len(fetcher.urls) != 0 {
+		t.Errorf("the container run fetched %v", fetcher.urls)
+	}
+	seed, _ := os.ReadFile(env.Resolve(tokenSeedPath))
+	s := strings.TrimRight(string(seed), "\n")
+	if len(s) != 64 || !rtIsHex(s) {
+		t.Errorf("seed = %q, want 64 hex chars", s)
+	}
+	if strings.Contains(text, s) {
+		t.Error("the report printed the token seed")
+	}
+	_ = out
+}
+
+// TestRuntimeContainerSecondRunAllKeptAndSkipped: a second --container
+// run rewrites nothing (every written file kept) and still skips the
+// rest with the same notes.
+func TestRuntimeContainerSecondRunAllKeptAndSkipped(t *testing.T) {
+	env, _, runner, fetcher, _ := runtimeEnv(t)
+	env.Opt.Container = true
+	env.Opt.StoreDir = "/data/e2b-store"
+
+	if _, _, err := runRuntime(t, env); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	// An operator edit must survive: never overwritten.
+	edited := []byte("NODE_ID=my-node\n")
+	if err := os.WriteFile(env.Resolve(orchestratorEnvPath), edited, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	seed, _ := os.ReadFile(env.Resolve(tokenSeedPath))
+
+	items, text, err := runRuntime(t, env)
+	if err != nil {
+		t.Fatalf("second run: %v\n%s", err, text)
+	}
+	byname := runtimeRows(t, items)
+	for _, path := range containerRowsWritten {
+		row, ok := byname[path]
+		if !ok {
+			t.Errorf("no row for %s:\n%s", path, text)
+			continue
+		}
+		if row.Result != Kept {
+			t.Errorf("row %s = %+v, want kept", path, row)
+		}
+	}
+	if b, _ := os.ReadFile(env.Resolve(orchestratorEnvPath)); !bytes.Equal(b, edited) {
+		t.Errorf("the operator's edit was overwritten: %q", b)
+	}
+	if b, _ := os.ReadFile(env.Resolve(tokenSeedPath)); string(b) != string(seed) {
+		t.Error("the second run replaced the token seed")
+	}
+	mustWantRows(t, items, containerWantRows())
+	if len(runner.calls) != 0 {
+		t.Errorf("a kept container run ran commands: %v", runner.calls)
+	}
+	if len(fetcher.urls) != 0 {
+		t.Errorf("a kept container run fetched %v", fetcher.urls)
+	}
+}
+
+// TestRuntimeContainerDevBuildSucceeds: --container with a development
+// build (no Version, no --runtime) succeeds — no binary is installed, so
+// the development-build hint never fires.
+func TestRuntimeContainerDevBuildSucceeds(t *testing.T) {
+	env, _, runner, fetcher, _ := runtimeEnv(t)
+	env.Opt.Container = true
+	env.Version = ""
+
+	items, text, err := runRuntime(t, env)
+	if err != nil {
+		t.Fatalf("container dev-build run: %v\n%s", err, text)
+	}
+	mustNotExist(t, env, orchestratorBinPath)
+	if _, err := os.Stat(env.Resolve(tokenSeedPath)); err != nil {
+		t.Errorf("the config was not written: %v", err)
+	}
+	if len(runner.calls) != 0 || len(fetcher.urls) != 0 {
+		t.Errorf("ran %v, fetched %v", runner.calls, fetcher.urls)
+	}
+}
