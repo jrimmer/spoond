@@ -115,16 +115,22 @@ const (
 	wantNbdMaxPart = 16
 )
 
-// nbdParamPath is the running module's parameter, read back after the
-// modprobe; a smaller value means nbd loaded before the option did.
-const nbdParamPath = "/sys/module/nbd/parameters/nbds_max"
+// nbdParamPath is the running module's parameter; tunModulePath is
+// the loaded-module marker. The checks decide whether a modprobe is
+// needed at all, so a settled host reruns the step without touching
+// the kernel.
+const (
+	nbdParamPath  = "/sys/module/nbd/parameters/nbds_max"
+	tunModulePath = "/sys/module/tun"
+)
 
 // hostModules loads the kernel modules the leases run on: nbd (256
 // devices, 16 partitions each), tun and kvm. The configs land first so
-// the next boot matches, then the modules load now. The running
-// nbds_max is read back: nbd is often already loaded from an earlier
-// life with a smaller count, and only a reboot (or rmmod without
-// leases) fixes that.
+// the next boot matches; a module already loaded in the wanted state
+// is left alone, the rest get their modprobe. The running nbds_max is
+// always read back: nbd is often loaded from an earlier life with a
+// smaller count, and only a reboot (or rmmod without leases) fixes
+// that.
 func hostModules(ctx context.Context, env *Env, r *Reporter, st *hostState) error {
 	if err := env.writeFile(r, "/etc/modules-load.d/e2b.conf", []byte(modulesConf), 0o644); err != nil {
 		return err
@@ -132,28 +138,68 @@ func hostModules(ctx context.Context, env *Env, r *Reporter, st *hostState) erro
 	if err := env.writeFile(r, "/etc/modprobe.d/e2b-nbd.conf", []byte(nbdConf), 0o644); err != nil {
 		return err
 	}
-	if err := env.exec(ctx, "modprobe", "nbd", "nbds_max=256", "max_part=16"); err != nil {
-		return fmt.Errorf("%w — modprobe could not load nbd; fix the kernel output above, then rerun", err)
-	}
-	r.Add(Kept, "modprobe nbd", "")
-	if err := env.exec(ctx, "modprobe", "tun"); err != nil {
-		return fmt.Errorf("%w — modprobe could not load tun; fix the kernel output above, then rerun", err)
-	}
-	r.Add(Kept, "modprobe tun", "")
 
+	// nbd: loaded with the right count is a kept; loaded smaller is
+	// the one failure a rerun cannot fix; absent wants the modprobe.
+	loaded, err := nbdLoaded(env)
+	switch {
+	case errors.Is(err, errNotLoaded):
+		if err := env.exec(ctx, "modprobe", "nbd", "nbds_max=256", "max_part=16"); err != nil {
+			return fmt.Errorf("%w — modprobe could not load nbd; fix the kernel output above, then rerun", err)
+		}
+		if env.DryRun {
+			// The load never happened, so there is nothing to read
+			// back; the row says what the real run would do.
+			r.Add(Skipped, "modprobe nbd", "dry-run: would load with nbds_max=256 max_part=16")
+			return loadTun(ctx, env, r)
+		}
+		if loaded, err = nbdLoaded(env); err != nil {
+			return err
+		}
+	case err != nil:
+		return err
+	}
+	if loaded < wantNbdsMax {
+		return fmt.Errorf("nbd is loaded with nbds_max=%d; run `rmmod nbd` (no leases running) or reboot, then rerun", loaded)
+	}
+	r.Add(Kept, "nbd", fmt.Sprintf("loaded with nbds_max=%d", loaded))
+	return loadTun(ctx, env, r)
+}
+
+// loadTun loads tun when the module is not in the kernel; the module
+// directory under /sys is the loaded marker.
+func loadTun(ctx context.Context, env *Env, r *Reporter) error {
+	if _, err := os.Stat(env.Resolve(tunModulePath)); errors.Is(err, os.ErrNotExist) {
+		if err := env.exec(ctx, "modprobe", "tun"); err != nil {
+			return fmt.Errorf("%w — modprobe could not load tun; fix the kernel output above, then rerun", err)
+		}
+		r.Add(Changed, "modprobe tun", "")
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("stat %s: %w", tunModulePath, err)
+	}
+	r.Add(Kept, "tun", "loaded")
+	return nil
+}
+
+// errNotLoaded says the nbd module is not in the kernel.
+var errNotLoaded = errors.New("nbd is not loaded")
+
+// nbdLoaded returns the running nbds_max, or errNotLoaded when the nbd
+// module is not loaded.
+func nbdLoaded(env *Env) (int, error) {
 	b, err := os.ReadFile(env.Resolve(nbdParamPath))
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, errNotLoaded
+	}
 	if err != nil {
-		return fmt.Errorf("read %s: %w", nbdParamPath, err)
+		return 0, fmt.Errorf("read %s: %w", nbdParamPath, err)
 	}
 	got, err := strconv.Atoi(strings.TrimSpace(string(b)))
 	if err != nil {
-		return fmt.Errorf("%s: %q is not a number", nbdParamPath, strings.TrimSpace(string(b)))
+		return 0, fmt.Errorf("%s: %q is not a number", nbdParamPath, strings.TrimSpace(string(b)))
 	}
-	if got < wantNbdsMax {
-		return fmt.Errorf("nbd is loaded with nbds_max=%d; run `rmmod nbd` (no leases running) or reboot, then rerun", got)
-	}
-	r.Add(Kept, nbdParamPath, fmt.Sprintf("nbds_max=%d", got))
-	return nil
+	return got, nil
 }
 
 func init() { hostSteps["udev"] = hostUdev }

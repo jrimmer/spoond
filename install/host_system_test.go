@@ -146,15 +146,49 @@ func writeRootFile(t *testing.T, env *Env, path, content string) {
 	}
 }
 
-// TestHostModulesWritesConfigsAndLoads: both configs land with the
-// wanted content, both modprobes run, and the running nbds_max is read
-// back and reported.
-func TestHostModulesWritesConfigsAndLoads(t *testing.T) {
-	env, _, runner := testEnv(t)
+// kernelSim stands in for the kernel: every command goes through the
+// inner recordRunner, and a successful modprobe leaves the module
+// markers the step reads back, as the real kernel would.
+type kernelSim struct {
+	t     *testing.T
+	env   *Env
+	inner *recordRunner
+}
+
+func (k *kernelSim) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	out, err := k.inner.Run(ctx, name, args...)
+	if err == nil && name == "modprobe" && len(args) > 0 {
+		switch args[0] {
+		case "nbd":
+			writeRootFile(k.t, k.env, nbdParamPath, "256\n")
+		case "tun":
+			writeRootFile(k.t, k.env, tunModulePath, "")
+		}
+	}
+	return out, err
+}
+
+// modprobeReplies teaches runner the two modprobes and seeds the
+// loaded-module fakes. loaded=false leaves /sys without the module
+// dirs, so the step decides a modprobe is needed.
+func modprobeReplies(t *testing.T, env *Env, runner *recordRunner, loaded bool, nbdsMax string) {
+	t.Helper()
 	runner.reply = map[string]fakeReply{}
 	addReply(runner, "modprobe nbd nbds_max=256 max_part=16", "")
 	addReply(runner, "modprobe tun", "")
-	writeRootFile(t, env, nbdParamPath, "256\n")
+	if loaded {
+		writeRootFile(t, env, nbdParamPath, nbdsMax+"\n")
+		writeRootFile(t, env, tunModulePath, "")
+	}
+}
+
+// TestHostModulesWritesConfigsAndLoads: both configs land with the
+// wanted content, the missing modules load, and the running nbds_max
+// is reported.
+func TestHostModulesWritesConfigsAndLoads(t *testing.T) {
+	env, _, runner := testEnv(t)
+	modprobeReplies(t, env, runner, false, "")
+	env.Run = &kernelSim{t: t, env: env, inner: runner}
 
 	r := &Reporter{Phase: PhaseHost}
 	if err := hostModules(context.Background(), env, r, &hostState{}); err != nil {
@@ -175,25 +209,22 @@ func TestHostModulesWritesConfigsAndLoads(t *testing.T) {
 			t.Errorf("call %d = %q, want %q", i, runner.calls[i], want[i])
 		}
 	}
-	var nbds bool
+	var kept bool
 	for _, it := range r.Items() {
-		if it.Name == nbdParamPath && it.Result == Kept {
-			nbds = true
+		if it.Name == "nbd" && it.Result == Kept {
+			kept = true
 		}
 	}
-	if !nbds {
-		t.Errorf("rows = %+v, want a kept row for the running nbds_max", r.Items())
+	if !kept {
+		t.Errorf("rows = %+v, want a kept row for the loaded nbd", r.Items())
 	}
 }
 
 // TestHostModulesLowNbdsMaxFails: nbd already loaded with 16 devices;
-// the error carries the rmmod/reboot fix.
+// the error carries the rmmod/reboot fix and no modprobe runs.
 func TestHostModulesLowNbdsMaxFails(t *testing.T) {
 	env, _, runner := testEnv(t)
-	runner.reply = map[string]fakeReply{}
-	addReply(runner, "modprobe nbd nbds_max=256 max_part=16", "")
-	addReply(runner, "modprobe tun", "")
-	writeRootFile(t, env, nbdParamPath, "16\n")
+	modprobeReplies(t, env, runner, true, "16")
 
 	err := hostModules(context.Background(), env, &Reporter{Phase: PhaseHost}, &hostState{})
 	if err == nil {
@@ -204,10 +235,59 @@ func TestHostModulesLowNbdsMaxFails(t *testing.T) {
 			t.Errorf("error %q does not mention %q", err, want)
 		}
 	}
+	for _, c := range runner.calls {
+		if strings.HasPrefix(c, "modprobe") {
+			t.Errorf("ran %q despite the loaded module", c)
+		}
+	}
 }
 
-// TestHostUdevWritesRule: the rule lands with host-setup.sh's exact
-// content; a rerun over it is a kept.
+// TestHostModulesSecondRunKeeps: with the configs written and the
+// modules loaded in the wanted state, the rerun reports kept only and
+// runs no changing command.
+func TestHostModulesSecondRunKeeps(t *testing.T) {
+	env, _, runner := testEnv(t)
+	modprobeReplies(t, env, runner, false, "")
+	env.Run = &kernelSim{t: t, env: env, inner: runner}
+
+	st := &hostState{}
+	if err := hostModules(context.Background(), env, &Reporter{Phase: PhaseHost}, st); err != nil {
+		t.Fatal(err)
+	}
+	runner.calls = nil
+
+	r := &Reporter{Phase: PhaseHost}
+	if err := hostModules(context.Background(), env, r, st); err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range r.Items() {
+		if it.Result != Kept {
+			t.Errorf("rerun row %+v, want kept only", it)
+		}
+	}
+	if len(runner.calls) != 0 {
+		t.Errorf("rerun calls = %v, want none", runner.calls)
+	}
+}
+
+// TestHostModulesDryRunRunsNoModprobe: the configs are planned, the
+// modprobes are changing commands and do not run in a dry run; the
+// row for the loading is skipped, not shown as done.
+func TestHostModulesDryRunRunsNoModprobe(t *testing.T) {
+	env, out, runner := testEnv(t)
+	env.DryRun = true
+	modprobeReplies(t, env, runner, false, "")
+
+	r := &Reporter{Phase: PhaseHost, Out: out}
+	if err := hostModules(context.Background(), env, r, &hostState{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 0 {
+		t.Errorf("dry run calls = %v, want none", runner.calls)
+	}
+	mustNotExist(t, env, "/etc/modules-load.d/e2b.conf")
+	mustNotExist(t, env, "/etc/modprobe.d/e2b-nbd.conf")
+}
 func TestHostUdevWritesRule(t *testing.T) {
 	env, _, _ := testEnv(t)
 	r := &Reporter{Phase: PhaseHost}
@@ -228,37 +308,6 @@ func TestHostUdevWritesRule(t *testing.T) {
 	}
 	if len(r.Items()) != 1 || r.Items()[0].Result != Kept {
 		t.Errorf("rerun rows = %+v, want one kept row", r.Items())
-	}
-}
-
-// TestHostModulesSecondRunKeeps: the configs match, so the rerun
-// reports kept rows and still runs the modprobes (the runner answers
-// them either way), and the nbds_max row is kept again.
-func TestHostModulesSecondRunKeeps(t *testing.T) {
-	env, _, runner := testEnv(t)
-	runner.reply = map[string]fakeReply{}
-	addReply(runner, "modprobe nbd nbds_max=256 max_part=16", "")
-	addReply(runner, "modprobe tun", "")
-	writeRootFile(t, env, nbdParamPath, "256\n")
-
-	st := &hostState{}
-	if err := hostModules(context.Background(), env, &Reporter{Phase: PhaseHost}, st); err != nil {
-		t.Fatal(err)
-	}
-	runner.calls = nil
-	r := &Reporter{Phase: PhaseHost}
-	if err := hostModules(context.Background(), env, r, st); err != nil {
-		t.Fatal(err)
-	}
-	for _, it := range r.Items() {
-		if it.Result == Changed || it.Result == Created {
-			t.Errorf("rerun row %+v, want kept only", it)
-		}
-	}
-	// The modprobes still ran: loading an already-loaded module is
-	// how the step guarantees the running state, not a write.
-	if len(runner.calls) != 2 {
-		t.Errorf("rerun calls = %v, want the two modprobes", runner.calls)
 	}
 }
 
