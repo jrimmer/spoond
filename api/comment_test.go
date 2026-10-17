@@ -45,8 +45,7 @@ func TestValidateCommentRules(t *testing.T) {
 // comment — the create body's `comment` field and
 // POST /api/leases/{id}/comment — refuse control characters (a newline
 // and a 0x1b escape) with the shared 400, and accept plain and UTF-8
-// text. The alias spellings answer identically: they are the same
-// registrations.
+// text.
 func TestCommentRoutesRejectControlChars(t *testing.T) {
 	ts, _ := newTestServer(t)
 
@@ -57,14 +56,8 @@ func TestCommentRoutesRejectControlChars(t *testing.T) {
 	}
 	id := create["id"].(string)
 
-	// Both route families, primary and alias, over the same cases.
-	paths := []struct {
-		create     string
-		setComment string
-	}{
-		{"/api/leases", "/api/leases/" + id + "/comment"},
-		{"/api/leases", "/api/leases/" + id + "/comment"},
-	}
+	// Both routes that carry a comment, over the same cases.
+	createPath, setCommentPath := "/api/leases", "/api/leases/"+id+"/comment"
 	bad := []struct {
 		name  string
 		value string
@@ -74,50 +67,46 @@ func TestCommentRoutesRejectControlChars(t *testing.T) {
 		{"escape 0x1b", "bad\x1b[31mcolor"},
 		{"del 0x7f", "ok\x7fdone"},
 	}
-	for _, p := range paths {
-		for _, tc := range bad {
-			// The create body's comment field.
-			resp, body := doReq(t, "POST", ts.URL+p.create, "token-a",
-				map[string]any{"image": "py-base", "ttl": 60, "comment": tc.value})
-			if resp.StatusCode != http.StatusBadRequest {
-				t.Errorf("%s create comment %q: status %d, want 400", p.create, tc.name, resp.StatusCode)
-			} else if body["error"] != "comment must not contain control characters" {
-				t.Errorf("%s create comment %q: error %v, want the control-character message", p.create, tc.name, body["error"])
-			}
-			// The comment route on a lease that already exists.
-			resp, body = doReq(t, "POST", ts.URL+p.setComment, "token-a", map[string]any{"comment": tc.value})
-			if resp.StatusCode != http.StatusBadRequest {
-				t.Errorf("%s set comment %q: status %d, want 400", p.setComment, tc.name, resp.StatusCode)
-			} else if body["error"] != "comment must not contain control characters" {
-				t.Errorf("%s set comment %q: error %v, want the control-character message", p.setComment, tc.name, body["error"])
-			}
+	for _, tc := range bad {
+		// The create body's comment field.
+		resp, body := doReq(t, "POST", ts.URL+createPath, "token-a",
+			map[string]any{"image": "py-base", "ttl": 60, "comment": tc.value})
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("%s create comment %q: status %d, want 400", createPath, tc.name, resp.StatusCode)
+		} else if body["error"] != "comment must not contain control characters" {
+			t.Errorf("%s create comment %q: error %v, want the control-character message", createPath, tc.name, body["error"])
 		}
-		// Nothing was started for the refused creates; the existing
-		// lease keeps its comment.
-		createID, ok := create["id"].(string)
-		if !ok || createID != id {
-			t.Fatalf("unexpected create id %v", create["id"])
+		// The comment route on a lease that already exists.
+		resp, body = doReq(t, "POST", ts.URL+setCommentPath, "token-a", map[string]any{"comment": tc.value})
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("%s set comment %q: status %d, want 400", setCommentPath, tc.name, resp.StatusCode)
+		} else if body["error"] != "comment must not contain control characters" {
+			t.Errorf("%s set comment %q: error %v, want the control-character message", setCommentPath, tc.name, body["error"])
 		}
+	}
+	// Nothing was started for the refused creates; the existing
+	// lease keeps its comment.
+	createID, ok := create["id"].(string)
+	if !ok || createID != id {
+		t.Fatalf("unexpected create id %v", create["id"])
 	}
 
 	// Plain text and non-ASCII printable text pass both routes.
 	good := []string{"forgejo job 42 https://code.example.com/jobs/42", "é ✓"}
-	for _, p := range paths {
-		for _, g := range good {
-			resp, body := doReq(t, "POST", ts.URL+p.setComment, "token-a", map[string]any{"comment": g})
-			if resp.StatusCode != http.StatusOK || body["comment"] != g {
-				t.Errorf("%s set comment %q: status %d body %v, want 200 with the comment echoed", p.setComment, g, resp.StatusCode, body)
-			}
-			resp, createBody := doReq(t, "POST", ts.URL+p.create, "token-a",
-				map[string]any{"image": "py-base", "ttl": 60, "comment": g})
-			if resp.StatusCode != http.StatusCreated {
-				t.Errorf("%s create comment %q: status %d, want 201", p.create, g, resp.StatusCode)
-			}
-			if cid, _ := createBody["id"].(string); cid != "" {
-				_, got := doReq(t, "GET", ts.URL+p.create+"/"+cid, "token-a", nil)
-				if got["comment"] != g {
-					t.Errorf("%s create comment %q: lease carries %v", p.create, g, got["comment"])
-				}
+	for _, g := range good {
+		resp, body := doReq(t, "POST", ts.URL+setCommentPath, "token-a", map[string]any{"comment": g})
+		if resp.StatusCode != http.StatusOK || body["comment"] != g {
+			t.Errorf("%s set comment %q: status %d body %v, want 200 with the comment echoed", setCommentPath, g, resp.StatusCode, body)
+		}
+		resp, createBody := doReq(t, "POST", ts.URL+createPath, "token-a",
+			map[string]any{"image": "py-base", "ttl": 60, "comment": g})
+		if resp.StatusCode != http.StatusCreated {
+			t.Errorf("%s create comment %q: status %d, want 201", createPath, g, resp.StatusCode)
+		}
+		if cid, _ := createBody["id"].(string); cid != "" {
+			_, got := doReq(t, "GET", ts.URL+createPath+"/"+cid, "token-a", nil)
+			if got["comment"] != g {
+				t.Errorf("%s create comment %q: lease carries %v", createPath, g, got["comment"])
 			}
 		}
 	}

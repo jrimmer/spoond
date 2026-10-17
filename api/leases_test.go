@@ -199,4 +199,3 @@ func TestLeaseMetricLabels(t *testing.T) {
 		t.Fatalf("normalizePath(files) = %q, want %q", got, want)
 	}
 }
-
