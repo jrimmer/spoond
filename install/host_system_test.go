@@ -296,6 +296,9 @@ func TestHostModulesDryRunRunsNoModprobe(t *testing.T) {
 	mustNotExist(t, env, "/etc/modules-load.d/e2b.conf")
 	mustNotExist(t, env, "/etc/modprobe.d/e2b-nbd.conf")
 }
+
+// TestHostUdevWritesRule: the rule lands with host-setup.sh's exact
+// content; a rerun over it is a kept.
 func TestHostUdevWritesRule(t *testing.T) {
 	env, _, _ := testEnv(t)
 	r := &Reporter{Phase: PhaseHost}
