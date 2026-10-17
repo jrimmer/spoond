@@ -93,8 +93,8 @@ const (
 	// Created: the file did not exist and was written.
 	Created Result = "created"
 	// Changed: the file existed with other content and was replaced
-	// (secrets and env files never take this path — writeKeep reports
-	// kept instead).
+	// (secrets and env files never take this path — writeFileKeep
+	// reports kept instead).
 	Changed Result = "changed"
 	// Kept: the file exists and was left alone (writeKeep, or an
 	// exact content match).
@@ -121,6 +121,9 @@ type Item struct {
 }
 
 // Reporter collects a phase's rows and can print them to Env.Out.
+// A phase creates one over env.Out (RunPhase's does), and the Env's
+// write helpers add every row to it — including the kept rows, so a
+// rerun shows the whole inventory.
 type Reporter struct {
 	Phase string
 	// Out is where rows print as they happen; nil for quiet runs
