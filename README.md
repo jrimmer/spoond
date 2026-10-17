@@ -8,6 +8,8 @@ and checkpoint are native. On top: an SSH gateway, an HTTP proxy, an LLM
 gateway, an MCP server for agents, a Forgejo Actions runner and a
 read-only dashboard.
 
+![The spoond dashboard: capacity, host, throughput, leases, images, services, records, refusals and events panels](docs/images/dashboard.png)
+
 ```
 spoond (this repo, one Go binary)          e2b-orchestrator (our fork of
 ┌──────────────────────────────────┐       e2b-dev/runtime, patch queue)
@@ -189,8 +191,6 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
   [docs/operations.md](docs/operations.md#notifications-to-webhooks).
 
 ## Dashboard
-
-![The spoond dashboard: capacity, host, throughput, leases, images, services, records, refusals and events panels](docs/images/dashboard.png)
 
 `spoond dash` is a read-only, live view of one spoond host in the
 browser; `spoond top` draws the same view in a terminal. It shows
