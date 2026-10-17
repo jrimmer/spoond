@@ -254,13 +254,8 @@ install -m 644 deploy/e2b/e2b-orchestrator.service /etc/systemd/system/
 systemctl daemon-reload
 ```
 
-then `systemctl daemon-reload`. A restart is not needed for the hooks to
-apply: systemd picks up the new `ExecStop`/`ExecStartPost` on the next
-stop/start. (If you took the unit from the repo instead of the step-2
-stripped copy, the shipped lines already contain all three — pointing at
-`/opt/spoond-staging/spoond`, the staging path the production host was
-first deployed from. Replace that path; do **not** keep both sets,
-systemd runs every matching line and the stale one fails the start.)
+A restart is not needed for the hooks to apply: systemd picks up the
+new `ExecStop`/`ExecStartPost` on the next stop/start.
 
 Keep the unit's `TimeoutStartSec=420` and `TimeoutStopSec=330`: with
 systemd's default 90 s, a slow undrain would fail the start and
