@@ -502,3 +502,80 @@ func TestSetGrubHugepagesTable(t *testing.T) {
 		})
 	}
 }
+
+// altQuery builds `update-alternatives --query` output for a Value.
+func altQuery(value string) string { return "Alternative: " + value + "\nValue: " + value + "\n" }
+
+// TestHostIptablesSwitchesToLegacy: both alternatives are on nft; the
+// step sets both and says what they were.
+func TestHostIptablesSwitchesToLegacy(t *testing.T) {
+	env, _, runner := testEnv(t)
+	runner.reply = map[string]fakeReply{}
+	addReply(runner, "update-alternatives --query iptables", altQuery("/usr/sbin/iptables-nft"))
+	addReply(runner, "update-alternatives --query ip6tables", altQuery("/usr/sbin/ip6tables-nft"))
+	addReply(runner, "update-alternatives --set iptables /usr/sbin/iptables-legacy", "")
+	addReply(runner, "update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy", "")
+
+	r := &Reporter{Phase: PhaseHost}
+	if err := hostIptables(context.Background(), env, r, &hostState{}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"update-alternatives --query iptables",
+		"update-alternatives --set iptables /usr/sbin/iptables-legacy",
+		"update-alternatives --query ip6tables",
+		"update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy",
+	}
+	if len(runner.calls) != len(want) {
+		t.Fatalf("calls = %v, want %v", runner.calls, want)
+	}
+	for i := range want {
+		if runner.calls[i] != want[i] {
+			t.Errorf("call %d = %q, want %q", i, runner.calls[i], want[i])
+		}
+	}
+	if got := len(r.Items()); got != 2 {
+		t.Fatalf("rows = %+v, want one per alternative", r.Items())
+	}
+	for _, it := range r.Items() {
+		if it.Result != Changed {
+			t.Errorf("row %+v, want changed", it)
+		}
+	}
+}
+
+// TestHostIptablesAlreadyLegacy: both on legacy, so only the two
+// queries run and the rows are kept.
+func TestHostIptablesAlreadyLegacy(t *testing.T) {
+	env, _, runner := testEnv(t)
+	runner.reply = map[string]fakeReply{}
+	addReply(runner, "update-alternatives --query iptables", altQuery("/usr/sbin/iptables-legacy"))
+	addReply(runner, "update-alternatives --query ip6tables", altQuery("/usr/sbin/ip6tables-legacy"))
+
+	r := &Reporter{Phase: PhaseHost}
+	if err := hostIptables(context.Background(), env, r, &hostState{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 2 {
+		t.Errorf("calls = %v, want only the two queries", runner.calls)
+	}
+	for _, it := range r.Items() {
+		if it.Result != Kept {
+			t.Errorf("row %+v, want kept", it)
+		}
+	}
+}
+
+// TestHostIptablesQueryFails: without the alternatives database the
+// error names the package that provides it.
+func TestHostIptablesQueryFails(t *testing.T) {
+	env, _, runner := testEnv(t)
+	runner.reply = map[string]fakeReply{} // every command errors
+	err := hostIptables(context.Background(), env, &Reporter{Phase: PhaseHost}, &hostState{})
+	if err == nil {
+		t.Fatal("want the query failure")
+	}
+	if !strings.Contains(err.Error(), "iptables package") {
+		t.Errorf("error = %q, want the package hint", err)
+	}
+}

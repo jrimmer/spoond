@@ -21,6 +21,7 @@ func init() {
 	hostSteps["modules"] = hostModules
 	hostSteps["udev"] = hostUdev
 	hostSteps["hugepages"] = hostHugepages
+	hostSteps["iptables"] = hostIptables
 }
 
 // basePackages are the host packages every install needs: the firewall
@@ -360,4 +361,56 @@ func setGrubHugepages(body string, pages int) (out string, changed bool) {
 	}
 	out = strings.Join(lines, "\n")
 	return out, out != body
+}
+
+func init() { hostSteps["iptables"] = hostIptables }
+
+// iptablesLegacyPath is the alternative the leases' NAT and MSS rules
+// run under: the nft backend still translates them, but the E2B
+// substrate is proven on legacy. ip6tables has its own link.
+const iptablesLegacyPath = "/usr/sbin/iptables-legacy"
+
+// legacyPath returns the legacy alternative link for one command name.
+func legacyPath(name string) string {
+	if name == "ip6tables" {
+		return "/usr/sbin/ip6tables-legacy"
+	}
+	return iptablesLegacyPath
+}
+
+// hostIptables points the iptables alternatives at the legacy backend
+// (iptables and ip6tables both). The query decides; the set runs only
+// when the value differs, so a rerun is two queries and a kept row.
+func hostIptables(ctx context.Context, env *Env, r *Reporter, st *hostState) error {
+	for _, name := range []string{"iptables", "ip6tables"} {
+		out, err := env.query(ctx, "update-alternatives", "--query", name)
+		if err != nil {
+			return fmt.Errorf("%w — update-alternatives could not read the %s alternative; is the iptables package installed?", err, name)
+		}
+		cur := alternativesValue(out)
+		if cur == legacyPath(name) {
+			r.Add(Kept, name, "legacy backend")
+			continue
+		}
+		if err := env.exec(ctx, "update-alternatives", "--set", name, legacyPath(name)); err != nil {
+			return fmt.Errorf("%w — could not switch %s to the legacy backend; fix the output above, then rerun", err, name)
+		}
+		note := fmt.Sprintf("was %s", cur)
+		if env.DryRun {
+			note = "dry-run: nothing changed"
+		}
+		r.Add(Changed, name, note)
+	}
+	return nil
+}
+
+// alternativesValue pulls the Value line out of `update-alternatives
+// --query` output.
+func alternativesValue(out []byte) string {
+	for _, line := range strings.Split(string(out), "\n") {
+		if v, ok := strings.CutPrefix(line, "Value:"); ok {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
 }
