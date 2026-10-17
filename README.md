@@ -296,42 +296,37 @@ the LLM gateway, TLS, the drain unit, and the webhook receivers (their
 reachability and any deliveries dropped in the last 24 h). It exits 1 if
 any check fails.
 
-## Configuration knobs
+## Configuration
 
-Built-in defaults are generic (`localhost`, `sandbox.example.com`);
-a deployment sets its own hosts and addresses, such as
-`SPOOND_GUEST_DNS_ADDR` (comma-separated for several resolvers),
-`SPOOND_PROXY_HOST_SUFFIX` and `NODE_ID` (the
-full list is in
-[PRODUCTION-ENV-2.7.md](deploy/PRODUCTION-ENV-2.7.md)). Every knob is
-overridable. The fixed addresses, ports and paths of the E2B
-deployment are listed in
-[01-architecture.md](docs/plans/2026-09-30-e2b-substrate/01-architecture.md).
-Notable settings: `HOST_GUEST_SERVICE_ADDR` (where guests reach host
-services), `HOST_API_PORT` (the lease API port `internet`/`lan` guests
-may reach), `METRICS_TOKEN`, `LLM_UPSTREAM_URL`, `SPOOND_DB_PATH`,
-`NOTIFY_WEBHOOKS`, the capacity settings (`DISK_RESERVE_PCT`, the
-share of snapshot disk kept free, default 5; `MAX_ADMIT_WAIT_SECS`,
-`IDLE_SUSPEND_DEFAULT_SECS`, `SNAPSHOT_WRITE_CONCURRENCY`,
-`DRAIN_SNAPSHOT_CONCURRENCY`, `UNDRAIN_CONCURRENCY`,
-`UNDRAIN_RESUME_RETRIES`, `UNDRAIN_READY_TIMEOUT`,
-`UNDRAIN_RESUME_WINDOW`, `RECOVERY_RETRY_ATTEMPTS`,
-`RECOVERY_RETRY_WINDOW`, `ROOTFS_PROBE_SECS`,
-`SWEEP_TIMEOUT`), the
-per-call E2B RPC bounds (`E2B_CREATE_TIMEOUT` and friends), named
-snapshots (`MAX_NAMED_SNAPSHOTS`, `SNAPSHOT_KEEP_VERSIONS`), background jobs
-(`MAX_RUNNING_JOBS_PER_LEASE`, `JOB_RETENTION_SECS`, `JOB_MAX_RUNTIME`),
-`MAX_EXEC_BODY_BYTES`, the runner's `RUNNER_ADMIT_WAIT_SECS` and
-`RUNNER_JOB_TIMEOUT`, `CRASH_TEST`, the
-orphan-build reaper (`ORPHAN_REAP`, default `dryrun`), and
-the saturation gate (`SATURATION_IO_FULL_PCT`, default 20;
-`SATURATION_CPU_SOME_PCT`, default 75; new work waits while host
-pressure is over them), the lease sizes (`SIZE_PRESETS`, default
-`small=1:2048,medium=2:4096,large=4:8192,xlarge=8:16384`;
-`MAX_LEASE_VCPU`, default the host's cores; `MAX_LEASE_MEMORY_MB`,
-default 32768), the one paused-release clock (`PAUSED_RELEASE_DAYS`, default 30) and
-the pinned-idle notice (`PINNED_IDLE_NOTICE_DAYS`, default 7) in
-[docs/operations.md](docs/operations.md#pins-and-the-paused-release-clock).
+spoond reads its settings from env files in `/etc/spoond`. The built-in
+defaults are generic (`localhost`, `sandbox.example.com`), so a
+deployment sets its own hosts and addresses. `spoond config show` lists
+what a unit sets and anything that differs from the running backend;
+`--all` lists every setting spoond knows. Any secret can come from a
+file instead of a value (`<NAME>_FILE=/path`).
+
+The settings you are most likely to change:
+
+| Area | Settings (default) |
+|---|---|
+| Hosts and addresses | `SPOOND_GUEST_DNS_ADDR` (guest resolvers, comma-separated), `SPOOND_PROXY_HOST_SUFFIX`, `NODE_ID`, `HOST_GUEST_SERVICE_ADDR` (where guests reach host services), `HOST_API_PORT` (the lease API port `lan` and `internet` guests may reach) |
+| Integrations | `METRICS_TOKEN`, `LLM_UPSTREAM_URL`, `NOTIFY_WEBHOOKS` |
+| Memory | `MEMORY_OVERCOMMIT` (1.25 × the hugepage pool), `MEMORY_FLOOR_MIB` (2048) |
+| Disk and state | `SPOOND_DB_PATH`, `DISK_RESERVE_PCT` (5, the share of snapshot disk kept free) |
+| Lease sizes | `SIZE_PRESETS` (`small=1:2048,medium=2:4096,large=4:8192,xlarge=8:16384`), `MAX_LEASE_VCPU` (the host's cores), `MAX_LEASE_MEMORY_MB` (32768) |
+| Waiting and idling | `MAX_ADMIT_WAIT_SECS`, `IDLE_SUSPEND_DEFAULT_SECS`, `SATURATION_IO_FULL_PCT` (20), `SATURATION_CPU_SOME_PCT` (75) |
+| Paused leases | `PAUSED_RELEASE_DAYS` (30), `PINNED_IDLE_NOTICE_DAYS` (7) |
+| Snapshots | `MAX_KEPT_PER_LEASE` (4), `MAX_NAMED_SNAPSHOTS`, `SNAPSHOT_KEEP_VERSIONS`, `SNAPSHOT_WRITE_CONCURRENCY` |
+| Jobs and exec | `MAX_RUNNING_JOBS_PER_LEASE`, `JOB_RETENTION_SECS`, `JOB_MAX_RUNTIME`, `MAX_EXEC_BODY_BYTES` |
+| CI runner | `RUNNER_ADMIT_WAIT_SECS`, `RUNNER_JOB_TIMEOUT` (6h) |
+| Drain and recovery | `DRAIN_SNAPSHOT_CONCURRENCY`, `UNDRAIN_*`, `RECOVERY_RETRY_*`, `ROOTFS_PROBE_SECS`, `SWEEP_TIMEOUT`, `E2B_CREATE_TIMEOUT` and the other per-call E2B limits |
+| Housekeeping and testing | `ORPHAN_REAP` (`dryrun`), `CRASH_TEST` |
+
+More detail:
+
+- A deployment's own hosts and addresses: [PRODUCTION-ENV-2.7.md](deploy/PRODUCTION-ENV-2.7.md).
+- The E2B deployment's fixed addresses, ports and paths: [01-architecture.md](docs/plans/2026-09-30-e2b-substrate/01-architecture.md).
+- Pins and the paused-release clock: [operations.md](docs/operations.md#pins-and-the-paused-release-clock).
 
 ## Tests
 
