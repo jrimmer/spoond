@@ -69,11 +69,16 @@ type spacer interface {
 }
 
 // hostProber and hostSpacer are the production probes, swapped in
-// tests.
+// tests. goarch answers the build's architecture (the arch check);
+// the var lets a test fake a non-amd64 binary.
 var (
 	hostProber prober = sysProber{}
 	hostSpacer spacer = sysSpacer{}
+	goarch            = defaultGoarch
 )
+
+// defaultGoarch is the production arch answer: the compiler's target.
+func defaultGoarch() string { return runtime.GOARCH }
 
 // sysProber binds :port on tcp4 and tcp6 and closes immediately: the
 // plain "does anybody already listen here" test.
@@ -136,9 +141,10 @@ func checkPhase(ctx context.Context, env *Env) ([]Item, error) {
 	}
 
 	// x86-64: the E2B substrate (Firecracker, envd) is amd64-only,
-	// and the runtime tarball installs amd64 binaries.
-	if runtime.GOARCH != "amd64" {
-		note := fmt.Sprintf("this spoond is %s; the E2B substrate is amd64 only — run the amd64 spoond binary on an x86-64 host", runtime.GOARCH)
+	// and the runtime tarball installs amd64 binaries. Via goarch()
+	// so a test can fake a non-amd64 binary.
+	if arch := goarch(); arch != "amd64" {
+		note := fmt.Sprintf("this spoond is %s; the E2B substrate is amd64 only — run the amd64 spoond binary on an x86-64 host", arch)
 		r.Add(Failed, "arch", note)
 		return r.Items(), fmt.Errorf("check: %s", note)
 	}
@@ -308,10 +314,18 @@ func kernelVersion(env *Env) (int, int, error) {
 	if i := strings.IndexByte(ver, '-'); i >= 0 {
 		ver = ver[:i]
 	}
-	ver = strings.TrimSuffix(ver, ".0")
-	maj, mino, ok := strings.Cut(ver, ".")
+	maj, rest, ok := strings.Cut(ver, ".")
 	if !ok {
 		return 0, 0, fmt.Errorf("%s: %q: want major.minor", unamePath, strings.TrimSpace(string(b)))
+	}
+	// The minor runs to the next non-digit, so "6.12.11" reads 12 and
+	// not "12.11".
+	mino := rest
+	for i, r := range rest {
+		if r < '0' || r > '9' {
+			mino = rest[:i]
+			break
+		}
 	}
 	maji, err := strconv.Atoi(maj)
 	if err != nil {
