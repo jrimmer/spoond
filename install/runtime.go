@@ -575,14 +575,23 @@ func seedValue() ([]byte, error) {
 	return []byte(hex.EncodeToString(raw[:]) + "\n"), nil
 }
 
-// installGuard writes the host firewall: the nftables table and its
-// oneshot unit, both shipped verbatim (plain system config, so drift
-// from the shipped files cannot hide).
+// installGuard writes the host firewall: the nftables table through
+// installGuardRules (also written under --container, where the
+// orchestrator container loads it), and its oneshot unit (systemd
+// only: the unit belongs to the host, not the container).
 func installGuard(r *Reporter, env *Env) error {
-	if err := installShipped(r, env, guardNftShipped, guardNftPath); err != nil {
+	if err := installGuardRules(r, env); err != nil {
 		return err
 	}
 	return installShipped(r, env, guardUnitShipped, guardUnitPath)
+}
+
+// installGuardRules writes the firewall's nftables table alone: the
+// shipped .nft file verbatim at 0644. Container mode writes it without
+// the unit — under Docker the orchestrator container loads the rules,
+// so no e2b-guard unit exists to run them.
+func installGuardRules(r *Reporter, env *Env) error {
+	return installShipped(r, env, guardNftShipped, guardNftPath)
 }
 
 // installShipped writes one shipped file verbatim at 0644.
