@@ -491,11 +491,15 @@ func TestRunAllUnknownPhase(t *testing.T) {
 }
 
 // TestRunAllNotImplementedPhase: a not-yet-written phase errors with
-// ErrNotImplemented and RunAll stops. The doctor phase is the last one
-// still on its placeholder (spoond landed in S5, spoond-735v).
+// ErrNotImplemented and RunAll stops. The placeholder is invented
+// here (every table row is owned by its own file now), added to the
+// map for the run and removed afterwards.
 func TestRunAllNotImplementedPhase(t *testing.T) {
+	const pending = "pending"
+	Phases[pending] = notYet
+	t.Cleanup(func() { delete(Phases, pending) })
 	env, _, _ := testEnv(t)
-	_, err := RunAll(context.Background(), env, PhaseDoctor)
+	_, err := RunAll(context.Background(), env, pending)
 	if !errors.Is(err, ErrNotImplemented) {
 		t.Fatalf("err = %v, want ErrNotImplemented", err)
 	}
