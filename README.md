@@ -268,7 +268,7 @@ go build -tags 'nobackend,nomcp,norunner' -o spoond ./cmd/spoond  # subset
 ```
 
 Exclusion tags: `nobackend`, `nogateway`, `nomcp`, `norunner`,
-`noctl`, `noimages`, `nocapabilities`, `nodoctor`, `nodrain`, `nodash` (excludes `dash`
+`noctl`, `noimages`, `nocapabilities`, `nodoctor`, `nodrain`, `noinstall`, `nodash` (excludes `dash`
 and `top` together), `nonotify`.
 
 ```bash
@@ -280,6 +280,7 @@ and `top` together), `nonotify`.
 ./spoond images     # build images into E2B templates; list the catalog
 ./spoond capabilities # what this spoond offers: images, sizes, policies, routes, surfaces
 ./spoond drain      # pause sandboxes before an orchestrator restart, resume after
+./spoond install    # clean native install: check, host, runtime, spoond, images, doctor phases
 ./spoond doctor     # health checks (below)
 ./spoond dash       # read-only dashboard (browser)
 ./spoond top        # the dashboard grid in the terminal
