@@ -41,6 +41,10 @@ type Env struct {
 	// host (exec); read-only queries still run. The report shows what
 	// a real run would do.
 	DryRun bool
+	// Version is the spoond binary's own version ("v4.0.0"); empty
+	// for a development build. The runtime phase downloads the
+	// release's spoond-runtime tarball that matches it.
+	Version string
 	// Opt holds the install flags; each phase reads its own fields.
 	Opt Options
 	// Prober, Spacer and Arch stand in for the host in the check

@@ -113,11 +113,12 @@ func installMain(args []string) int {
 	}
 
 	env := &install.Env{
-		Root:   *root,
-		Run:    install.Cmd{},
-		Out:    os.Stdout,
-		DryRun: *dryRun,
-		Opt:    opt,
+		Root:    *root,
+		Run:     install.Cmd{},
+		Out:     os.Stdout,
+		DryRun:  *dryRun,
+		Opt:     opt,
+		Version: version,
 	}
 	items, err := install.RunAll(ctx, env, names...)
 	if err != nil {
