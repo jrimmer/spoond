@@ -674,3 +674,101 @@ func TestStoreAndDockerStepsRegisteredInHostOrder(t *testing.T) {
 		t.Errorf("storeSubdirs has no registry entry, the docker step's volume would dangle")
 	}
 }
+
+func TestStoreDryRunWritesNoDirsQueriesOnly(t *testing.T) {
+	env, runner := storeEnv(t)
+	env.DryRun = true
+	if err := os.MkdirAll(env.Resolve(DefaultStoreDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runner.reply = storeReplies(false, false, "xfs")
+
+	items, err := runStore(t, env)
+	if err != nil {
+		t.Fatalf("store dry run: %v", err)
+	}
+	// Nothing new on disk: the pre-existing store dir is all there is.
+	for _, sub := range []string{"orchestrator", "storage/templates", "storage/build-cache", "tmp", "registry"} {
+		if _, err := os.Stat(env.Resolve(DefaultStoreDir + "/" + sub)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("the dry run created the subdirectory %s (stat: %v)", sub, err)
+		}
+	}
+	// The report still shows the plan.
+	var dirRows int
+	for _, it := range items {
+		if strings.HasPrefix(it.Name, DefaultStoreDir+"/") {
+			dirRows++
+			if it.Result != Created {
+				t.Errorf("dry-run row %s = %s, want created (the plan)", it.Name, it.Result)
+			}
+			if !strings.Contains(it.Note, "dry-run") {
+				t.Errorf("dry-run row %s should say nothing was written: %q", it.Name, it.Note)
+			}
+		}
+	}
+	if dirRows != 5 {
+		t.Errorf("%d directory rows in the dry-run plan, want 5:\n%+v", dirRows, items)
+	}
+	// Only queries ran: findmnt; no zpool/zfs create.
+	for _, call := range runner.calls {
+		if strings.Contains(call, "zpool create") || strings.Contains(call, "zfs create") {
+			t.Errorf("dry run ran a changing command: %s", call)
+		}
+	}
+}
+
+func TestStoreDiskDryRunPlansThePoolQueriesOnly(t *testing.T) {
+	env, runner := storeEnv(t)
+	env.DryRun = true
+	env.Opt.StoreDisk = "/dev/sdb"
+	runner.reply = storeReplies(false, false, "zfs")
+
+	items, err := runStore(t, env)
+	if err != nil {
+		t.Fatalf("store dry run: %v", err)
+	}
+	it := storeRow(t, items, "zpool forkdcache")
+	if it.Result != Created {
+		t.Errorf("pool row = %+v, want created (the plan)", it)
+	}
+	if !strings.Contains(it.Note, "dry-run") {
+		t.Errorf("pool row note %q should say nothing was run", it.Note)
+	}
+	for _, call := range runner.calls {
+		switch call {
+		case "zpool list -H -o name forkdcache", "zfs list -H forkdcache/e2b",
+			"zpool get -H -o value feature@block_cloning forkdcache":
+			// queries: fine
+		default:
+			t.Errorf("dry run ran a changing command: %s", call)
+		}
+	}
+}
+
+func TestDockerDryRunSecondRunKeptPlan(t *testing.T) {
+	env, runner := storeEnv(t)
+	// Real first run lays the drop-in down.
+	runner.reply = dockerReplies(true)
+	if _, err := runDocker(t, env); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	// Dry run over the unchanged host: kept rows, queries only.
+	env.DryRun = true
+	runner.calls = nil
+	items, err := runDocker(t, env)
+	if err != nil {
+		t.Fatalf("dry run: %v", err)
+	}
+	for _, it := range items {
+		if it.Result == Created || it.Result == Changed {
+			t.Errorf("dry run over a converged host plans %+v, want kept", it)
+		}
+	}
+	for _, call := range runner.calls {
+		switch {
+		case call == "docker inspect -f {{.State.Running}} spoond-registry":
+		case call == "systemctl enable --now docker":
+			t.Errorf("dry run ran a changing command: %s", call)
+		}
+	}
+}
