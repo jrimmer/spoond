@@ -468,12 +468,19 @@ func TestSpoondFirstRun(t *testing.T) {
 		t.Errorf("no enable --now of the four units in %v", run.calls)
 	}
 	// One restart: this run was the first (a fresh root), but a
-	// first run counts as a run when its env file and binary both changed; the guard asked is-active first.
-	if got := countSubstring(joined, "systemctl restart spoond-backend"); got != 1 {
-		t.Errorf("restart spoond-backend = %d, want 1 (the binary and env file changed this run)", got)
+	// first run counts as a run when its env file and binary both
+	// changed; the guard asked is-active and the unit's start stamp.
+	// No restart happened: enable --now started the unit seconds ago
+	// (at the horizon guard), and restarting this run's own start
+	// would start a fresh install's backend twice.
+	if got := countSubstring(joined, "systemctl restart spoond-backend"); got != 0 {
+		t.Errorf("restart spoond-backend = %d, want 0 (enable --now started it this run)", got)
 	}
 	if got := countSubstring(joined, "systemctl is-active"); got != 1 {
 		t.Errorf("is-active asked %d times, want 1 (the restart's guard)", got)
+	}
+	if got := countSubstring(joined, "systemctl show -p ActiveEnterTimestampMonotonic"); got != 1 {
+		t.Errorf("the unit's start stamp read %d times, want 1", got)
 	}
 
 	// One health GET (200 at once) and one user POST (201).
@@ -1242,13 +1249,27 @@ func TestSpoondHealthWaitsAndFails(t *testing.T) {
 
 }
 
+// setUptimeMono pins the boot clock the horizon reads and restores it.
+func setUptimeMono(t *testing.T, f func() (int64, error)) {
+	t.Helper()
+	old := uptimeMono
+	uptimeMono = f
+	t.Cleanup(func() { uptimeMono = old })
+}
+
 // TestSpoondRestartAfterChange: a changed binary is followed by a
-// restart when the unit is active, and skipped when it is not.
+// restart when the unit was active before this run started it, and
+// skipped when it is inactive, when it was started by this run's
+// enable --now, or when its start stamp cannot be read.
 func TestSpoondRestartAfterChange(t *testing.T) {
-	t.Run("active unit", func(t *testing.T) {
+	t.Run("active unit started before this install", func(t *testing.T) {
 		env, _, run, _ := spoondTestEnv(t)
+		// The boot clock read just before the enable, and the unit's
+		// start stamp: started at 500 s, the install ran at 1000 s.
+		setUptimeMono(t, func() (int64, error) { return 1_000_000_000, nil })
 		run.extra = map[string]reply{
-			"systemctl is-active --quiet spoond-backend": {out: []byte("active\n")},
+			"systemctl is-active --quiet spoond-backend":                             {out: []byte("active\n")},
+			"systemctl show -p ActiveEnterTimestampMonotonic --value spoond-backend": {out: []byte("500000000\n")},
 		}
 		if _, _, err := runSpoond(t, env); err != nil {
 			t.Fatalf("first run: %v", err)
@@ -1265,6 +1286,41 @@ func TestSpoondRestartAfterChange(t *testing.T) {
 		joined := strings.Join(run.calls, "\n")
 		if !strings.Contains(joined, "systemctl restart spoond-backend") {
 			t.Errorf("no restart after a binary change: %v", run.calls)
+		}
+	})
+	t.Run("unit this run started", func(t *testing.T) {
+		env, _, run, _ := spoondTestEnv(t)
+		// The unit's start stamp sits just after the horizon: enable
+		// --now started it seconds ago, so this run's own start is
+		// not restarted a second time.
+		setUptimeMono(t, func() (int64, error) { return 1_000_000_000, nil })
+		run.extra = map[string]reply{
+			"systemctl is-active --quiet spoond-backend":                             {out: []byte("active\n")},
+			"systemctl show -p ActiveEnterTimestampMonotonic --value spoond-backend": {out: []byte("1000000001\n")},
+		}
+		if _, _, err := runSpoond(t, env); err != nil {
+			t.Fatalf("run: %v", err)
+		}
+		for _, call := range run.calls {
+			if strings.Contains(call, "systemctl restart") {
+				t.Errorf("restarted a unit this run started: %s", call)
+			}
+		}
+	})
+	t.Run("unreadable start stamp", func(t *testing.T) {
+		env, _, run, _ := spoondTestEnv(t)
+		setUptimeMono(t, func() (int64, error) { return 1_000_000_000, nil })
+		run.extra = map[string]reply{
+			"systemctl is-active --quiet spoond-backend":                             {out: []byte("active\n")},
+			"systemctl show -p ActiveEnterTimestampMonotonic --value spoond-backend": {err: fmt.Errorf("no such property")},
+		}
+		if _, _, err := runSpoond(t, env); err != nil {
+			t.Fatalf("run: %v", err)
+		}
+		for _, call := range run.calls {
+			if strings.Contains(call, "systemctl restart") {
+				t.Errorf("restarted a unit whose start could not be dated: %s", call)
+			}
 		}
 	})
 	t.Run("inactive unit", func(t *testing.T) {
