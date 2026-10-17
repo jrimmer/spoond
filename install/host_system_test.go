@@ -684,6 +684,94 @@ func TestHostIptablesContainerSkipsAlternatives(t *testing.T) {
 	}
 }
 
+// TestHostHugepagesContainerRunsSysctlResolvedNoUpdateGrub: with
+// --container both files land under Root, sysctl -p gets the resolved
+// path, a grub change asks for the host-side update-grub + reboot
+// instead of running it, and RebootNeeded is set.
+func TestHostHugepagesContainerRunsSysctlResolvedNoUpdateGrub(t *testing.T) {
+	env, _, runner := testEnv(t)
+	env.Opt.Container = true
+	runner.reply = map[string]fakeReply{}
+	addReply(runner, "sysctl -p "+env.Resolve(sysctlE2BPath), "")
+	writeRootFile(t, env, meminfoPath, meminfo(16<<30, 5120)) // the fake host kernel reserved the pages
+	writeRootFile(t, env, grubPath, grubBody)
+
+	st := &hostState{}
+	if err := hostHugepages(context.Background(), env, &Reporter{Phase: PhaseHost}, st); err != nil {
+		t.Fatal(err)
+	}
+	if st.Hugepages != 5120 {
+		t.Errorf("st.Hugepages = %d, want 5120 for 16 GiB", st.Hugepages)
+	}
+	// The only command is the sysctl through the resolved path.
+	want := "sysctl -p " + env.Resolve(sysctlE2BPath)
+	if len(runner.calls) != 1 || runner.calls[0] != want {
+		t.Fatalf("calls = %v, want exactly %q", runner.calls, want)
+	}
+	// The grub file was rewritten under Root and no update-grub ran.
+	b, _ := read(t, env, grubPath)
+	if !strings.Contains(string(b), `GRUB_CMDLINE_LINUX_DEFAULT="quiet splash hugepages=5120"`) {
+		t.Errorf("grub = %q, want the token appended under Root", b)
+	}
+	if !st.RebootNeeded {
+		t.Error("grub changed under --container: st.RebootNeeded not set")
+	}
+}
+
+// TestHostHugepagesContainerRowsAndSettledKeeps: the report carries the
+// update-grub row with the host fix, and a settled container rerun
+// (grub and kernel already carry the count) runs no command and sets
+// no reboot.
+func TestHostHugepagesContainerRowsAndSettledKeeps(t *testing.T) {
+	env, _, runner := testEnv(t)
+	env.Opt.Container = true
+	runner.reply = map[string]fakeReply{}
+	addReply(runner, "sysctl -p "+env.Resolve(sysctlE2BPath), "")
+	writeRootFile(t, env, meminfoPath, meminfo(16<<30, 0))
+	writeRootFile(t, env, grubPath, grubBody)
+
+	r := &Reporter{Phase: PhaseHost}
+	st := &hostState{}
+	if err := hostHugepages(context.Background(), env, r, st); err != nil {
+		t.Fatal(err)
+	}
+	var grubRow *Item
+	for i := range r.Items() {
+		if r.Items()[i].Name == "update-grub" {
+			grubRow = &r.Items()[i]
+		}
+	}
+	if grubRow == nil {
+		t.Fatalf("rows = %+v, want an update-grub row", r.Items())
+	}
+	if grubRow.Result != Skipped || !strings.Contains(grubRow.Note, "run `update-grub` on the host, then reboot") {
+		t.Errorf("update-grub row = %+v, want skipped with the host fix", *grubRow)
+	}
+	if !st.RebootNeeded {
+		t.Error("grub changed: st.RebootNeeded not set")
+	}
+
+	// Settled rerun: same grub and a kernel that reserved the pages.
+	writeRootFile(t, env, meminfoPath, meminfo(16<<30, 5120))
+	runner.calls = nil
+	r = &Reporter{Phase: PhaseHost}
+	st = &hostState{}
+	if err := hostHugepages(context.Background(), env, r, st); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 0 {
+		t.Errorf("settled rerun calls = %v, want none", runner.calls)
+	}
+	if st.RebootNeeded {
+		t.Error("settled rerun set st.RebootNeeded")
+	}
+	for _, it := range r.Items() {
+		if it.Result != Kept {
+			t.Errorf("settled rerun row %+v, want kept", it)
+		}
+	}
+}
+
 // TestHostIptablesQueryFails: without the alternatives database the
 // error names the package that provides it.
 func TestHostIptablesQueryFails(t *testing.T) {
