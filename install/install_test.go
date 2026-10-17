@@ -90,17 +90,6 @@ func (r *recordRunner) Run(ctx context.Context, name string, args ...string) ([]
 	return rep.out, rep.err
 }
 
-// rewrite returns every recorded call with the sequence old replaced
-// by dir, so a test can compare commands that carry the store dir (a
-// temp path under Root) without embedding the path in the table key.
-func (r *recordRunner) rewrite(old, dir string) []string {
-	out := make([]string, len(r.calls))
-	for i, c := range r.calls {
-		out[i] = strings.ReplaceAll(c, old, dir)
-	}
-	return out
-}
-
 // TestWriteFileCreatedChangedKept walks one file through the three
 // outcomes: absent -> created, same content -> kept, different content
 // -> changed (an ordinary file may be overwritten).

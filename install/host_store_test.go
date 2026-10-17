@@ -191,6 +191,60 @@ func TestStoreDiskFailsWhenFeatureDisabled(t *testing.T) {
 	}
 }
 
+// TestStoreDiskDryRunDoesNotFailOnThePlannedPool: a dry run on a
+// fresh host plans zpool create and zfs create; the block-cloning
+// feature query would fail (the pool it reads does not exist yet), so
+// the step skips it instead of failing the plan.
+func TestStoreDiskDryRunDoesNotFailOnThePlannedPool(t *testing.T) {
+	env, runner := storeEnv(t)
+	env.DryRun = true
+	env.Opt.StoreDisk = "/dev/sdb"
+	reply := storeReplies(false, false, "zfs")
+	// A fresh host has no pool, so the feature query fails like the
+	// create it was declined in the dry run.
+	delete(reply, "zpool get -H -o value feature@block_cloning forkdcache")
+	runner.reply = reply
+
+	items, err := runStore(t, env)
+	if err != nil {
+		t.Fatalf("fresh-host dry run with --store-disk must plan, not fail: %v", err)
+	}
+	if it := storeRow(t, items, "zpool forkdcache"); it.Result != Created {
+		t.Errorf("pool row = %+v, want created (the plan)", it)
+	}
+	if it := storeRow(t, items, "zfs forkdcache/e2b"); it.Result != Created {
+		t.Errorf("dataset row = %+v, want created (the plan)", it)
+	}
+	if it := storeRow(t, items, "zfs block cloning"); it.Result != Skipped {
+		t.Errorf("block cloning row = %+v, want skipped (the planned pool does not exist to query)", it)
+	}
+	if !strings.Contains(storeRow(t, items, "zfs block cloning").Note, "dry-run") {
+		t.Errorf("block cloning note %q should say why it was skipped", storeRow(t, items, "zfs block cloning").Note)
+	}
+}
+
+// TestStoreDiskFeatureQueryFailureCarriesTheFix: a real run whose
+// feature query fails (pool present but unreadable) fails the step
+// with what to do next, not a bare error.
+func TestStoreDiskFeatureQueryFailureCarriesTheFix(t *testing.T) {
+	env, runner := storeEnv(t)
+	env.Opt.StoreDisk = "/dev/sdb"
+	reply := storeReplies(true, true, "zfs")
+	reply["zpool get -H -o value feature@block_cloning forkdcache"] = fakeReply{err: errors.New("cannot open 'forkdcache': no such pool")}
+	runner.reply = reply
+
+	items, err := runStore(t, env)
+	if err == nil {
+		t.Fatal("store step with an unreadable pool, want an error")
+	}
+	if !strings.Contains(err.Error(), "zpool status") {
+		t.Errorf("error %q does not carry the fix", err)
+	}
+	if it := storeRow(t, items, "zfs block cloning"); it.Result != Failed {
+		t.Errorf("block cloning row = %+v, want failed", it)
+	}
+}
+
 func TestStoreDirMissingFails(t *testing.T) {
 	env, runner := storeEnv(t)
 	runner.reply = map[string]fakeReply{}
@@ -407,13 +461,17 @@ func TestDockerReloadOnlyWhenChanged(t *testing.T) {
 	}
 	// Second run: the drop-in is identical, no daemon-reload.
 	runner.calls = nil
-	if _, err := runDocker(t, env); err != nil {
+	items, err := runDocker(t, env)
+	if err != nil {
 		t.Fatalf("second run: %v", err)
 	}
 	for _, call := range runner.calls {
 		if call == "systemctl daemon-reload" {
 			t.Errorf("second run reloaded the daemon although the drop-in is unchanged")
 		}
+	}
+	if it := storeRow(t, items, "systemd daemon-reload"); it.Result != Kept || !strings.Contains(it.Note, "unchanged") {
+		t.Errorf("daemon-reload row = %+v, want kept with an unchanged note", it)
 	}
 
 	// A changed drop-in reloads again. The registry inspect answers
@@ -432,6 +490,24 @@ func TestDockerReloadOnlyWhenChanged(t *testing.T) {
 	}
 	if !sawReload {
 		t.Errorf("a changed drop-in did not reload the daemon:\n%s", strings.Join(runner.calls, "\n"))
+	}
+
+	// A dry run over a stale drop-in reports the planned reload
+	// instead of the contradictory "unchanged".
+	env.Opt.StoreDir = "/third/store"
+	env.DryRun = true
+	runner.calls = nil
+	items, err = runDocker(t, env)
+	if err != nil {
+		t.Fatalf("dry run over the stale drop-in: %v", err)
+	}
+	for _, call := range runner.calls {
+		if call == "systemctl daemon-reload" {
+			t.Errorf("the dry run reloaded the daemon: %s", call)
+		}
+	}
+	if it := storeRow(t, items, "systemd daemon-reload"); it.Result != Kept || !strings.Contains(it.Note, "dry-run") {
+		t.Errorf("daemon-reload row = %+v, want a kept row saying the real run reloads", it)
 	}
 }
 
@@ -472,7 +548,7 @@ func TestDockerRegistry(t *testing.T) {
 			}
 		}
 		if !saw {
-			t.Errorf("calls have the registry line:\n%s", strings.Join(runner.calls, "\n"))
+			t.Errorf("calls lack the registry line:\n%s", strings.Join(runner.calls, "\n"))
 		}
 	})
 }
@@ -651,8 +727,13 @@ func TestApparmorDryRunSkipsTheCheck(t *testing.T) {
 	if len(items) != 1 {
 		t.Fatalf("rows = %+v, want one row", items)
 	}
-	if items[0].Result != Kept {
-		t.Errorf("row = %+v, want kept (the check is a probe, a dry run runs it)", items[0])
+	// The check container is env.exec, so a dry run never ran it: the
+	// row must not claim the sockets work.
+	if items[0].Result != Skipped {
+		t.Errorf("row = %+v, want skipped (the dry run did not run the probe)", items[0])
+	}
+	if !strings.Contains(items[0].Note, "dry-run") {
+		t.Errorf("row note %q should say the check did not run", items[0].Note)
 	}
 }
 
@@ -752,7 +833,9 @@ func TestDockerDryRunSecondRunKeptPlan(t *testing.T) {
 	if _, err := runDocker(t, env); err != nil {
 		t.Fatalf("first run: %v", err)
 	}
-	// Dry run over the unchanged host: kept rows, queries only.
+	// Dry run over the unchanged host: no changing command runs. The
+	// docker service row plans the enable (nothing ran), the rest are
+	// kept.
 	env.DryRun = true
 	runner.calls = nil
 	items, err := runDocker(t, env)
@@ -760,9 +843,12 @@ func TestDockerDryRunSecondRunKeptPlan(t *testing.T) {
 		t.Fatalf("dry run: %v", err)
 	}
 	for _, it := range items {
-		if it.Result == Created || it.Result == Changed {
+		if it.Result == Changed {
 			t.Errorf("dry run over a converged host plans %+v, want kept", it)
 		}
+	}
+	if it := storeRow(t, items, "docker service"); it.Result != Created || !strings.Contains(it.Note, "dry-run") {
+		t.Errorf("docker service row = %+v, want a created row saying nothing ran", it)
 	}
 	for _, call := range runner.calls {
 		switch {

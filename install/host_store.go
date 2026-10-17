@@ -70,6 +70,10 @@ func storeStep(ctx context.Context, env *Env, r *Reporter, st *hostState) error 
 // unless it exists, and the pool's block-cloning feature is confirmed
 // enabled or active at the end.
 func storeOnDisk(ctx context.Context, env *Env, r *Reporter, dir, disk string) error {
+	// poolCreated says this run brought the pool up (or, in a dry run,
+	// plans to): the feature query at the end can only succeed after a
+	// real create, so a dry run skips it instead of failing the plan.
+	poolCreated := false
 	if _, err := env.query(ctx, "zpool", "list", "-H", "-o", "name", storePool); err == nil {
 		r.Add(Kept, "zpool "+storePool, "pool exists")
 	} else {
@@ -94,6 +98,7 @@ func storeOnDisk(ctx context.Context, env *Env, r *Reporter, dir, disk string) e
 			return errors.New(note)
 		}
 		r.Add(Created, "zpool "+storePool, dryRunNote(env, "on "+disk+", mountpoint /forkdcache"))
+		poolCreated = true
 	}
 
 	if _, err := env.query(ctx, "zfs", "list", "-H", storeDataset); err != nil {
@@ -109,7 +114,14 @@ func storeOnDisk(ctx context.Context, env *Env, r *Reporter, dir, disk string) e
 
 	out, err := env.query(ctx, "zpool", "get", "-H", "-o", "value", "feature@block_cloning", storePool)
 	if err != nil {
-		note := fmt.Sprintf("cannot read feature@block_cloning on %s: %v", storePool, err)
+		if env.DryRun && poolCreated {
+			// The planned zpool create never ran, so the pool is not
+			// there to query; the real run reads the feature off the
+			// pool it just created.
+			r.Add(Skipped, "zfs block cloning", "dry-run: the planned pool does not exist yet, feature@block_cloning is unreadable until the create runs")
+			return nil
+		}
+		note := fmt.Sprintf("cannot read feature@block_cloning on %s — the pool exists but is unreadable; check `zpool status %s` and that the ZFS tools match the loaded module: %v", storePool, storePool, err)
 		r.Add(Failed, "zfs block cloning", note)
 		return errors.New(note)
 	}
@@ -211,6 +223,19 @@ func dryRunNote(env *Env, note string) string {
 // store mount, so the registry's volume exists before Docker starts.
 const dockerDropin = "/etc/systemd/system/docker.service.d/10-forkdcache.conf"
 
+// changedDropin reports whether this run's drop-in write changed (or,
+// in a dry run, plans to change) the file: writeFile's row is the
+// signal — created or changed means systemd must reload, a kept row
+// means the running configuration is current.
+func changedDropin(r *Reporter) bool {
+	for _, it := range r.Items() {
+		if it.Name == dockerDropin && (it.Result == Created || it.Result == Changed) {
+			return true
+		}
+	}
+	return false
+}
+
 // registryContainer is the local registry container the docker step
 // keeps running: image builds push to 127.0.0.1:5000 and pulls stay
 // off the internet.
@@ -231,32 +256,34 @@ func dockerStep(ctx context.Context, env *Env, r *Reporter, st *hostState) error
 	if err := env.writeFile(r, dockerDropin, []byte(b.String()), 0o644); err != nil {
 		return err
 	}
-	// The daemon reloads only when this run changed the drop-in: a
-	// created or changed row is the signal writeFile left, a kept or
-	// dry-run row leaves systemd alone.
-	reloaded := false
-	for _, it := range r.Items() {
-		if it.Name == dockerDropin && (it.Result == Created || it.Result == Changed) {
-			reloaded = true
-		}
-	}
+	// changedDropin reads writeFile's row for the drop-in: created or
+	// changed means systemd must reload; a kept (or dry-run planned)
+	// write leaves the running configuration current.
+	reloaded := changedDropin(r)
 	if reloaded && !env.DryRun {
 		if err := env.exec(ctx, "systemctl", "daemon-reload"); err != nil {
 			note := fmt.Sprintf("systemctl daemon-reload failed — run it by hand so the drop-in takes effect: %v", err)
 			r.Add(Failed, "systemd daemon-reload", note)
 			return errors.New(note)
 		}
-		r.Add(Changed, "systemd daemon-reload", "drop-in "+dockerDropin)
+		r.Add(Changed, "systemd daemon-reload", "reloaded for "+dockerDropin)
+	} else if reloaded {
+		r.Add(Kept, "systemd daemon-reload", "dry-run: the planned drop-in change comes with a daemon-reload on the real run")
 	} else {
-		r.Add(Kept, "systemd daemon-reload", "drop-in unchanged")
+		r.Add(Kept, "systemd daemon-reload", "drop-in unchanged, no reload")
 	}
 
+	enabled := !env.DryRun
 	if err := env.exec(ctx, "systemctl", "enable", "--now", "docker"); err != nil {
 		note := fmt.Sprintf("systemctl enable --now docker failed — install Docker (apt install docker.io) and check `systemctl status docker`: %v", err)
 		r.Add(Failed, "docker service", note)
 		return errors.New(note)
 	}
-	r.Add(Kept, "docker service", "enabled and running (systemctl enable --now docker)")
+	if enabled {
+		r.Add(Kept, "docker service", "enabled and running (systemctl enable --now docker)")
+	} else {
+		r.Add(Created, "docker service", "dry-run: nothing run — the real run does systemctl enable --now docker")
+	}
 
 	out, err := env.query(ctx, "docker", "inspect", "-f", "{{.State.Running}}", registryContainer)
 	if err == nil && strings.TrimSpace(string(out)) == "true" {
@@ -311,6 +338,10 @@ func apparmorStep(ctx context.Context, env *Env, r *Reporter, st *hostState) err
 		note := fmt.Sprintf("%v — `docker run --rm %s python3 -c '%s'` failed", errAppArmorDenies, apparmorCheckImage, apparmorCheckScript)
 		r.Add(Failed, "apparmor", note)
 		return errAppArmorDenies
+	}
+	if env.DryRun {
+		r.Add(Skipped, "apparmor", "dry-run: the check container did not run — the real run probes Unix sockets with `docker run --rm "+apparmorCheckImage+"`")
+		return nil
 	}
 	r.Add(Kept, "apparmor", "Docker containers can bind Unix sockets")
 	return nil
