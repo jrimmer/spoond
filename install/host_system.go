@@ -173,7 +173,11 @@ func loadTun(ctx context.Context, env *Env, r *Reporter) error {
 		if err := env.exec(ctx, "modprobe", "tun"); err != nil {
 			return fmt.Errorf("%w — modprobe could not load tun; fix the kernel output above, then rerun", err)
 		}
-		r.Add(Changed, "modprobe tun", "")
+		note := ""
+		if env.DryRun {
+			note = "dry-run: nothing changed"
+		}
+		r.Add(Changed, "modprobe tun", note)
 		return nil
 	} else if err != nil {
 		return fmt.Errorf("stat %s: %w", tunModulePath, err)

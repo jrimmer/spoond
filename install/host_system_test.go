@@ -560,16 +560,6 @@ func TestSetGrubHugepagesTable(t *testing.T) {
 	}
 }
 
-// dpkgQueries lists the package check commands: read-only, so a
-// settled second run may make them.
-func dpkgQueries() []string {
-	var out []string
-	for _, p := range basePackages {
-		out = append(out, "dpkg-query -W -f=${Status} "+p)
-	}
-	return out
-}
-
 // altQuery builds `update-alternatives --query` output for a Value.
 func altQuery(value string) string { return "Alternative: " + value + "\nValue: " + value + "\n" }
 
@@ -649,51 +639,48 @@ func TestHostIptablesQueryFails(t *testing.T) {
 
 // TestHostSystemStepsSecondRunQuiet runs every system step twice over
 // the same root: the second pass reports kept only and runs no
-// changing command (queries and modprobe-free reads aside).
+// changing command — the read-only queries aside.
 func TestHostSystemStepsSecondRunQuiet(t *testing.T) {
 	type stepCase struct {
 		name string
-		run  func(t *testing.T, env *Env, runner *recordRunner) error
-		// noChangeCalls counts the runner calls the settled second run
-		// may still make (read-only ones).
+		run  func(t *testing.T, env *Env, r *Reporter, runner *recordRunner) error
+		// allowed lists the read-only calls a settled second run may
+		// still make.
 		allowed []string
 	}
 	cases := []stepCase{
 		{
 			name: "packages",
-			run: func(t *testing.T, env *Env, runner *recordRunner) error {
+			run: func(t *testing.T, env *Env, r *Reporter, runner *recordRunner) error {
 				for _, p := range basePackages {
 					addReply(runner, "dpkg-query -W -f=${Status} "+p, "install ok installed")
 				}
-				return hostPackages(context.Background(), env, &Reporter{Phase: PhaseHost}, &hostState{})
+				return hostPackages(context.Background(), env, r, &hostState{})
 			},
 			allowed: dpkgQueries(),
 		},
 		{
 			name: "modules",
-			run: func(t *testing.T, env *Env, runner *recordRunner) error {
-				return hostModules(context.Background(), env, &Reporter{Phase: PhaseHost}, &hostState{})
+			run: func(t *testing.T, env *Env, r *Reporter, runner *recordRunner) error {
+				return hostModules(context.Background(), env, r, &hostState{})
 			},
-			allowed: []string{},
 		},
 		{
 			name: "udev",
-			run: func(t *testing.T, env *Env, runner *recordRunner) error {
-				return hostUdev(context.Background(), env, &Reporter{Phase: PhaseHost}, &hostState{})
+			run: func(t *testing.T, env *Env, r *Reporter, runner *recordRunner) error {
+				return hostUdev(context.Background(), env, r, &hostState{})
 			},
-			allowed: []string{},
 		},
 		{
 			name: "hugepages",
-			run: func(t *testing.T, env *Env, runner *recordRunner) error {
-				return hostHugepages(context.Background(), env, &Reporter{Phase: PhaseHost}, &hostState{})
+			run: func(t *testing.T, env *Env, r *Reporter, runner *recordRunner) error {
+				return hostHugepages(context.Background(), env, r, &hostState{})
 			},
-			allowed: []string{},
 		},
 		{
 			name: "iptables",
-			run: func(t *testing.T, env *Env, runner *recordRunner) error {
-				return hostIptables(context.Background(), env, &Reporter{Phase: PhaseHost}, &hostState{})
+			run: func(t *testing.T, env *Env, r *Reporter, runner *recordRunner) error {
+				return hostIptables(context.Background(), env, r, &hostState{})
 			},
 			allowed: []string{
 				"update-alternatives --query iptables",
@@ -705,36 +692,37 @@ func TestHostSystemStepsSecondRunQuiet(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			env, _, runner := testEnv(t)
 			runner.reply = map[string]fakeReply{}
-			// A host the first run settles: packages installed,
-			// modules absent then loaded by the sim, hugepages
-			// reserved by the "kernel" at 16 GiB/5120, legacy
-			// iptables.
-			for _, p := range append([]string{}, basePackages...) {
+			// A fresh fake host: every base package present, the
+			// modprobes succeed through the kernel sim (which then
+			// shows the modules loaded), hugepages reserved on
+			// demand, iptables on nft until set.
+			for _, p := range basePackages {
 				addReply(runner, "dpkg-query -W -f=${Status} "+p, "install ok installed")
 			}
+			addReply(runner, "modprobe nbd nbds_max=256 max_part=16", "")
+			addReply(runner, "modprobe tun", "")
 			addReply(runner, "sysctl -p /etc/sysctl.d/90-e2b.conf", "")
 			addReply(runner, "update-grub", "")
 			addReply(runner, "update-alternatives --query iptables", altQuery("/usr/sbin/iptables-nft"))
 			addReply(runner, "update-alternatives --query ip6tables", altQuery("/usr/sbin/ip6tables-nft"))
 			addReply(runner, "update-alternatives --set iptables /usr/sbin/iptables-legacy", "")
 			addReply(runner, "update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy", "")
-			// modprobe runs through the sim, but the recordRunner it
-			// wraps still needs the reply entries.
-			addReply(runner, "modprobe nbd nbds_max=256 max_part=16", "")
-			addReply(runner, "modprobe tun", "")
 			writeRootFile(t, env, meminfoPath, meminfo(16<<30, 0))
 			writeRootFile(t, env, grubPath, grubBody)
 			kr := &kernelSim{t: t, env: env, inner: runner}
 			env.Run = kr
 
-			// The first pass runs the step over the fresh fake host;
-			// settle then fakes what the real host would keep.
-			if err := tc.run(t, env, runner); err != nil {
+			// First pass over the fresh host, then settle what the
+			// real host keeps that the fakes cannot follow.
+			if err := tc.run(t, env, &Reporter{Phase: PhaseHost}, runner); err != nil {
 				t.Fatalf("first run: %v", err)
 			}
-			settle(t, env, tc.name, runner)
+			settle(t, env, tc.name)
 			runner.calls = nil
-			if err := tc.run(t, env, runner); err != nil {
+
+			// Second pass: kept rows, no changing command.
+			r := &Reporter{Phase: PhaseHost}
+			if err := tc.run(t, env, r, runner); err != nil {
 				t.Fatalf("second run: %v", err)
 			}
 			for _, c := range runner.calls {
@@ -748,14 +736,29 @@ func TestHostSystemStepsSecondRunQuiet(t *testing.T) {
 					t.Errorf("second run ran changing command %q", c)
 				}
 			}
+			for _, it := range r.Items() {
+				if it.Result != Kept {
+					t.Errorf("settled row %+v, want kept", it)
+				}
+			}
 		})
 	}
 }
 
-// settle fakes the host state the step's first run left behind, where
-// the file fakes cannot follow the commands: the hugepages "kernel"
+// dpkgQueries lists the package check commands: read-only, so a
+// settled second run may make them.
+func dpkgQueries() []string {
+	var out []string
+	for _, p := range basePackages {
+		out = append(out, "dpkg-query -W -f=${Status} "+p)
+	}
+	return out
+}
+
+// settle fakes the host state a step's first run left behind where the
+// file fakes cannot follow the commands: the hugepages "kernel"
 // reserves what the sysctl file asked for.
-func settle(t *testing.T, env *Env, step string, runner *recordRunner) {
+func settle(t *testing.T, env *Env, step string) {
 	t.Helper()
 	if step != "hugepages" {
 		return
