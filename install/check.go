@@ -4,7 +4,9 @@
 // cannot run spoond. Paths are resolved under Env.Root, so a test
 // writes fake /proc and /dev files into a temp dir and runs the real
 // logic; the two probes that cannot be faked that way (port liveness
-// and free space) sit behind the prober and spacer interfaces.
+// and free space) and the arch answer sit on Env (Prober, Spacer,
+// Arch), so a test fills the Env and the check phase stays free of
+// package-level state.
 package install
 
 import (
@@ -16,7 +18,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -57,37 +58,17 @@ const (
 // local image registry, and the orchestrator's proxy and gRPC ports.
 var requiredPorts = []string{"8890", "8891", "2222", "8893", "5000", "5007", "5008"}
 
-// prober isolates the port probe. ListenOK reports whether port is
-// free; an error is a probe failure (not a busy port).
-type prober interface {
+// Prober isolates the port probe. ListenOK reports whether port is
+// free; an error is a probe failure (not a busy port). The production
+// implementation is sysProber; Env.Prober replaces it in tests.
+type Prober interface {
 	ListenOK(port string) (bool, error)
 }
 
-// spacer isolates the free-space probe.
-type spacer interface {
+// Spacer isolates the free-space probe. The production implementation
+// is sysSpacer; Env.Spacer replaces it in tests.
+type Spacer interface {
 	FreeBytes(dir string) (uint64, error)
-}
-
-// hostProber and hostSpacer are the production probes, swapped in
-// tests. goarch answers the build's architecture (the arch check);
-// the var lets a test fake a non-amd64 binary.
-var (
-	hostProber prober = sysProber{}
-	hostSpacer spacer = sysSpacer{}
-	goarch            = defaultGoarch
-)
-
-// defaultGoarch is the production arch answer: the compiler's target.
-func defaultGoarch() string { return runtime.GOARCH }
-
-// TestProbes swaps the port and free-space probes for the test and
-// returns the restore: it lets another package's test (the CLI's)
-// drive a whole check run against a fake host, which the unexported
-// vars cannot reach from there.
-func TestProbes(p prober, s spacer) (restore func()) {
-	oldP, oldS := hostProber, hostSpacer
-	hostProber, hostSpacer = p, s
-	return func() { hostProber, hostSpacer = oldP, oldS }
 }
 
 // sysProber binds :port on tcp4 and tcp6 and closes immediately: the
@@ -143,7 +124,7 @@ func checkPhase(ctx context.Context, env *Env) ([]Item, error) {
 	if env.Root == "" || env.Root == "/" {
 		if os.Geteuid() != 0 {
 			r.Add(Failed, "root", ErrNotRoot.Error())
-			return r.Items(), fmt.Errorf("check: %w", ErrNotRoot)
+			return r.Items(), ErrNotRoot
 		}
 		r.Add(Kept, "root", "running as root")
 	} else {
@@ -151,12 +132,12 @@ func checkPhase(ctx context.Context, env *Env) ([]Item, error) {
 	}
 
 	// x86-64: the E2B substrate (Firecracker, envd) is amd64-only,
-	// and the runtime tarball installs amd64 binaries. Via goarch()
+	// and the runtime tarball installs amd64 binaries. Via env.arch()
 	// so a test can fake a non-amd64 binary.
-	if arch := goarch(); arch != "amd64" {
+	if arch := env.arch(); arch != "amd64" {
 		note := fmt.Sprintf("this spoond is %s; the E2B substrate is amd64 only — run the amd64 spoond binary on an x86-64 host", arch)
 		r.Add(Failed, "arch", note)
-		return r.Items(), fmt.Errorf("check: %s", note)
+		return r.Items(), errors.New(note)
 	}
 	r.Add(Kept, "arch: x86-64", "")
 
@@ -166,11 +147,11 @@ func checkPhase(ctx context.Context, env *Env) ([]Item, error) {
 	switch {
 	case err != nil:
 		r.Add(Failed, "kvm", "check failed: "+err.Error())
-		return r.Items(), fmt.Errorf("check: %w", err)
+		return r.Items(), err
 	case !ok:
 		note := "/dev/kvm is missing — enable KVM on the host (BIOS/UEFI virtualisation, the kvm module; inside a nested VM, the hypervisor must expose virt)"
 		r.Add(Failed, "kvm", note)
-		return r.Items(), fmt.Errorf("check: %s", note)
+		return r.Items(), errors.New(note)
 	}
 	r.Add(Kept, "/dev/kvm", "present")
 
@@ -179,11 +160,11 @@ func checkPhase(ctx context.Context, env *Env) ([]Item, error) {
 	switch {
 	case err != nil:
 		r.Add(Failed, "memory", "check failed: "+err.Error())
-		return r.Items(), fmt.Errorf("check: %w", err)
+		return r.Items(), err
 	case total < minMemory:
 		note := fmt.Sprintf("%d GiB total, want >= 16 — the default sizes and the hugepage reservation do not fit; add memory", total>>30)
 		r.Add(Failed, "memory", note)
-		return r.Items(), fmt.Errorf("check: %s", note)
+		return r.Items(), errors.New(note)
 	}
 	r.Add(Kept, "memory", fmt.Sprintf("%d GiB total", total>>30))
 
@@ -194,7 +175,7 @@ func checkPhase(ctx context.Context, env *Env) ([]Item, error) {
 	switch {
 	case err != nil:
 		r.Add(Failed, "os", "check failed: "+err.Error())
-		return r.Items(), fmt.Errorf("check: %w", err)
+		return r.Items(), err
 	case id == "debian" && versionID == "13":
 		r.Add(Kept, "os", "Debian 13")
 	case id != "":
@@ -208,25 +189,26 @@ func checkPhase(ctx context.Context, env *Env) ([]Item, error) {
 	switch {
 	case err != nil:
 		r.Add(Failed, "kernel", "check failed: "+err.Error())
-		return r.Items(), fmt.Errorf("check: %w", err)
+		return r.Items(), err
 	case maj < minKernelMajor || (maj == minKernelMajor && min < minKernelMinor):
 		note := fmt.Sprintf("%d.%d, want >= 6.1 — UFFD snapshots, the nbd module and unprivileged user namespaces want a trixie-era kernel; upgrade the host", maj, min)
 		r.Add(Failed, "kernel", note)
-		return r.Items(), fmt.Errorf("check: %s", note)
+		return r.Items(), errors.New(note)
 	}
 	r.Add(Kept, "kernel", fmt.Sprintf("%d.%d", maj, min))
 
 	// free ports.
+	prober := env.prober()
 	for _, port := range requiredPorts {
-		free, err := hostProber.ListenOK(port)
+		free, err := prober.ListenOK(port)
 		switch {
 		case err != nil:
 			r.Add(Failed, "port :"+port, "check failed: "+err.Error())
-			return r.Items(), fmt.Errorf("check: %w", err)
+			return r.Items(), err
 		case !free:
 			note := "in use — stop the service that binds it, or move spoond off it in the unit env (BIND_ADDR, PROXY_ADDR, GATEWAY_ADDR, DASH_ADDR, the registry publish port, E2B_GRPC_ADDR, E2B_PROXY_URL) before installing"
 			r.Add(Failed, "port :"+port, note)
-			return r.Items(), fmt.Errorf("check: %s", note)
+			return r.Items(), errors.New(note)
 		default:
 			r.Add(Kept, "port :"+port, "free")
 		}
@@ -237,11 +219,11 @@ func checkPhase(ctx context.Context, env *Env) ([]Item, error) {
 	switch {
 	case err != nil:
 		r.Add(Failed, "store free space", "check failed: "+err.Error())
-		return r.Items(), fmt.Errorf("check: %w", err)
+		return r.Items(), err
 	case free < minStoreFree:
 		note := fmt.Sprintf("%s: %d GiB free, want >= 100 — point --store-disk/--store-dir at a bigger volume, or free space on the store filesystem", env.Resolve(defaultStore), free>>30)
 		r.Add(Failed, "store free space", note)
-		return r.Items(), fmt.Errorf("check: %s", note)
+		return r.Items(), errors.New(note)
 	default:
 		r.Add(Kept, "store free space", fmt.Sprintf("%s: %d GiB free", env.Resolve(defaultStore), free>>30))
 	}
@@ -251,22 +233,35 @@ func checkPhase(ctx context.Context, env *Env) ([]Item, error) {
 
 // storeFree reads the free bytes of the snapshot store. When the store
 // does not exist yet (the host phase creates it), the nearest existing
-// parent is measured instead and the report says so.
+// ancestor is measured instead — on a fresh host the store's parents
+// do not exist either, so the walk goes up to the first directory that
+// does; the file system it lands on is the one the store would use.
 func storeFree(env *Env) (uint64, error) {
 	dir := env.Resolve(defaultStore)
-	free, err := hostSpacer.FreeBytes(dir)
+	spacer := env.spacer()
+	free, err := spacer.FreeBytes(dir)
 	if err == nil {
 		return free, nil
 	}
 	if !errors.Is(err, fs.ErrNotExist) {
 		return 0, fmt.Errorf("statfs %s: %w", dir, err)
 	}
-	parent := filepath.Dir(dir)
-	free, err = hostSpacer.FreeBytes(parent)
-	if err != nil {
-		return 0, fmt.Errorf("statfs %s (the store %s does not exist yet): %w", parent, dir, err)
+	// Walk up to the nearest existing ancestor. / ends the walk: it
+	// always exists (its statfs failure is not a not-exist and is
+	// reported as an unexpected error), and a walk that escapes /
+	// ("." and beyond) is a test-Root oddity, not extra levels.
+	for parent := filepath.Dir(dir); ; parent = filepath.Dir(parent) {
+		free, err := spacer.FreeBytes(parent)
+		switch {
+		case err == nil:
+			return free, nil
+		case !errors.Is(err, fs.ErrNotExist):
+			return 0, fmt.Errorf("statfs %s (the store %s does not exist yet): %w", parent, dir, err)
+		}
+		if parent == "/" || parent == "." {
+			return 0, fmt.Errorf("statfs %s (the store %s does not exist yet): %w", parent, dir, err)
+		}
 	}
-	return free, nil
 }
 
 // memTotal reads MemTotal (kB) from Root/proc/meminfo.

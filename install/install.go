@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 )
 
 // Env is the phase environment: everything a phase touches goes through
@@ -39,6 +40,39 @@ type Env struct {
 	// DryRun stops all writes and command execution; the report
 	// still shows what a real run would do.
 	DryRun bool
+	// Prober, Spacer and Arch stand in for the host in the check
+	// phase: the port probe, the free-space probe and the binary's
+	// own architecture. Nil and empty mean the real host; tests set
+	// them so a check run never binds a port or reads the real
+	// filesystem.
+	Prober Prober
+	Spacer Spacer
+	Arch   string
+}
+
+// prober returns env.Prober, or the production probe when unset.
+func (env *Env) prober() Prober {
+	if env.Prober != nil {
+		return env.Prober
+	}
+	return sysProber{}
+}
+
+// spacer returns env.Spacer, or the production probe when unset.
+func (env *Env) spacer() Spacer {
+	if env.Spacer != nil {
+		return env.Spacer
+	}
+	return sysSpacer{}
+}
+
+// arch returns env.Arch, or the binary's own target when unset: the
+// check phase's amd64 answer.
+func (env *Env) arch() string {
+	if env.Arch != "" {
+		return env.Arch
+	}
+	return runtime.GOARCH
 }
 
 // Runner runs one command and returns its stdout. Tests fake it; the
@@ -48,30 +82,34 @@ type Runner interface {
 }
 
 // Cmd is the Runner over os/exec: stdout is captured, stderr goes to
-// the process's stderr, and a non-zero exit is an error carrying the
-// captured output so the failure names what went wrong.
-type Cmd struct{}
-
-// stderrSink is where Cmd.Run sends command stderr; os.Stderr unless
-// a test swaps it.
-var stderrSink io.Writer = os.Stderr
+// Stderr (os.Stderr when unset), and a non-zero exit is an error
+// carrying the captured output so the failure names what went wrong.
+type Cmd struct {
+	// Stderr receives command stderr; nil means os.Stderr, so a
+	// failed apt or systemctl shows on the host console.
+	Stderr io.Writer
+}
 
 // Run implements Runner with os/exec, capturing stdout and letting
 // stderr through so failures show on the host console.
-func (Cmd) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+func (c Cmd) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
-	cmd.Stderr = stderrSink
+	cmd.Stderr = c.stderr()
 	if err := cmd.Run(); err != nil {
 		return stdout.Bytes(), fmt.Errorf("%s %s: %w", name, joinArgs(args), err)
 	}
 	return stdout.Bytes(), nil
 }
 
-// stderrSink receives command stderr; it is os.Stderr in production
-// (a failed apt or systemctl should show on the host console) and is
-// swapped in the test that pins the split.
+// stderr returns the writer command stderr goes to.
+func (c Cmd) stderr() io.Writer {
+	if c.Stderr != nil {
+		return c.Stderr
+	}
+	return os.Stderr
+}
 
 // joinArgs renders args for error text; it only carries command
 // arguments (flags, paths), never generated secret values.
@@ -168,14 +206,13 @@ func (env *Env) Resolve(path string) string {
 // otherwise, comparing before it writes so an unchanged file is a
 // kept, and honouring DryRun (dry-run reports created or changed but
 // writes nothing).
+// DryRun before MkdirAll: a dry run changes nothing, not even the
+// directories under the target.
 func (env *Env) writeFile(r *Reporter, path string, content []byte, mode os.FileMode) error {
 	full := env.Resolve(path)
 	dir := filepath.Dir(full)
 	if mode == 0 {
 		mode = 0o600
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("create %s: %w", dir, err)
 	}
 	res := Created
 	if old, err := os.ReadFile(full); err == nil {
@@ -191,6 +228,9 @@ func (env *Env) writeFile(r *Reporter, path string, content []byte, mode os.File
 		r.Add(res, path, "dry-run: nothing written")
 		return nil
 	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create %s: %w", dir, err)
+	}
 	if err := os.WriteFile(full, content, mode); err != nil {
 		return fmt.Errorf("write %s: %w", full, err)
 	}
@@ -204,9 +244,6 @@ func (env *Env) writeFile(r *Reporter, path string, content []byte, mode os.File
 func (env *Env) writeFileKeep(r *Reporter, path string, content []byte) error {
 	full := env.Resolve(path)
 	dir := filepath.Dir(full)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("create %s: %w", dir, err)
-	}
 	if _, err := os.Stat(full); err == nil {
 		r.Add(Kept, path, "exists, left untouched")
 		return nil
@@ -217,6 +254,9 @@ func (env *Env) writeFileKeep(r *Reporter, path string, content []byte) error {
 		r.Add(Created, path, "dry-run: nothing written")
 		return nil
 	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create %s: %w", dir, err)
+	}
 	if err := os.WriteFile(full, content, 0o600); err != nil {
 		return fmt.Errorf("write %s: %w", full, err)
 	}
@@ -225,7 +265,9 @@ func (env *Env) writeFileKeep(r *Reporter, path string, content []byte) error {
 }
 
 // RunPhase runs one phase against env, prefixed with its name in the
-// report output: "install check:" then the rows.
+// report output: "install check:" then the rows. The returned error is
+// the phase's error prefixed once with the name — phases return bare
+// errors, the fix text without a prefix of their own.
 func RunPhase(ctx context.Context, env *Env, name string, fn Phase) ([]Item, error) {
 	if env.Out != nil {
 		if env.DryRun {

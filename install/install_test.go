@@ -335,6 +335,57 @@ func TestDryRunKeptSecretNotCreated(t *testing.T) {
 	}
 }
 
+// TestDryRunCreatesNoDirectories: --dry-run changes nothing, not even
+// the parent directories a real write would make — a dry run on a
+// fresh root leaves it completely untouched.
+func TestDryRunCreatesNoDirectories(t *testing.T) {
+	env, out, _ := testEnv(t)
+	env.DryRun = true
+	fn := PhaseCheck
+	Phases[fn] = phaseOf(fn,
+		func(ctx context.Context, env *Env, r *Reporter) error {
+			return env.writeFile(r, "/etc/spoond/deep/unit.conf", []byte("x"), 0o644)
+		},
+		func(ctx context.Context, env *Env, r *Reporter) error {
+			return env.writeFileKeep(r, "/etc/spoond/deep/secret.env", []byte("TOKEN=t"))
+		},
+	)
+	items, err := RunAll(context.Background(), env, fn)
+	if err != nil {
+		t.Fatalf("dry run: %v", err)
+	}
+	if len(items) != 2 {
+		t.Errorf("dry run produced %d rows, want 2", len(items))
+	}
+	mustNotExist(t, env, "/etc/spoond/deep/unit.conf")
+	mustNotExist(t, env, "/etc/spoond/deep/secret.env")
+	for _, dir := range []string{"/etc/spoond/deep", "/etc/spoond", "/etc"} {
+		if _, err := os.Stat(env.Resolve(dir)); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("the dry run created the directory %s under the root (stat: %v)", dir, err)
+		}
+	}
+	if !strings.Contains(out.String(), "dry-run: nothing written") {
+		t.Errorf("the rows should say they wrote nothing:\n%s", out.String())
+	}
+}
+
+// TestWriteFileCreatesMissingDirectories: the real (non-dry) write
+// still creates the target's parent directories, so a phase can write
+// /etc/spoond/... on a fresh root.
+func TestWriteFileCreatesMissingDirectories(t *testing.T) {
+	env, _, _ := testEnv(t)
+	fn := PhaseCheck
+	Phases[fn] = phaseOf(fn, func(ctx context.Context, env *Env, r *Reporter) error {
+		return env.writeFile(r, "/etc/spoond/units.conf", []byte("v\n"), 0o644)
+	})
+	if _, err := RunAll(context.Background(), env, fn); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if b, _ := read(t, env, "/etc/spoond/units.conf"); string(b) != "v\n" {
+		t.Errorf("content = %q, want %q", b, "v\n")
+	}
+}
+
 // TestResolveMapsEveryPathUnderRoot: paths under a temp root land
 // inside it, and with the root empty or / they stay production-clean.
 func TestResolveMapsEveryPathUnderRoot(t *testing.T) {
@@ -483,17 +534,16 @@ func TestCmdRunFalse(t *testing.T) {
 	}
 }
 
-// TestCmdRunCapturesStdoutStderToProcess shows the split: the runner
-// returns only stdout, stderr appears on the process's own stderr (the
-// test process here) so a failure still shows on the host console.
+// TestCmdRunCapturesStdoutStderrToProcess shows the split: the runner
+// returns only stdout, stderr goes to the runner's own stderr so a
+// failure still shows on the host console; the test points Stderr at
+// a pipe instead of the test process's stderr.
 func TestCmdRunCapturesStdoutStderrToProcess(t *testing.T) {
-	defer func() { stderrSink = os.Stderr }()
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
-	stderrSink = w
-	got, err := Cmd{}.Run(context.Background(), "sh", "-c", "echo through-stdout; echo through-stderr >&2")
+	got, err := Cmd{Stderr: w}.Run(context.Background(), "sh", "-c", "echo through-stdout; echo through-stderr >&2")
 	_ = w.Close()
 	rest, _ := io.ReadAll(r)
 	_ = r.Close()

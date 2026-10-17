@@ -3,7 +3,7 @@
 // real checkPhase logic runs end to end. Each test pins one failure
 // row, its fix text and the error return, and the passing host once
 // over — including the non-fatal warnings (not Debian 13) and the
-// store-does-not-exist-yet parent measurement.
+// store-does-not-exist-yet nearest-ancestor measurement.
 package install
 
 import (
@@ -14,13 +14,17 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 )
 
-// setGoarch swaps the arch answer for the rest of the test.
-func setGoarch(a string) { goarch = func() string { return a } }
+// setArch pins the Env's arch for one test call: fn sees arch and is
+// restored (to the real GOARCH answer) when the test ends.
+func setArch(t *testing.T, env *Env, arch string) {
+	t.Helper()
+	env.Arch = arch
+	t.Cleanup(func() { env.Arch = "" })
+}
 
 // fakeProber answers the port probe from a table: "" means free, a
 // string means the error that ListenOK reports (a busy error for a
@@ -48,20 +52,20 @@ type fakeSpacer struct {
 	err  error
 }
 
-func (f fakeSpacer) FreeBytes(dir string) (uint64, error) {
+func (f fakeSpacer) FreeBytes(string) (uint64, error) {
 	if f.err != nil {
 		return 0, f.err
 	}
 	return f.free, nil
 }
 
-// swapProbes replaces the production probes for the test and restores
-// them afterwards.
-func swapProbes(t *testing.T, p prober, s spacer) {
+// swapProbes fakes the probe fields of env for the test and clears
+// them; the check phase reads its probes from env, so every fake is
+// scoped to one environment and no package state changes hands.
+func swapProbes(t *testing.T, env *Env, p Prober, s Spacer) {
 	t.Helper()
-	oldP, oldS := hostProber, hostSpacer
-	hostProber, hostSpacer = p, s
-	t.Cleanup(func() { hostProber, hostSpacer = oldP, oldS })
+	env.Prober, env.Spacer = p, s
+	t.Cleanup(func() { env.Prober, env.Spacer = nil, nil })
 }
 
 // meminfoLine renders a /proc/meminfo MemTotal line for a size in GiB.
@@ -108,11 +112,10 @@ func writeCheckTree(t *testing.T, env *Env, kvm bool, gib int, osID, osVersion, 
 
 // goodTree is the passing host: Debian 13, 128 GiB, kernel 6.1.x, KVM
 // present, 200 GiB free on the store, all ports free.
-func goodTree(t *testing.T, env *Env) (prober, spacer) {
+func goodTree(t *testing.T, env *Env) {
 	t.Helper()
 	writeCheckTree(t, env, true, 128, "debian", "13", "6.1.0-13-amd64")
-	swapProbes(t, fakeProber{}, fakeSpacer{free: 200 << 30})
-	return hostProber, hostSpacer
+	swapProbes(t, env, fakeProber{}, fakeSpacer{free: 200 << 30})
 }
 
 // firstFailedRow returns the single Failed row of a failed run, after
@@ -136,7 +139,7 @@ func firstFailedRow(t *testing.T, items []Item) Item {
 // rows, the joined output and the error.
 func runCheck(t *testing.T, env *Env) ([]Item, string, error) {
 	t.Helper()
-	items, err := RunAll(context.Background(), env, PhaseCheck)
+	items, err := RunPhase(context.Background(), env, PhaseCheck, checkPhase)
 	return items, env.Out.(*bytes.Buffer).String(), err
 }
 
@@ -182,7 +185,7 @@ func TestCheckRootRequiredOnRealHost(t *testing.T) {
 		t.Skip("running as root; the not-root check is skipped on this host")
 	}
 	env := &Env{Root: "/", Out: &bytes.Buffer{}}
-	swapProbes(t, fakeProber{}, fakeSpacer{free: 200 << 30})
+	swapProbes(t, env, fakeProber{}, fakeSpacer{free: 200 << 30})
 	items, _, err := runCheck(t, env)
 	row := firstFailedRow(t, items)
 	if row.Name != "root" {
@@ -224,8 +227,8 @@ func TestCheckRootSkippedUnderTempRoot(t *testing.T) {
 func TestCheckArch(t *testing.T) {
 	env, out, _ := testEnv(t)
 	goodTree(t, env)
-	defer setGoarch("amd64")
-	setGoarch("arm64")
+	defer setArch(t, env, "amd64")
+	setArch(t, env, "arm64")
 	items, text, err := runCheck(t, env)
 	row := firstFailedRow(t, items)
 	if row.Name != "arch" {
@@ -247,7 +250,7 @@ func TestCheckArch(t *testing.T) {
 func TestCheckKVMMissing(t *testing.T) {
 	env, _, _ := testEnv(t)
 	writeCheckTree(t, env, false, 128, "debian", "13", "6.1.0-13-amd64")
-	swapProbes(t, fakeProber{}, fakeSpacer{free: 200 << 30})
+	swapProbes(t, env, fakeProber{}, fakeSpacer{free: 200 << 30})
 	items, _, err := runCheck(t, env)
 	row := firstFailedRow(t, items)
 	if row.Name != "kvm" {
@@ -298,7 +301,7 @@ func TestCheckKVMProbeError(t *testing.T) {
 func TestCheckMemoryLow(t *testing.T) {
 	env, _, _ := testEnv(t)
 	writeCheckTree(t, env, true, 8, "debian", "13", "6.1.0-13-amd64")
-	swapProbes(t, fakeProber{}, fakeSpacer{free: 200 << 30})
+	swapProbes(t, env, fakeProber{}, fakeSpacer{free: 200 << 30})
 	items, _, err := runCheck(t, env)
 	row := firstFailedRow(t, items)
 	if row.Name != "memory" {
@@ -322,7 +325,7 @@ func TestCheckMemoryUnreadable(t *testing.T) {
 	if err := os.Remove(env.Resolve(meminfoPath)); err != nil {
 		t.Fatal(err)
 	}
-	swapProbes(t, fakeProber{}, fakeSpacer{free: 200 << 30})
+	swapProbes(t, env, fakeProber{}, fakeSpacer{free: 200 << 30})
 	items, _, err := runCheck(t, env)
 	row := firstFailedRow(t, items)
 	if row.Name != "memory" {
@@ -341,7 +344,7 @@ func TestCheckMemoryUnreadable(t *testing.T) {
 func TestCheckOSWarnsOnOtherDistribution(t *testing.T) {
 	env, out, _ := testEnv(t)
 	writeCheckTree(t, env, true, 128, "ubuntu", "24.04", "6.8.0-40-generic")
-	swapProbes(t, fakeProber{}, fakeSpacer{free: 200 << 30})
+	swapProbes(t, env, fakeProber{}, fakeSpacer{free: 200 << 30})
 	items, _, err := runCheck(t, env)
 	if err != nil {
 		t.Fatalf("a non-Debian host only warns; err = %v", err)
@@ -367,7 +370,7 @@ func TestCheckOSMissingID(t *testing.T) {
 	if err := os.WriteFile(env.Resolve(releasePath), []byte("PRETTY_NAME=\"A Distro\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	swapProbes(t, fakeProber{}, fakeSpacer{free: 200 << 30})
+	swapProbes(t, env, fakeProber{}, fakeSpacer{free: 200 << 30})
 	items, _, err := runCheck(t, env)
 	if err != nil {
 		t.Fatalf("an unrecognised os-release only warns; err = %v", err)
@@ -393,7 +396,7 @@ func TestCheckOSReadFails(t *testing.T) {
 	if err := os.Remove(env.Resolve(releasePath)); err != nil {
 		t.Fatal(err)
 	}
-	swapProbes(t, fakeProber{}, fakeSpacer{free: 200 << 30})
+	swapProbes(t, env, fakeProber{}, fakeSpacer{free: 200 << 30})
 	items, _, err := runCheck(t, env)
 	row := firstFailedRow(t, items)
 	if row.Name != "os" {
@@ -411,7 +414,7 @@ func TestCheckOSReadFails(t *testing.T) {
 func TestCheckKernelOld(t *testing.T) {
 	env, _, _ := testEnv(t)
 	writeCheckTree(t, env, true, 128, "debian", "13", "5.10.0-26-amd64")
-	swapProbes(t, fakeProber{}, fakeSpacer{free: 200 << 30})
+	swapProbes(t, env, fakeProber{}, fakeSpacer{free: 200 << 30})
 	items, _, err := runCheck(t, env)
 	row := firstFailedRow(t, items)
 	if row.Name != "kernel" {
@@ -431,7 +434,7 @@ func TestCheckKernelUnreadable(t *testing.T) {
 	if err := os.Remove(env.Resolve(unamePath)); err != nil {
 		t.Fatal(err)
 	}
-	swapProbes(t, fakeProber{}, fakeSpacer{free: 200 << 30})
+	swapProbes(t, env, fakeProber{}, fakeSpacer{free: 200 << 30})
 	items, _, err := runCheck(t, env)
 	row := firstFailedRow(t, items)
 	if row.Name != "kernel" {
@@ -463,7 +466,7 @@ func TestCheckKernelParsesPlainVersions(t *testing.T) {
 		t.Run(tc.kernel, func(t *testing.T) {
 			env, _, _ := testEnv(t)
 			writeCheckTree(t, env, true, 128, "debian", "13", tc.kernel)
-			swapProbes(t, fakeProber{}, fakeSpacer{free: 200 << 30})
+			swapProbes(t, env, fakeProber{}, fakeSpacer{free: 200 << 30})
 			items, _, err := runCheck(t, env)
 			var kerr error
 			for _, it := range items {
@@ -496,7 +499,7 @@ func TestCheckKernelParsesPlainVersions(t *testing.T) {
 func TestCheckPortBusy(t *testing.T) {
 	env, _, _ := testEnv(t)
 	writeCheckTree(t, env, true, 128, "debian", "13", "6.1.0-13-amd64")
-	swapProbes(t, fakeProber{busy: map[string]bool{"2222": true}}, fakeSpacer{free: 200 << 30})
+	swapProbes(t, env, fakeProber{busy: map[string]bool{"2222": true}}, fakeSpacer{free: 200 << 30})
 	items, _, err := runCheck(t, env)
 	row := firstFailedRow(t, items)
 	if row.Name != "port :2222" {
@@ -517,7 +520,7 @@ func TestCheckPortBusy(t *testing.T) {
 func TestCheckPortProbeError(t *testing.T) {
 	env, _, _ := testEnv(t)
 	writeCheckTree(t, env, true, 128, "debian", "13", "6.1.0-13-amd64")
-	swapProbes(t, fakeProber{err: errors.New("no such network")}, fakeSpacer{free: 200 << 30})
+	swapProbes(t, env, fakeProber{err: errors.New("no such network")}, fakeSpacer{free: 200 << 30})
 	items, _, err := runCheck(t, env)
 	row := firstFailedRow(t, items)
 	if row.Name != "port :8890" {
@@ -536,13 +539,13 @@ func TestCheckPortProbeError(t *testing.T) {
 func TestCheckStoreFreeLow(t *testing.T) {
 	env, out, _ := testEnv(t)
 	writeCheckTree(t, env, true, 128, "debian", "13", "6.1.0-13-amd64")
-	swapProbes(t, fakeProber{}, fakeSpacer{free: 40 << 30})
+	swapProbes(t, env, fakeProber{}, fakeSpacer{free: 40 << 30})
 	items, _, err := runCheck(t, env)
 	row := firstFailedRow(t, items)
 	if row.Name != "store free space" {
 		t.Fatalf("failed row = %q, want store free space", row.Name)
 	}
-	if !strings.Contains(row.Note, strconv.Itoa(40)+" GiB free, want >= 100") {
+	if !strings.Contains(row.Note, "40 GiB free, want >= 100") {
 		t.Errorf("fix text should repeat the numbers: %q", row.Note)
 	}
 	if !strings.Contains(row.Note, "--store-disk") {
@@ -556,52 +559,71 @@ func TestCheckStoreFreeLow(t *testing.T) {
 	}
 }
 
-// TestCheckStoreMissingMeasuresParent: before the host phase creates
-// the store, its nearest existing parent is measured (the fake spacer
-// answers not-exist for the store path itself and real statfs numbers
-// otherwise), and the row still reports against the store's path.
-func TestCheckStoreMissingMeasuresParent(t *testing.T) {
+// TestCheckStoreMissingMeasuresAncestor: before the host phase creates
+// the store — on a fresh host its parents do not exist either — the
+// check measures the nearest existing ancestor instead and the row
+// still reports against the store's path. The test pins the fallback's
+// shape (the ancestor actually asked, the store's path in the row),
+// never a real statfs number.
+func TestCheckStoreMissingMeasuresAncestor(t *testing.T) {
 	env, _, _ := testEnv(t)
 	writeCheckTree(t, env, true, 128, "debian", "13", "6.1.0-13-amd64")
-	// A spacer whose not-exist answer only fires for the store itself:
-	// FreeBytes on any other dir asks the real sysSpacer. Root's
-	// parent directory exists (the temp dir), so the fallback has a
-	// real parent to measure.
-	dir := env.Resolve(defaultStore)
-	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	// The store and every parent under Root are absent: nothing is
+	// mkdir'd here. asked records the ancestor the fallback lands
+	// on — the walk must stop at Root itself (the temp dir, the
+	// first existing directory), not go past it.
+	root := env.Resolve("/")
 	store := env.Resolve(defaultStore)
-	swapProbes(t, fakeProber{}, missingSpacer{skip: store})
-	// The parent fallback runs and measures the (tiny) parent: the
-	// row fails the low-space bar. The test pins the row and the
-	// error; the low number itself is not pinned (the repo volume
-	// decides it).
-	items, _, _ := runCheck(t, env)
+	var asked []string
+	spacer := recordingSpacer{root: root, dirs: &asked, rest: fakeSpacer{free: 1 << 30}}
+	swapProbes(t, env, fakeProber{}, spacer)
+	// The spacer answers not-exist for everything under Root, so the
+	// walk lands on Root and measures the faked 1 GiB — far below the
+	// bar, so the check fails with the space row's fix.
+	items, _, err := runCheck(t, env)
+	if err == nil || !strings.Contains(err.Error(), "1 GiB free, want >= 100") {
+		t.Fatalf("the faked ancestor measurement should fail the space bar: %v", err)
+	}
 	row := firstFailedRow(t, items)
 	if row.Name != "store free space" {
 		t.Errorf("failed row = %q, want store free space", row.Name)
 	}
-	if !strings.Contains(row.Note, strconv.Itoa(1)+" GiB free, want >= 100") {
-		t.Errorf("the row should report the measured space:\n%s", row.Note)
+	if !strings.Contains(row.Note, "1 GiB free, want >= 100") {
+		t.Errorf("the row should report the faked ancestor measurement:\n%s", row.Note)
 	}
 	if !strings.Contains(row.Note, "--store-disk") {
 		t.Errorf("the row should name the flag to move the store:\n%s", row.Note)
 	}
+	if !strings.Contains(row.Note, store) {
+		t.Errorf("the row should still name the store path:\n%s", row.Note)
+	}
+	// The spacer saw exactly the walk: the store (absent) and its
+	// parents down to Root... and nothing outside Root — the fakes
+	// stop long before the real / is asked.
+	if len(asked) == 0 || asked[len(asked)-1] != root {
+		t.Errorf("the walk should end on Root with real dirs absent: asked %v", asked)
+	}
+	for _, d := range asked {
+		if !strings.HasPrefix(d, root) {
+			t.Errorf("the walk escaped Root: asked %s", d)
+		}
+	}
 }
 
-// missingSpacer answers not-exist for exactly one directory and asks
-// the real statfs for anything else. Root's filesystem (tmpfs or the
-// repo volume) is small, so the test only pins that the fallback
-// measures the parent and reports against the store path — not any
-// particular number.
-type missingSpacer struct{ skip string }
+// recordingSpacer answers not-exist for every dir under want and the
+// fixed answer otherwise, recording each dir it was asked about.
+type recordingSpacer struct {
+	root string // dirs under this prefix answer not-exist
+	dirs *[]string
+	rest fakeSpacer
+}
 
-func (m missingSpacer) FreeBytes(dir string) (uint64, error) {
-	if dir == m.skip {
+func (m recordingSpacer) FreeBytes(dir string) (uint64, error) {
+	*m.dirs = append(*m.dirs, dir)
+	if strings.HasPrefix(dir, m.root) && dir != m.root {
 		return 0, fmt.Errorf("statfs %s: %w", dir, fs.ErrNotExist)
 	}
-	return sysSpacer{}.FreeBytes(dir)
+	return m.rest.FreeBytes(dir)
 }
 
 // TestCheckStoreUnprobeable: a spacer error other than not-exist on
@@ -610,7 +632,7 @@ func (m missingSpacer) FreeBytes(dir string) (uint64, error) {
 func TestCheckStoreUnprobeable(t *testing.T) {
 	env, _, _ := testEnv(t)
 	writeCheckTree(t, env, true, 128, "debian", "13", "6.1.0-13-amd64")
-	swapProbes(t, fakeProber{}, fakeSpacer{err: errors.New("permission denied")})
+	swapProbes(t, env, fakeProber{}, fakeSpacer{err: errors.New("permission denied")})
 	items, _, err := runCheck(t, env)
 	row := firstFailedRow(t, items)
 	if row.Name != "store free space" {
@@ -630,7 +652,7 @@ func TestCheckStoreUnprobeable(t *testing.T) {
 func TestCheckStopsAtFirstFailure(t *testing.T) {
 	env, _, _ := testEnv(t)
 	writeCheckTree(t, env, true, 4, "debian", "13", "5.10.0") // memory fails
-	swapProbes(t, fakeProber{fillAll: true}, fakeSpacer{free: 1})
+	swapProbes(t, env, fakeProber{fillAll: true}, fakeSpacer{free: 1})
 	items, _, _ := runCheck(t, env)
 	for _, it := range items {
 		if it.Name == "kernel" {
