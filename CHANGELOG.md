@@ -10,6 +10,41 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+## [3.10.0] - 2026-10-17
+
+### Added
+
+- **Give-back: spoond resumes the leases its own take-back paused
+  (spoond-aeo6).** A pause spoond makes to protect itself (the
+  fair-share admission take-back or the `MEMORY_FLOOR_MIB` loop, both
+  `suspend_reason` `take_back`) is now spoond's to undo: a floor-loop
+  tick that finds the box at or above the floor resumes one such lease,
+  the longest-paused first and strictly in order, once the lease's
+  memory plus the floor plus `GIVE_BACK_MARGIN_MIB` (default 1024) is
+  free and the overcommit cap has room, no create is waiting for
+  admission, the node is not draining, and no take-back has run for two
+  minutes. The resume takes a holder's path and never takes another
+  lease back for its room; a failed resume leaves the lease paused and
+  is retried after 10 minutes. Pauses a caller made (hand suspend,
+  `idle_suspend`, the drain) still resume only on the caller's next
+  call. `GIVE_BACK=off` disables it. New: `lease.resumed` detail
+  `give_back: ...`, the `give back:` log line and
+  `spoond_memory_give_backs_total`. Before this, a taken-back lease
+  with nobody to call it (a pool worker, a CI job) stayed paused until
+  someone touched it.
+
+### Fixed
+
+- **spoond-runner waits out a `box_full` create (spoond-49od).** Every
+  CI job shares the runner's identity, so a burst of jobs can make it
+  the box's biggest borrower, and fair shares answers 429 `box_full` at
+  once. The runner treated that as a failed job; it now retries it like
+  a full node's 503 (Retry-After, bounded by the job's timeout). Other
+  429s (quota codes) still fail at once.
+
+## [3.9.1] - 2026-10-14
+
+
 ### Fixed
 
 - **Warm-pool sandboxes count toward the overcommit cap, and the

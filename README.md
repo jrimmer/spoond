@@ -288,6 +288,16 @@ stack does not exist yet.
 
 ## Status
 
+**v3.10: spoond undoes its own pauses.** When spoond pauses a lease to
+protect itself (fair-share take-back, or the low-memory floor), it now
+resumes that lease once there is room again: the lease's memory plus
+the floor plus `GIVE_BACK_MARGIN_MIB` (default 1024) free, no create
+waiting, and no take-back in the last two minutes, longest-paused
+first. A lease its caller paused still resumes only on its next call.
+`GIVE_BACK=off` turns this off. The CI runner now waits out a
+`box_full` refusal instead of failing the job. No breaking changes, no
+schema change.
+
 **v3.9.1: warm-pool correctness fixes.** Five review fixes to the warm
 pool and memory admission: the pooled `box_full` refusal fires only
 where a cold create would be refused too, a pool VM popped for a grant
