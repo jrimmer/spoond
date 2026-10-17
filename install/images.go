@@ -114,9 +114,8 @@ func imagesPhase(ctx context.Context, env *Env) ([]Item, error) {
 // imagesWriteContext writes every embedded file under
 // /var/lib/spoond/images, the layout kept: env.writeFile compares
 // before it writes, so a rerun keeps every unchanged file. Files land
-// 0644 except the .sh hooks at the top level (the elixir postgres
-// hook, the scylla init hook): 0755. The guest scripts keep 0644 on
-// disk — their exec bits come from the dockerfiles' COPY --chmod.
+// 0644 except the .sh scripts: 0755. The dockerfiles' COPY --chmod
+// sets the bits inside the images either way.
 func imagesWriteContext(env *Env, r *Reporter) error {
 	return fs.WalkDir(images.Context, ".", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -126,7 +125,7 @@ func imagesWriteContext(env *Env, r *Reporter) error {
 			return nil
 		}
 		mode := fs.FileMode(0o644)
-		if !strings.Contains(path, "/") && strings.HasSuffix(path, ".sh") {
+		if strings.HasSuffix(path, ".sh") {
 			mode = 0o755
 		}
 		b, err := fs.ReadFile(images.Context, path)

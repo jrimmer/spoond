@@ -54,9 +54,6 @@ func (r *imagesRunner) Run(ctx context.Context, name string, args ...string) ([]
 		return r.listOut, r.listErr
 	}
 	if strings.HasSuffix(call, " build") || strings.Contains(call, " build ") {
-		if img, ok := strings.CutPrefix(call, "env "); ok {
-			_ = img
-		}
 		if fields := strings.Fields(call); len(fields) > 0 {
 			last := fields[len(fields)-1]
 			if r.failBuilds[last] {
@@ -141,7 +138,7 @@ var contextPaths = map[string]os.FileMode{
 	"/var/lib/spoond/images/scylla-init-hook.sh":          0o755,
 	"/var/lib/spoond/images/elixir-base-postgres-hook.sh": 0o755,
 	"/var/lib/spoond/images/guest/spoond-guest-init":      0o644,
-	"/var/lib/spoond/images/guest/spoond-tmux.sh":         0o644,
+	"/var/lib/spoond/images/guest/spoond-tmux.sh":         0o755,
 }
 
 // TestImagesPhaseWritesContext pins where the build context lands and
