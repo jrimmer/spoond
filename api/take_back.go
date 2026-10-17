@@ -285,6 +285,7 @@ func (s *Service) takeBackPause(ctx context.Context, l *Lease, requester string,
 	if err != nil {
 		return err
 	}
+	s.noteTakeBack()
 
 	// Record the take-back stamp: the stamp is re-checked under the
 	// lock, so a concurrent resume that already brought the lease back

@@ -126,7 +126,9 @@ func (s *Service) pressureCheck(ctx context.Context) bool {
 	}
 	free := int(info.FreeHugepageBytes() / (1024 * 1024))
 	if free >= floor {
-		return false
+		// Room again: hand back one lease spoond's take-back paused, if
+		// it fits (api/give_back.go).
+		return s.giveBackOne(ctx, free, floor)
 	}
 	short := floor - free
 

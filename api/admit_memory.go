@@ -98,6 +98,11 @@ func (s *Service) memoryHeadroom(ctx context.Context, memoryMB int) int {
 // takeBackForAdmission is the take-back loop of admitMemory. The caller
 // holds preemptMu and performs the debit.
 func (s *Service) takeBackForAdmission(ctx context.Context, owner string, memoryMB int) error {
+	if isGiveBack(ctx) {
+		// A give-back resume fits in free memory or waits: it never
+		// pauses another lease to make its room.
+		return nil
+	}
 	fits, err := s.fits(ctx, memoryMB)
 	if err != nil {
 		// The node could not be read: do not fail the admission here.
