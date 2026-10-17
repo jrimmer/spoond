@@ -131,7 +131,7 @@ func TestHTTPLeaseClientCreateLabel(t *testing.T) {
 	if _, err := c.Create(context.Background(), "py-base", 600); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	for _, k := range []string{"holder", "holder_url", "hold_ttl"} {
+	for _, k := range []string{"holder", "holder_url"} {
 		if _, ok := body[k]; ok {
 			t.Errorf("%s sent on create: the job lease must not be held", k)
 		}

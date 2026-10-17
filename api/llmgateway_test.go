@@ -116,10 +116,11 @@ func TestLLMGatewayPerUserKey(t *testing.T) {
 	}
 }
 
-// TestLLMGatewayOpenWhenNoKey verifies backward compat (KTD-3): with the
-// identity store present but the lease owner having NO LLM key, /llm/
-// stays open exactly like the legacy single-user gateway.
-func TestLLMGatewayOpenWhenNoKey(t *testing.T) {
+// TestLLMGatewayKeylessIdentityOwnerDenied verifies the 4.0 rule: with
+// the identity store present but the lease owner having NO LLM key, /llm/
+// answers 401 — the LLM_OPEN_LEGACY opt-out that used to keep keyless
+// owners open is gone.
+func TestLLMGatewayKeylessIdentityOwnerDenied(t *testing.T) {
 	ts, _, _ := newLLMTestServer(t, "", func(ids *identity.Store) {
 		// Owner exists but never gets an LLM key.
 		if _, err := ids.AddUser("owner", identity.KindPerson, []string{"SHA256:fp-owner"}, "owner-tok"); err != nil {
@@ -130,9 +131,9 @@ func TestLLMGatewayOpenWhenNoKey(t *testing.T) {
 	id := create["id"].(string)
 	llmURL := ts.URL + "/llm/" + id + "/openai/chat/completions"
 
-	// No key, no consumer token: still 200 (capability = lease id).
-	if resp := llmReq(t, llmURL, ""); resp.StatusCode != 200 {
-		t.Fatalf("owner without key must stay open: expected 200, got %d", resp.StatusCode)
+	// No key on the owner: 401, whatever the caller carries.
+	if resp := llmReq(t, llmURL, ""); resp.StatusCode != 401 {
+		t.Fatalf("owner without key must be denied: expected 401, got %d", resp.StatusCode)
 	}
 }
 

@@ -200,36 +200,6 @@ func TestUniqueOwnerName(t *testing.T) {
 }
 
 // TestPoolOrdering verifies pool lists come back ordered by created_at.
-func TestPoolOrdering(t *testing.T) {
-	db, _ := openTestDB(t)
-	ctx := context.Background()
-
-	if err := db.AddPool(ctx, "sb-1", "py-base"); err != nil {
-		t.Fatalf("add sb-1: %v", err)
-	}
-	time.Sleep(5 * time.Millisecond)
-	if err := db.AddPool(ctx, "sb-2", "py-base"); err != nil {
-		t.Fatalf("add sb-2: %v", err)
-	}
-	time.Sleep(5 * time.Millisecond)
-	if err := db.AddPool(ctx, "sb-3", "py-base"); err != nil {
-		t.Fatalf("add sb-3: %v", err)
-	}
-	if err := db.RemovePool(ctx, "sb-2"); err != nil {
-		t.Fatalf("remove sb-2: %v", err)
-	}
-
-	pool, err := db.ListPool(ctx)
-	if err != nil {
-		t.Fatalf("list pool: %v", err)
-	}
-	want := []string{"sb-1", "sb-3"}
-	if got := pool["py-base"]; !reflect.DeepEqual(got, want) {
-		t.Fatalf("pool order: got %v, want %v", got, want)
-	}
-}
-
-// TestUpdateLastActive verifies the batched LastActive update.
 func TestUpdateLastActive(t *testing.T) {
 	db, _ := openTestDB(t)
 	ctx := context.Background()

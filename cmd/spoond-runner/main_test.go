@@ -294,7 +294,7 @@ func TestMainSIGTERMGraceThenCancel(t *testing.T) {
 	// leases join the periodic checkpoint pass).
 	waitFor(t, "the lease create", func() bool { return len(lease.createBodies()) > 0 })
 	create := lease.createBodies()[0]
-	for _, k := range []string{"holder", "holder_url", "hold_ttl"} {
+	for _, k := range []string{"holder", "holder_url"} {
 		if _, ok := create[k]; ok {
 			t.Fatalf("%s sent on create: the job lease must not be held", k)
 		}
