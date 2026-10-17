@@ -248,11 +248,12 @@ the result.
 
 ## Status
 
-**v3.9.1** (2026-10-14) is the current release. spoond 3.x shares a host
+**v3.10.0** (2026-10-17) is the current release. spoond 3.x shares a host
 fairly: every active owner gets an equal, floating slice of memory and
 snapshot disk, and when a request does not fit, spoond takes room back
 from the biggest borrower. Since 3.9 it also pauses a lease on its own
-before the host runs out of memory. Clients moving from 2.9 read
+before the host runs out of memory, and since 3.10 it resumes the
+leases it paused once there is room again. Clients moving from 2.9 read
 [docs/upgrading-3.0.md](docs/upgrading-3.0.md).
 
 Every release and what changed in it is in [CHANGELOG.md](CHANGELOG.md)
