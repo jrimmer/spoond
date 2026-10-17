@@ -936,3 +936,191 @@ func TestPublishNeedsPrefix(t *testing.T) {
 		t.Fatalf("docker ran on a usage error: %v", cmdLog)
 	}
 }
+
+// TestBuildOnePullsPublishedBase: with -base-registry the docker build is
+// replaced by a pull of the published tag re-tagged to the registry ref,
+// and the rest of the build (push, digest read, template build) runs
+// unchanged. Mutation: keep the docker build, or tag the wrong ref.
+func TestBuildOnePullsPublishedBase(t *testing.T) {
+	sub := &stubSubstrate{res: substrate.BuildResult{DiskSizeMB: 5000}}
+	db := setup(t, sub)
+	opts := buildOpts{
+		registry: "localhost:5000", contextDir: "images",
+		baseRegistry: "ghcr.io/jrimmer/spoond-images", baseTag: "v4.0.0",
+	}
+	out := &bytes.Buffer{}
+	if err := buildOne(context.Background(), db, sub, testImage, sizes.Default(), opts, out); err != nil {
+		t.Fatalf("buildOne: %v", err)
+	}
+	if len(cmdLog) < 2 || cmdLog[0] != "docker pull ghcr.io/jrimmer/spoond-images/py-base:v4.0.0" ||
+		cmdLog[1] != "docker tag ghcr.io/jrimmer/spoond-images/py-base:v4.0.0 localhost:5000/py-base:latest" {
+		t.Fatalf("commands = %v, want pull then tag of the published base", cmdLog)
+	}
+	for _, c := range cmdLog {
+		if strings.HasPrefix(c, "docker build ") {
+			t.Fatalf("docker build ran despite -base-registry: %v", cmdLog)
+		}
+	}
+	if cmdLog[2] != "docker push localhost:5000/py-base:latest" {
+		t.Fatalf("after the tag: %v, want the push", cmdLog[2])
+	}
+	// The pulled image is treated exactly like a built one: digest,
+	// template build, catalog row.
+	row, err := db.GetImage(context.Background(), "py-base")
+	if err != nil || row.Digest != wantDigest || row.CurrentBuildID == "" {
+		t.Fatalf("image row = %+v, %v", row, err)
+	}
+	if len(sub.reqs) != 1 || sub.reqs[0].FromImage != wantDigest {
+		t.Fatalf("BuildTemplate requests = %+v", sub.reqs)
+	}
+}
+
+// TestBuildOnePullFallbackBuilds: a pull that finds nothing prints one
+// line and falls back to the local docker build, with the same argv a
+// build without -base-registry would run.
+func TestBuildOnePullFallbackBuilds(t *testing.T) {
+	sub := &stubSubstrate{res: substrate.BuildResult{DiskSizeMB: 5000}}
+	db := setup(t, sub)
+	runCapture = func(ctx context.Context, stdout io.Writer, name string, args ...string) (string, error) {
+		cmdLog = append(cmdLog, name+" "+strings.Join(args, " "))
+		return "manifest unknown", errors.New("exit status 1")
+	}
+	opts := buildOpts{
+		registry: "localhost:5000", contextDir: "images",
+		baseRegistry: "ghcr.io/jrimmer/spoond-images", baseTag: "latest",
+	}
+	out := &bytes.Buffer{}
+	if err := buildOne(context.Background(), db, sub, testImage, sizes.Default(), opts, out); err != nil {
+		t.Fatalf("buildOne: %v", err)
+	}
+	if cmdLog[0] != "docker pull ghcr.io/jrimmer/spoond-images/py-base:latest" {
+		t.Fatalf("first command = %q, want the pull", cmdLog[0])
+	}
+	wantBuild := "docker build --pull -f images/py-base.dockerfile -t localhost:5000/py-base:latest images"
+	if cmdLog[1] != wantBuild {
+		t.Fatalf("fallback build = %q, want %q (byte-identical to the no-flag build)", cmdLog[1], wantBuild)
+	}
+	if !strings.Contains(out.String(), "building locally") {
+		t.Fatalf("stdout %q misses the fallback line", out.String())
+	}
+	row, err := db.GetImage(context.Background(), "py-base")
+	if err != nil || row.CurrentBuildID == "" {
+		t.Fatalf("image row = %+v, %v", row, err)
+	}
+}
+
+// TestBuildOneFallbackKeepsBuildArgs: resolveBase runs even when the
+// pull succeeds the build away — and its build args are there when the
+// pull fails and the local build runs (a From layer still gets BASE).
+func TestBuildOneFallbackKeepsBuildArgs(t *testing.T) {
+	sub := &stubSubstrate{res: substrate.BuildResult{DiskSizeMB: 5000}}
+	db := setup(t, sub)
+	if err := buildOne(context.Background(), db, sub, testImage, sizes.Default(),
+		buildOpts{registry: "localhost:5000", contextDir: "images"}, &bytes.Buffer{}); err != nil {
+		t.Fatalf("base build: %v", err)
+	}
+	cmdLog = nil
+	runCapture = func(ctx context.Context, stdout io.Writer, name string, args ...string) (string, error) {
+		cmdLog = append(cmdLog, name+" "+strings.Join(args, " "))
+		return "manifest unknown", errors.New("exit status 1")
+	}
+	layer := manifestImage{
+		Name: "py-base-worker", Baked: true, Dockerfile: "worker.dockerfile", From: "py-base",
+		BuildArgs: map[string]string{"WARM": "true"},
+	}
+	opts := buildOpts{
+		registry: "localhost:5000", contextDir: "images",
+		baseRegistry: "ghcr.io/jrimmer/spoond-images", baseTag: "latest",
+	}
+	if err := buildOne(context.Background(), db, sub, layer, sizes.Default(), opts, &bytes.Buffer{}); err != nil {
+		t.Fatalf("layer build: %v", err)
+	}
+	if cmdLog[0] != "docker pull ghcr.io/jrimmer/spoond-images/py-base-worker:latest" {
+		t.Fatalf("first command = %q, want the pull", cmdLog[0])
+	}
+	want := "docker build --pull --build-arg BASE=" + wantDigest +
+		" --build-arg WARM=true --build-arg WARM_ENV=export PATH='/usr/local/bin';" +
+		" -f images/worker.dockerfile -t localhost:5000/py-base-worker:latest images"
+	if cmdLog[1] != want {
+		t.Fatalf("fallback build = %q, want %q", cmdLog[1], want)
+	}
+}
+
+// TestCmdBuildBaseRegistry: the -base-registry/-base-tag flags reach
+// buildOne for every target, and the catalog ends up as if built.
+func TestCmdBuildBaseRegistry(t *testing.T) {
+	sub := &stubSubstrate{res: substrate.BuildResult{DiskSizeMB: 5000}}
+	setup(t, sub)
+	dir := t.TempDir()
+	manifestPath := filepath.Join(dir, "manifest.yaml")
+	if err := os.WriteFile(manifestPath, []byte(`images:
+  - name: py-base
+    baked: true
+    dockerfile: py-base.dockerfile
+  - name: go-base
+    baked: true
+    dockerfile: go-base.dockerfile
+`), 0o644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	code := cmdBuild(context.Background(), nil, true, manifestPath, filepath.Join(dir, "cat.db"),
+		buildOpts{
+			registry: "localhost:5000", contextDir: "images",
+			baseRegistry: "ghcr.io/jrimmer/spoond-images", baseTag: "v4.0.0",
+		})
+	if code != 0 {
+		t.Fatalf("exit code %d, want 0", code)
+	}
+	var pulls []string
+	for _, c := range cmdLog {
+		if strings.HasPrefix(c, "docker pull ") {
+			pulls = append(pulls, c)
+		}
+		if strings.HasPrefix(c, "docker build ") {
+			t.Fatalf("docker build ran with -base-registry: %v", cmdLog)
+		}
+	}
+	want := []string{
+		"docker pull ghcr.io/jrimmer/spoond-images/py-base:v4.0.0",
+		"docker pull ghcr.io/jrimmer/spoond-images/go-base:v4.0.0",
+	}
+	if !slices.Equal(pulls, want) {
+		t.Fatalf("pulls = %v, want %v", pulls, want)
+	}
+	if len(sub.reqs) != 2 {
+		t.Fatalf("BuildTemplate calls = %d, want 2", len(sub.reqs))
+	}
+	ctx := context.Background()
+	cat, err := store.Open(filepath.Join(dir, "cat.db"))
+	if err != nil {
+		t.Fatalf("open catalog: %v", err)
+	}
+	defer cat.Close()
+	if _, err := cat.GetImage(ctx, "go-base"); err != nil {
+		t.Fatalf("GetImage go-base: %v", err)
+	}
+}
+
+// TestBuildOneWithoutBaseRegistryIsUnchanged: with no -base-registry the
+// docker build argv is byte-identical to the pre-R5 build (the flags
+// default to nothing, no extra docker command appears).
+func TestBuildOneWithoutBaseRegistryIsUnchanged(t *testing.T) {
+	sub := &stubSubstrate{res: substrate.BuildResult{DiskSizeMB: 5000}}
+	db := setup(t, sub)
+	if err := buildOne(context.Background(), db, sub, testImage, sizes.Default(),
+		buildOpts{registry: "localhost:5000", contextDir: "images"}, &bytes.Buffer{}); err != nil {
+		t.Fatalf("buildOne: %v", err)
+	}
+	want := []string{
+		"docker build --pull -f images/py-base.dockerfile -t localhost:5000/py-base:latest images",
+		"docker push localhost:5000/py-base:latest",
+	}
+	if len(cmdLog) < 2 || cmdLog[0] != want[0] || cmdLog[1] != want[1] {
+		t.Fatalf("commands = %v, want %v", cmdLog, want)
+	}
+	for _, c := range cmdLog {
+		if strings.HasPrefix(c, "docker pull") || strings.HasPrefix(c, "docker tag") {
+			t.Fatalf("unexpected pull/tag without -base-registry: %v", cmdLog)
+		}
+	}
+}
