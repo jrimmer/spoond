@@ -619,7 +619,8 @@ func TestRuntimeKeptIdenticalBinaries(t *testing.T) {
 	if _, _, err := runRuntime(t, env); err != nil {
 		t.Fatalf("first: %v", err)
 	}
-	env.Opt.Runtime = writeRuntimeTarball(t, mustTarball(t)) // a fresh path, same bytes
+	// A fresh path, the same bytes: the compare is by content.
+	env.Opt.Runtime = writeRuntimeTarball(t, mustTarball(t))
 	items, _, err := runRuntime(t, env)
 	if err != nil {
 		t.Fatalf("second: %v", err)
