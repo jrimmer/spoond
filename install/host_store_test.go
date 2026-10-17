@@ -5,6 +5,7 @@ package install
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -525,5 +526,132 @@ func TestDockerDryRunWritesNothingQueriesOnly(t *testing.T) {
 		default:
 			t.Errorf("dry run ran a changing command: %s", call)
 		}
+	}
+}
+
+// setApparmor writes the fake AppArmor sysfs switch under the root;
+// absent means the file is not written at all.
+func setApparmor(t *testing.T, env *Env, value string) {
+	t.Helper()
+	if value == "" {
+		return
+	}
+	path := env.Resolve(apparmorParam)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(value+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// apparmorReplies loads the runner answers an apparmor run needs: the
+// changing docker run so a passing check does not trip the runner's
+// unknown-command error. A test that wants the check to fail replaces
+// the row with an error.
+func apparmorReplies() map[string]fakeReply {
+	return map[string]fakeReply{
+		"docker run --rm python:3.13-slim python3 -c import socket; s=socket.socket(socket.AF_UNIX); s.bind(\"/tmp/s\"); print(\"unix ok\")": {out: []byte("unix ok\n")},
+	}
+}
+
+func runApparmor(t *testing.T, env *Env) ([]Item, error) {
+	t.Helper()
+	r := &Reporter{Phase: PhaseHost}
+	err := apparmorStep(context.Background(), env, r, &hostState{})
+	return r.Items(), err
+}
+
+func TestApparmorSkippedWhenDisabledOrAbsent(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		value string
+	}{
+		{"absent", ""},
+		{"N", "N"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env, runner := storeEnv(t)
+			setApparmor(t, env, tc.value)
+			runner.reply = apparmorReplies()
+
+			items, err := runApparmor(t, env)
+			if err != nil {
+				t.Fatalf("apparmor step: %v", err)
+			}
+			if len(items) != 1 || items[0].Result != Skipped {
+				t.Fatalf("rows = %+v, want one skipped row", items)
+			}
+			for _, call := range runner.calls {
+				if strings.Contains(call, "docker run") {
+					t.Errorf("the check container ran although AppArmor is off: %s", call)
+				}
+			}
+		})
+	}
+}
+
+func TestApparmorCheckPasses(t *testing.T) {
+	env, runner := storeEnv(t)
+	setApparmor(t, env, "Y")
+	runner.reply = apparmorReplies()
+
+	items, err := runApparmor(t, env)
+	if err != nil {
+		t.Fatalf("apparmor step: %v", err)
+	}
+	if len(items) != 1 || items[0].Result != Kept {
+		t.Fatalf("rows = %+v, want one kept row", items)
+	}
+	saw := false
+	want := `docker run --rm python:3.13-slim python3 -c import socket; s=socket.socket(socket.AF_UNIX); s.bind("/tmp/s"); print("unix ok")`
+	for _, call := range runner.calls {
+		if call == want {
+			saw = true
+		}
+	}
+	if !saw {
+		t.Errorf("calls have the check container:\n%s", strings.Join(runner.calls, "\n"))
+	}
+}
+
+func TestApparmorCheckFailsThePhase(t *testing.T) {
+	env, runner := storeEnv(t)
+	setApparmor(t, env, "Y")
+	reply := apparmorReplies()
+	checkCall := `docker run --rm python:3.13-slim python3 -c import socket; s=socket.socket(socket.AF_UNIX); s.bind("/tmp/s"); print("unix ok")`
+	reply[checkCall] = fakeReply{err: errors.New("docker: apparmor denied")}
+	runner.reply = reply
+
+	items, err := runApparmor(t, env)
+	if err == nil {
+		t.Fatal("apparmor step with a failing check, want an error")
+	}
+	if !strings.Contains(err.Error(), "Docker's AppArmor profile denies Unix sockets in containers; see the AppArmor section of docs/install.md") {
+		t.Errorf("error %q does not carry the docs text", err)
+	}
+	if len(items) != 1 || items[0].Result != Failed {
+		t.Fatalf("rows = %+v, want one failed row", items)
+	}
+	if !strings.Contains(items[0].Note, "docs/install.md") {
+		t.Errorf("failed row note %q does not point at the docs", items[0].Note)
+	}
+}
+
+func TestApparmorDryRunSkipsTheCheck(t *testing.T) {
+	env, runner := storeEnv(t)
+	env.DryRun = true
+	setApparmor(t, env, "Y")
+	runner.reply = apparmorReplies()
+
+	items, err := runApparmor(t, env)
+	if err != nil {
+		t.Fatalf("apparmor dry run: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("rows = %+v, want one row", items)
+	}
+	if items[0].Result != Kept {
+		t.Errorf("row = %+v, want kept (the check is a probe, a dry run runs it)", items[0])
 	}
 }

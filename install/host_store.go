@@ -16,6 +16,7 @@ import (
 func init() {
 	hostSteps["store"] = storeStep
 	hostSteps["docker"] = dockerStep
+	hostSteps["apparmor"] = apparmorStep
 }
 
 // The pool and dataset the store step manages; the pool mounts at
@@ -272,5 +273,45 @@ func dockerStep(ctx context.Context, env *Env, r *Reporter, st *hostState) error
 		return errors.New(note)
 	}
 	r.Add(Created, "registry "+registryContainer, dryRunNote(env, "registry:2.8.3 on 127.0.0.1:5000, data in "+dir+"/registry"))
+	return nil
+}
+
+// apparmorParam is the sysfs switch that says the kernel loaded
+// AppArmor; absent or N means the check does not apply.
+const apparmorParam = "/sys/module/apparmor/parameters/enabled"
+
+// apparmorCheckImage is the image the AppArmor check runs: the same
+// base the build images use, so its profile is the one sandboxes get.
+const apparmorCheckImage = "python:3.13-slim"
+
+// apparmorCheckScript is the Python one-liner the check runs in the
+// container: binding a Unix socket is what Docker's AppArmor profile
+// denies when the sandbox's envd socket cannot be created.
+const apparmorCheckScript = `import socket; s=socket.socket(socket.AF_UNIX); s.bind("/tmp/s"); print("unix ok")`
+
+// errAppArmorDenies is the failure an open check ends the phase with:
+// the fix lives in the AppArmor section of docs/install.md, not in
+// anything the installer would edit itself.
+var errAppArmorDenies = errors.New("Docker's AppArmor profile denies Unix sockets in containers; see the AppArmor section of docs/install.md")
+
+// apparmorStep probes the Docker-in-AppArmor behaviour only where it
+// exists: with the module unloaded (or off) the row is skipped, with
+// it loaded the check container must be able to bind a Unix socket.
+func apparmorStep(ctx context.Context, env *Env, r *Reporter, st *hostState) error {
+	b, err := os.ReadFile(env.Resolve(apparmorParam))
+	if err != nil || strings.TrimSpace(string(b)) != "Y" {
+		note := fmt.Sprintf("AppArmor is not enabled on this kernel (%s), the check does not apply", apparmorParam)
+		if err != nil {
+			note = fmt.Sprintf("%s is unreadable (%v), the check does not apply", apparmorParam, err)
+		}
+		r.Add(Skipped, "apparmor", note)
+		return nil
+	}
+	if err := env.exec(ctx, "docker", "run", "--rm", apparmorCheckImage, "python3", "-c", apparmorCheckScript); err != nil {
+		note := fmt.Sprintf("%v — `docker run --rm %s python3 -c '%s'` failed", errAppArmorDenies, apparmorCheckImage, apparmorCheckScript)
+		r.Add(Failed, "apparmor", note)
+		return errAppArmorDenies
+	}
+	r.Add(Kept, "apparmor", "Docker containers can bind Unix sockets")
 	return nil
 }
