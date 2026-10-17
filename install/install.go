@@ -55,18 +55,14 @@ type Cmd struct{}
 // Run implements Runner with os/exec, capturing stdout and letting
 // stderr through so failures show on the host console.
 func (Cmd) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
-	if len(args) == 0 {
-		args = []string{}
-	}
 	cmd := exec.CommandContext(ctx, name, args...)
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = os.Stderr
-	out, err := cmd.Output()
-	if err != nil {
-		return out, fmt.Errorf("%s %s: %w", name, joinArgs(args), err)
+	if err := cmd.Run(); err != nil {
+		return stdout.Bytes(), fmt.Errorf("%s %s: %w", name, joinArgs(args), err)
 	}
-	return out, nil
+	return stdout.Bytes(), nil
 }
 
 // joinArgs renders args for error text; it only carries command
@@ -225,7 +221,6 @@ func RunPhase(ctx context.Context, env *Env, name string, fn Phase) ([]Item, err
 			fmt.Fprintf(env.Out, "install %s:\n", name)
 		}
 	}
-	rep := &Reporter{Phase: name, Out: env.Out}
 	items, err := fn(ctx, env)
 	if err != nil {
 		return items, fmt.Errorf("%s: %w", name, err)

@@ -12,12 +12,12 @@ import (
 
 // Phase names, in run order: each depends on the ones before it.
 const (
-	PhaseCheck    = "check"
-	PhaseHost     = "host"
-	PhaseRuntime  = "runtime"
-	PhaseSpoond   = "spoond"
-	PhaseImages   = "images"
-	PhaseDoctor   = "doctor"
+	PhaseCheck   = "check"
+	PhaseHost    = "host"
+	PhaseRuntime = "runtime"
+	PhaseSpoond  = "spoond"
+	PhaseImages  = "images"
+	PhaseDoctor  = "doctor"
 	errNotYetFmt = "%s: not implemented yet (4.0 install slice pending)"
 )
 
