@@ -52,18 +52,26 @@ type Runner interface {
 // captured output so the failure names what went wrong.
 type Cmd struct{}
 
+// stderrSink is where Cmd.Run sends command stderr; os.Stderr unless
+// a test swaps it.
+var stderrSink io.Writer = os.Stderr
+
 // Run implements Runner with os/exec, capturing stdout and letting
 // stderr through so failures show on the host console.
 func (Cmd) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stderr = stderrSink
 	if err := cmd.Run(); err != nil {
 		return stdout.Bytes(), fmt.Errorf("%s %s: %w", name, joinArgs(args), err)
 	}
 	return stdout.Bytes(), nil
 }
+
+// stderrSink receives command stderr; it is os.Stderr in production
+// (a failed apt or systemctl should show on the host console) and is
+// swapped in the test that pins the split.
 
 // joinArgs renders args for error text; it only carries command
 // arguments (flags, paths), never generated secret values.
@@ -183,6 +191,7 @@ func (env *Env) writeFile(r *Reporter, path string, content []byte, mode os.File
 	if err := os.WriteFile(full, content, mode); err != nil {
 		return fmt.Errorf("write %s: %w", full, err)
 	}
+	r.Add(res, path, "")
 	return nil
 }
 
@@ -208,6 +217,7 @@ func (env *Env) writeFileKeep(r *Reporter, path string, content []byte) error {
 	if err := os.WriteFile(full, content, 0o600); err != nil {
 		return fmt.Errorf("write %s: %w", full, err)
 	}
+	r.Add(Created, path, "")
 	return nil
 }
 
