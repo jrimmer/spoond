@@ -28,17 +28,16 @@ import (
 // What the phase writes and creates, every path resolved under
 // Env.Root.
 const (
-	orchestratorBinPath  = "/usr/local/lib/e2b/orchestrator" // the fork orchestrator binary
-	envdBinPath          = "/fc-envd/envd"                   // envd, the guest agent
-	runtimeStampPath     = "/usr/local/lib/e2b/RUNTIME"      // the stamp build-runtime.sh writes
-	fcVMPath             = "/fc-vm"                          // the orchestrator's sandbox directory
-	orchestratorEnvPath  = "/etc/e2b/orchestrator.env"       // operator-editable config
-	flagsJSONPath        = "/etc/e2b/flags.json"             // operator-editable feature flags
-	spoondDirPath        = "/etc/spoond"                     // where every secret lives
-	tokenSeedPath        = "/etc/spoond/e2b-token-seed"      // the envd/traffic HMAC seed
-	guardNftPath         = "/etc/nftables.d/e2b-guard.nft"   // the nftables table
-	guardUnitPath        = "/etc/systemd/system/e2b-guard.service"
-	orchestratorUnitPath = "/etc/systemd/system/e2b-orchestrator.service"
+	orchestratorBinPath = "/usr/local/lib/e2b/orchestrator" // the fork orchestrator binary
+	envdBinPath         = "/fc-envd/envd"                   // envd, the guest agent
+	runtimeStampPath    = "/usr/local/lib/e2b/RUNTIME"      // the stamp build-runtime.sh writes
+	fcVMPath            = "/fc-vm"                          // the orchestrator's sandbox directory
+	orchestratorEnvPath = "/etc/e2b/orchestrator.env"       // operator-editable config
+	flagsJSONPath       = "/etc/e2b/flags.json"             // operator-editable feature flags
+	spoondDirPath       = "/etc/spoond"                     // where every secret lives
+	tokenSeedPath       = "/etc/spoond/e2b-token-seed"      // the envd/traffic HMAC seed
+	guardNftPath        = "/etc/nftables.d/e2b-guard.nft"   // the nftables table
+	guardUnitPath       = "/etc/systemd/system/e2b-guard.service"
 
 	orchestratorShipped    = "e2b/e2b-orchestrator.service" // the names in deploy.Files
 	orchestratorEnvShipped = "e2b/orchestrator.env"

@@ -157,9 +157,9 @@ func serveRuntime(t *testing.T, f *fakeFetcher, ver string, tgz []byte) {
 	f.served[url+"/SHA256SUMS"] = []byte(sum + "  " + downloadName(ver) + "\n")
 }
 
-// rowsByName indexes the report rows by name. It fails when two rows
+// runtimeRows indexes the report rows by name. It fails when two rows
 // share a name, so a lost or doubled row cannot hide.
-func rowsByName(t *testing.T, items []Item) map[string]Item {
+func runtimeRows(t *testing.T, items []Item) map[string]Item {
 	t.Helper()
 	rows := map[string]Item{}
 	for _, it := range items {
@@ -176,7 +176,7 @@ func rowsByName(t *testing.T, items []Item) map[string]Item {
 // returned items carry them.
 func rowOf(t *testing.T, items []Item, name string) Item {
 	t.Helper()
-	row, ok := rowsByName(t, items)[name]
+	row, ok := runtimeRows(t, items)[name]
 	if !ok {
 		t.Fatalf("no row for %s in:\n%s", name, reportText(items))
 	}
@@ -197,8 +197,8 @@ func reportText(items []Item) string {
 	return b.String()
 }
 
-// isHex says whether every rune of s is a lowercase hex digit.
-func isHex(s string) bool {
+// rtIsHex says whether every rune of s is a lowercase hex digit.
+func rtIsHex(s string) bool {
 	for _, c := range s {
 		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
 			return false
@@ -363,7 +363,7 @@ func TestRuntimeTarballHappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first run: %v\n%s", err, text)
 	}
-	rows := rowsByName(t, items)
+	rows := runtimeRows(t, items)
 	for _, path := range []string{orchestratorBinPath, envdBinPath, runtimeStampPath, orchestratorEnvPath, flagsJSONPath, tokenSeedPath, guardNftPath, guardUnitPath, orchestratorUnitPath, fcVMPath} {
 		if row, ok := rows[path]; !ok {
 			t.Errorf("no row for %s:\n%s", path, text)
@@ -424,7 +424,7 @@ func TestRuntimeTarballHappyPath(t *testing.T) {
 		t.Fatalf("read seed: %v", err)
 	}
 	s := strings.TrimRight(string(seed), "\n")
-	if len(s) != 64 || !isHex(s) {
+	if len(s) != 64 || !rtIsHex(s) {
 		t.Errorf("seed = %q, want 64 hex chars", s)
 	}
 	if strings.Contains(text, s) {
@@ -537,7 +537,7 @@ func TestRuntimeDownloadSHA256MismatchFailsWritingNothing(t *testing.T) {
 		t.Errorf("ran %v after a failed checksum", runner.calls)
 	}
 	for _, path := range []string{orchestratorBinPath, envdBinPath, runtimeStampPath} {
-		if _, ok := rowsByName(t, items)[path]; ok {
+		if _, ok := runtimeRows(t, items)[path]; ok {
 			t.Errorf("a row exists for %s; a failed checksum must install nothing:\n%s", path, text)
 		}
 		mustNotExist(t, env, path)
@@ -627,7 +627,7 @@ func TestRuntimeKeptIdenticalBinaries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second: %v", err)
 	}
-	rows := rowsByName(t, items)
+	rows := runtimeRows(t, items)
 	for _, path := range []string{orchestratorBinPath, envdBinPath, runtimeStampPath} {
 		if rows[path].Result != Kept {
 			t.Errorf("row %s = %s, want kept (identical content)", path, rows[path].Result)
@@ -665,7 +665,7 @@ func TestRuntimeChangedOrchestratorGivesChangedAndRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second: %v", err)
 	}
-	rows := rowsByName(t, items)
+	rows := runtimeRows(t, items)
 	if rows[orchestratorBinPath].Result != Changed {
 		t.Errorf("row %s = %s, want changed", orchestratorBinPath, rows[orchestratorBinPath].Result)
 	}
@@ -696,7 +696,7 @@ func TestPinnedPresentRightSHAKeptNotFetched(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	byName := rowsByName(t, items)
+	byName := runtimeRows(t, items)
 	for i, p := range pins {
 		if row := byName[p.row.path]; row.Result != Kept {
 			t.Errorf("row %s = %s (%q), want kept", p.row.path, row.Result, row.Note)
@@ -732,7 +732,7 @@ func TestPinnedAbsentFetchedAndVerified(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	byName := rowsByName(t, items)
+	byName := runtimeRows(t, items)
 	for i, p := range pins {
 		if row := byName[p.row.path]; row.Result != Created {
 			t.Errorf("row %s = %s, want created", p.row.path, row.Result)
@@ -772,7 +772,7 @@ func TestPinnedInPlaceWrongSHAFetchedNotBlindlyKept(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	row := rowsByName(t, items)[p.row.path]
+	row := runtimeRows(t, items)[p.row.path]
 	if row.Result != Changed {
 		t.Errorf("row = %s (%q), want changed", row.Result, row.Note)
 	}
@@ -794,7 +794,7 @@ func TestPinnedFetchedWrongBytesFails(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "the pin wants "+pinned[0].sha256) {
 		t.Fatalf("err = %v, want the pin mismatch naming the wanted sha256:\n%s", err, text)
 	}
-	row := rowsByName(t, items)[pinned[0].path]
+	row := runtimeRows(t, items)[pinned[0].path]
 	if row.Result != Failed {
 		t.Errorf("row = %s, want failed", row.Result)
 	}
@@ -817,7 +817,7 @@ func TestPinnedFetchFailureKeepsOldFile(t *testing.T) {
 	if err == nil {
 		t.Fatal("run succeeded, want a failure for the stale pinned file")
 	}
-	row := rowsByName(t, items)[pinned[0].path]
+	row := runtimeRows(t, items)[pinned[0].path]
 	if row.Result != Failed {
 		t.Errorf("row = %s, want failed", row.Result)
 	}
@@ -881,7 +881,7 @@ func TestOperatorEditedConfigKept(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	row := rowsByName(t, items)[orchestratorEnvPath]
+	row := runtimeRows(t, items)[orchestratorEnvPath]
 	if row.Result != Kept {
 		t.Errorf("row = %s, want kept", row.Result)
 	}
@@ -915,7 +915,7 @@ func TestIdenticalOperatorConfigKeptPlain(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if row := rowsByName(t, items)[orchestratorEnvPath]; row.Result != Kept || row.Note != "" {
+	if row := runtimeRows(t, items)[orchestratorEnvPath]; row.Result != Kept || row.Note != "" {
 		t.Errorf("row = %+v, want a plain kept", row)
 	}
 }
@@ -961,7 +961,7 @@ func TestTokenSeedCreated0600AndNeverOverwritten(t *testing.T) {
 		t.Errorf("seed mode = %#o, want 0600", got)
 	}
 	s := strings.TrimRight(string(seed), "\n")
-	if len(s) != 64 || !isHex(s) {
+	if len(s) != 64 || !rtIsHex(s) {
 		t.Errorf("seed = %q, want 64 hex chars", s)
 	}
 	if strings.Contains(out.String(), s) {
@@ -983,7 +983,7 @@ func TestTokenSeedCreated0600AndNeverOverwritten(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second run: %v", err)
 	}
-	row := rowsByName(t, items)[tokenSeedPath]
+	row := runtimeRows(t, items)[tokenSeedPath]
 	if row.Result != Kept {
 		t.Errorf("row = %s, want kept", row.Result)
 	}
@@ -1012,7 +1012,7 @@ func TestSeedIsFreshRandom(t *testing.T) {
 	if len(a) != 65 {
 		t.Errorf("seed = %q (%d bytes), want 64 hex chars + newline", a, len(a))
 	}
-	if !isHex(strings.TrimRight(string(a), "\n")) {
+	if !rtIsHex(strings.TrimRight(string(a), "\n")) {
 		t.Errorf("seed %q is not hex", a)
 	}
 }
@@ -1089,7 +1089,7 @@ func TestFullShippedUnitKept(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	row := rowsByName(t, items)[orchestratorUnitPath]
+	row := runtimeRows(t, items)[orchestratorUnitPath]
 	if row.Result != Kept {
 		t.Errorf("row = %s (%q), want kept", row.Result, row.Note)
 	}
@@ -1114,7 +1114,7 @@ func TestDryRunRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dry run: %v\n%s", err, text)
 	}
-	byName := rowsByName(t, items)
+	byName := runtimeRows(t, items)
 	for _, p := range pins {
 		if row := byName[p.row.path]; row.Result != Kept {
 			t.Errorf("pinned row %s = %+v, want kept without a fetch", p.row.path, row)
@@ -1154,7 +1154,7 @@ func TestDryRunRuntimeReleaseNotFetched(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dry run: %v\n%s", err, text)
 	}
-	byName := rowsByName(t, items)
+	byName := runtimeRows(t, items)
 	for _, path := range []string{orchestratorBinPath, envdBinPath, runtimeStampPath} {
 		if row := byName[path]; row.Result != Created {
 			t.Errorf("row %s = %+v, want a planned created", path, row)
@@ -1188,7 +1188,7 @@ func TestDryRunRuntimeStalePinnedNotFetched(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dry run: %v", err)
 	}
-	if row := rowsByName(t, items)[pinned[0].path]; row.Result != Skipped {
+	if row := runtimeRows(t, items)[pinned[0].path]; row.Result != Skipped {
 		t.Errorf("row = %+v, want skipped (a real run would re-fetch)", row)
 	}
 	if len(fetcher.urls) != 0 {
@@ -1252,7 +1252,7 @@ func TestGuardUnitChangedAloneDoesNotRestartOrchestrator(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	rows := rowsByName(t, items)
+	rows := runtimeRows(t, items)
 	if rows[guardUnitPath].Result != Changed {
 		t.Errorf("row %s = %+v, want changed", guardUnitPath, rows[guardUnitPath])
 	}
@@ -1545,7 +1545,7 @@ func TestSeedFromCryptoRandIs64Hex(t *testing.T) {
 		t.Fatalf("crypto/rand: %v", err)
 	}
 	hexed := hex.EncodeToString(raw[:])
-	if len(hexed) != 64 || !isHex(hexed) {
+	if len(hexed) != 64 || !rtIsHex(hexed) {
 		t.Errorf("encodeToString(32 bytes) = %q, want 64 hex chars", hexed)
 	}
 	var raw2 [32]byte
