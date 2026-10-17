@@ -78,7 +78,6 @@ const routeLine = "1.1.1.1 from 203.0.113.9 via 203.0.113.1 dev eth0 src 10.0.0.
 // answers from a script. The tokens ride its captured requests (the
 // test asserts on them there); they never reach Out.
 type spoondFetch struct {
-	mu        chanStatuses
 	requests  []*http.Request
 	bodies    []string
 	healthGet int
@@ -88,11 +87,6 @@ type spoondFetch struct {
 	// postCode is the user POST's answer.
 	postCode int
 }
-
-// chanStatuses is a no-op type the struct's mutex would need; the fake
-// is single-threaded (the phase polls synchronously), so plain fields
-// suffice and the type keeps the zero-value shape obvious.
-type chanStatuses struct{}
 
 // codesAt returns the GET answer for try n.
 func (f *spoondFetch) Get(r *http.Request) (int, error) {
