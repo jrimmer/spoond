@@ -82,14 +82,10 @@ chmod 600 /etc/e2b/orchestrator.env /etc/e2b/flags.json
 install -d -m 700 /etc/spoond
 test -s /etc/spoond/e2b-token-seed || openssl rand -hex 32 > /etc/spoond/e2b-token-seed
 chmod 600 /etc/spoond/e2b-token-seed
-# Install the orchestrator unit with its drain hooks stripped out: the
-# shipped unit has EnvironmentFile=/etc/e2b/drain.env with no "-" prefix
-# (so systemd refuses to start it until that file exists) and its
-# ExecStop/ExecStartPost call /opt/spoond-staging/spoond, which does not
-# exist on a fresh host. Step 4 creates /etc/e2b/drain.env and restores
-# the hooks against /opt/spoond/spoond.
-sed -e '/drain\.env/d' -e '/spoond-staging/d' \
-    deploy/e2b/e2b-orchestrator.service \
+# Install the orchestrator unit without its drain hooks for now: they
+# need /etc/e2b/drain.env and /opt/spoond/spoond, which step 4 creates.
+# Step 4 then installs the shipped unit as it is.
+grep -v drain deploy/e2b/e2b-orchestrator.service \
     > /etc/systemd/system/e2b-orchestrator.service
 systemctl daemon-reload && systemctl enable --now e2b-guard e2b-orchestrator
 curl -fsS http://127.0.0.1:5008/health     # {"status":"healthy",...}
@@ -250,14 +246,12 @@ written above (the hook reads tokens from files, never the environment);
 `SPOOND_DRAIN_INSECURE=1` is needed because the call goes to `127.0.0.1`
 while the certificate is issued for the host's name.
 
-Now that the binary and the env file both exist, restore the drain hooks
-in `/etc/systemd/system/e2b-orchestrator.service` — they were stripped
-in step 2 — by adding these lines to the `[Service]` section:
+Now that the binary and the env file both exist, install the shipped
+orchestrator unit as it is, with its drain hooks (step 2 left them out):
 
-```ini
-EnvironmentFile=/etc/e2b/drain.env
-ExecStop=/opt/spoond/spoond drain --stop
-ExecStartPost=/opt/spoond/spoond drain --start
+```bash
+install -m 644 deploy/e2b/e2b-orchestrator.service /etc/systemd/system/
+systemctl daemon-reload
 ```
 
 then `systemctl daemon-reload`. A restart is not needed for the hooks to

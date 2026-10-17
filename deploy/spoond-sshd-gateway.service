@@ -19,7 +19,6 @@ ExecStart=/opt/spoond/spoond gateway \
   --gateway-key /etc/spoond-gateway/gateway_ed25519 \
   --client-keys /etc/spoond-gateway/keys \
   --backend https://127.0.0.1:8890 \
-  --backend-token ${SPOOND_GATEWAY_TOKEN} \
   --gateway-host sandbox.example.com
 Restart=on-failure
 RestartSec=5

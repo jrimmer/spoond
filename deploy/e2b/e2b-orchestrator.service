@@ -17,8 +17,8 @@ ExecStart=/usr/local/lib/e2b/orchestrator
 # (DRAIN_SNAPSHOT_CONCURRENCY, default 2) plus the up-to-180 s quiesce
 # wait; see docs/operations.md "Restarting the orchestrator".
 EnvironmentFile=/etc/e2b/drain.env
-ExecStop=/opt/spoond-staging/spoond drain --stop
-ExecStartPost=/opt/spoond-staging/spoond drain --start
+ExecStop=/opt/spoond/spoond drain --stop
+ExecStartPost=/opt/spoond/spoond drain --start
 Restart=always
 RestartSec=5
 TimeoutStartSec=420

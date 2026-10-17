@@ -223,14 +223,12 @@ spoond dash hash 'the-password'   # bcrypt hash for DASH_PASSWORD_HASH
 
 ## Install
 
-The E2B host is brought up by `deploy/e2b/host-setup.sh` (packages,
-sysctls and hugepages, storage, pinned Firecracker/kernel/envd artifacts)
-plus the remaining steps of
-[U04](docs/plans/2026-09-30-e2b-substrate/U04-host-bringup.md): the
-orchestrator unit, the host firewall (`e2b-guard`) and the OpenTelemetry
-collector. Images are then built with `spoond images build --all`, and
-`spoond doctor` verifies the result. A single installer for the E2B
-stack does not exist yet.
+spoond needs an x86-64 Linux host with KVM (bare metal, or a VM with
+nested virtualisation), Debian 13, at least 16 GB of memory and a disk
+or partition for the snapshot store. [docs/install.md](docs/install.md)
+takes you through it in order: the host, the E2B orchestrator, spoond's
+services, the image catalog and the first user. `spoond doctor` checks
+the result.
 
 ## Docs
 

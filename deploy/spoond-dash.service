@@ -1,0 +1,18 @@
+[Unit]
+Description=spoond dash (read-only dashboard, :8893)
+After=spoond-backend.service
+Wants=spoond-backend.service
+
+[Service]
+# DASH_* settings, METRICS_TOKEN and EVENTS_TOKEN (or their *_FILE
+# spellings); every setting is listed in cmd/spoond-dash/dash.go.
+EnvironmentFile=/etc/spoond/dash.env
+ExecStart=/opt/spoond/spoond dash
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target
