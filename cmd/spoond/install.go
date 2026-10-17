@@ -38,7 +38,7 @@ const installUsage = `usage: spoond install [--dry-run] [phase]
 
   Flags:
 
-      --dry-run              print what would change, run no command, write nothing
+      --dry-run              print what would change; change nothing
       --host-name NAME       the name clients reach this host by (TLS, gateway)
       --admin-key FILE       SSH public key for the first admin user
       --tls-cert FILE        an existing certificate (with --tls-key);
@@ -72,7 +72,7 @@ func installMain(args []string) int {
 	}
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, installUsage) }
-	dryRun := fs.Bool("dry-run", false, "show what would change, write nothing, run no command")
+	dryRun := fs.Bool("dry-run", false, "show what would change; change nothing")
 	root := fs.String("root", "/", "write under DIR instead of /")
 	var opt install.Options
 	fs.StringVar(&opt.HostName, "host-name", "", "the name clients reach this host by")
@@ -136,8 +136,8 @@ func installMain(args []string) int {
 }
 
 // summarize prints the final counts line: "spoond install done: …"
-// after success, "spoond install dry run; nothing written, no command
-// run: …" after a dry run, and the same line under a failure, so the
+// after success, "spoond install dry run; nothing changed: …" after a
+// dry run, and the same line under a failure, so the
 // operator sees what went through before the stop.
 func summarize(items []install.Item, dryRun bool) {
 	var created, changed, kept, skipped, failed int
@@ -157,7 +157,7 @@ func summarize(items []install.Item, dryRun bool) {
 	}
 	verb := "done"
 	if dryRun {
-		verb = "dry run; nothing written, no command run"
+		verb = "dry run; nothing changed"
 	}
 	fmt.Printf("spoond install %s: %d created, %d changed, %d kept, %d skipped, %d failed\n",
 		verb, created, changed, kept, skipped, failed)

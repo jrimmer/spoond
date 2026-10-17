@@ -37,8 +37,9 @@ type Env struct {
 	Run Runner
 	// Out receives the progress report. Secrets never reach it.
 	Out io.Writer
-	// DryRun stops all writes and command execution; the report
-	// still shows what a real run would do.
+	// DryRun stops every write and every command that changes the
+	// host (exec); read-only queries still run. The report shows what
+	// a real run would do.
 	DryRun bool
 	// Opt holds the install flags; each phase reads its own fields.
 	Opt Options
@@ -124,6 +125,24 @@ func joinArgs(args []string) string {
 		buf.WriteString(a)
 	}
 	return buf.String()
+}
+
+// query runs a read-only command (dpkg-query, zpool list, docker
+// inspect, systemctl is-active). It runs in a dry run too: it changes
+// nothing, and the plan needs its answer.
+func (env *Env) query(ctx context.Context, name string, args ...string) ([]byte, error) {
+	return env.Run.Run(ctx, name, args...)
+}
+
+// exec runs a command that changes the host (apt-get install, modprobe,
+// zpool create, systemctl enable). In a dry run it runs nothing and
+// returns nil; the caller reports the row either way.
+func (env *Env) exec(ctx context.Context, name string, args ...string) error {
+	if env.DryRun {
+		return nil
+	}
+	_, err := env.Run.Run(ctx, name, args...)
+	return err
 }
 
 // Result is what a phase did to one item.

@@ -119,7 +119,7 @@ func TestCLIRunsAllByDefault(t *testing.T) {
 	if strings.Join(order, ",") != strings.Join(named, ",") {
 		t.Errorf("phases ran %v, want the table %v in order", order, named)
 	}
-	if text := out(); !strings.Contains(text, "spoond install dry run; nothing written, no command run: ") {
+	if text := out(); !strings.Contains(text, "spoond install dry run; nothing changed: ") {
 		t.Errorf("the counts line is missing:\n%s", text)
 	}
 }
@@ -229,7 +229,7 @@ func TestCLIDryRunPassesThrough(t *testing.T) {
 	if !dry {
 		t.Error("the phase saw DryRun=false under --dry-run")
 	}
-	if !strings.Contains(out(), "nothing written, no command run") {
+	if !strings.Contains(out(), "dry run; nothing changed") {
 		t.Errorf("the dry-run summary should say so:\n%s", out())
 	}
 }

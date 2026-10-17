@@ -557,3 +557,29 @@ func TestCmdRunCapturesStdoutStderrToProcess(t *testing.T) {
 		t.Errorf("stderr didn't reach the process's stderr: %q", rest)
 	}
 }
+
+// exec runs nothing in a dry run; query runs either way.
+func TestExecSkipsInDryRunQueryRuns(t *testing.T) {
+	env, _, runner := testEnv(t)
+	runner.reply = map[string]fakeReply{
+		"apt-get install -y x": {},
+		"dpkg-query -W x":      {out: []byte("x 1.0")},
+	}
+	env.DryRun = true
+	if err := env.exec(context.Background(), "apt-get", "install", "-y", "x"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.query(context.Background(), "dpkg-query", "-W", "x"); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 1 || runner.calls[0] != "dpkg-query -W x" {
+		t.Fatalf("calls %q, want only the dpkg-query", runner.calls)
+	}
+	env.DryRun = false
+	if err := env.exec(context.Background(), "apt-get", "install", "-y", "x"); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 2 || runner.calls[1] != "apt-get install -y x" {
+		t.Fatalf("calls %q, want the apt-get to run", runner.calls)
+	}
+}
