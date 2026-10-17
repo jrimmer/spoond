@@ -1,7 +1,7 @@
 // The spoond phase's item 1 defaults, resolved by query (never exec, so
 // they work in a dry run): the hostname to issue the certificate for,
-// the host IP guests reach host services on, the guest DNS resolver and
-// the token seed file the runtime phase made.
+// the host IP guests reach host services on, and the guest DNS
+// resolver.
 package install
 
 import (
@@ -25,12 +25,6 @@ type hostDefaults struct {
 	guestDNS string
 	// guestDNSNote says the resolver file's state when guestDNS is "".
 	guestDNSNote string
-	// seedFile is the HMAC seed's path (backend.env points at it).
-	seedFile string
-	// seedPresent reports whether the seed file exists. The phase
-	// does not generate it (the runtime phase owns the file); its
-	// row only says what the operator will run first.
-	seedPresent bool
 }
 
 // spoondDefaults resolves the defaults and adds their rows. Every
@@ -78,15 +72,6 @@ func spoondDefaults(ctx context.Context, env *Env, r *Reporter) (hostDefaults, e
 		r.Add(Skipped, "guest DNS", note)
 	} else {
 		r.Add(Created, "guest DNS", resolver+" (the first usable nameserver in /etc/resolv.conf)")
-	}
-
-	// the token seed file the runtime phase installed.
-	dd.seedFile = e2bTokenSeedPath
-	if _, err := os.Stat(env.Resolve(dd.seedFile)); err != nil {
-		r.Add(Skipped, dd.seedFile, "the runtime phase has not installed the envd/traffic HMAC seed yet; spoond backend refuses leases without it")
-	} else {
-		dd.seedPresent = true
-		r.Add(Kept, dd.seedFile, "kept (the runtime phase generates it)")
 	}
 	return dd, nil
 }
