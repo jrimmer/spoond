@@ -1044,7 +1044,7 @@ pending on it) is never picked either, but unlike `draining` it does
 not skip the tick: the floor keeps taking back around it, since a
 lease stuck `Drained` would otherwise switch the floor off for good.
 The lease resumes on its holder's next work
-call like any take-back; admission counts the floor as headroom in
+call or through give-back (below); admission counts the floor as headroom in
 every free-vs-request comparison, so a paused lease resumes only with
 the floor free on top of its own memory and is not paused again at
 once. The tick stands down while the node is draining and on bad node
@@ -1059,6 +1059,24 @@ instead of every tick.
 `spoond_memory_committed_mib` shows the memory promised to live leases
 as the loop last measured it (every tick, with the floor off too) and
 `spoond_memory_pressure_takebacks_total` counts its pauses.
+
+**Give-back** (`GIVE_BACK`, `GIVE_BACK_MARGIN_MIB`, spoond-aeo6). A
+lease spoond paused to protect itself (any take-back: the fair-share
+admission take-back or the floor above) is spoond's to resume. A tick
+that finds the box at or above the floor resumes one such lease, the
+longest-paused first and strictly in that order, when all of these
+hold: the lease's memory plus the floor plus `GIVE_BACK_MARGIN_MIB`
+(default `1024`) is free, the overcommit cap has room for it, no create
+is waiting for admission, the node is not draining, and no take-back
+has run in the last two minutes. The resume takes the same path as a
+holder's call and never takes another lease back for its room; a
+failed resume leaves the lease paused and passes it over for 10
+minutes. A lease the caller paused (a hand suspend, `idle_suspend`, the
+drain) is never given back: it still resumes on the caller's next call.
+`GIVE_BACK=off` turns give-back off. Each give-back logs `give back:
+lease ...`, emits `lease.resumed` with the detail `give_back: ...`, and
+counts in `spoond_memory_give_backs_total`. Give-back runs on the floor
+loop's tick, so with the floor off (`MEMORY_FLOOR_MIB=0`) it is off too.
 
 **Saturation gate** (#136 stage 2): spoond admits by memory, but a box
 can be saturated with memory to spare — parallel snapshot work pins the

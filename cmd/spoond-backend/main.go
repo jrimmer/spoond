@@ -726,6 +726,29 @@ func Main(args []string) int {
 		}
 		memoryFloorMiB = n
 	}
+	// GIVE_BACK and GIVE_BACK_MARGIN_MIB (spoond-aeo6): spoond resumes the
+	// leases its own take-back paused once the lease's memory plus the
+	// floor plus the margin is free. GIVE_BACK=off leaves them to their
+	// holder's next call.
+	giveBackOff := false
+	switch v := strings.ToLower(strings.TrimSpace(os.Getenv("GIVE_BACK"))); v {
+	case "", "on":
+	case "off":
+		giveBackOff = true
+	default:
+		log.Fatalf("GIVE_BACK=%q: want on or off", v)
+	}
+	giveBackMarginMiB := api.DefaultGiveBackMarginMiB // 1024
+	if v := os.Getenv("GIVE_BACK_MARGIN_MIB"); v != "" {
+		n, err := strconv.Atoi(strings.TrimSpace(v))
+		if err != nil || n < 0 {
+			log.Fatalf("GIVE_BACK_MARGIN_MIB=%q: want a whole number of MiB", v)
+		}
+		giveBackMarginMiB = n
+		if n == 0 {
+			giveBackMarginMiB = -1 // explicit 0: no margin
+		}
+	}
 	// Removed hold/idle variables (FS5): warn once at startup and ignore.
 	warnRemovedEnv(log.Default(), os.Getenv)
 
@@ -808,6 +831,8 @@ func Main(args []string) int {
 		PausedReleaseDays:         pausedReleaseDays,
 		MemoryOvercommit:          memoryOvercommit,
 		MemoryFloorMiB:            memoryFloorMiB,
+		GiveBackMarginMiB:         giveBackMarginMiB,
+		GiveBackOff:               giveBackOff,
 		PinnedIdleNoticeDays:      pinnedIdleNoticeDays,
 		MaxKeptPerLease:           envIntOr("MAX_KEPT_PER_LEASE", api.DefaultMaxKeptPerLease),
 		MaxNamedSnapshots:         envIntOr("MAX_NAMED_SNAPSHOTS", api.DefaultMaxNamedSnapshots),

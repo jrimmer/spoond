@@ -213,10 +213,10 @@ type Lease struct {
 	// take-back (FS2a, spoond-pxsn): it was suspended so the requesting
 	// owner's admission could fit. The stamp carries the requester and
 	// the victim owner's usage/slice ratio at the moment of the take.
-	// Unlike PreemptedAt it books no auto-resume anywhere: a taken-back
-	// lease comes back only on its holder's next work call, so a resumed
-	// lease can never be re-taken by the lease that displaced it (no
-	// ping-pong). Zero = not taken back; cleared with the suspension
+	// The holder's next work call resumes it, and so does give-back
+	// (api/give_back.go): spoond resumes the leases its own take-back
+	// paused once the box has room again, after a quiet period, so a
+	// handed-back lease is not re-taken by the lease that displaced it. Zero = not taken back; cleared with the suspension
 	// facts by setState. Not persisted: the structured facts on the lease
 	// (suspend_reason take_back) already survive a restart, and the stamp
 	// only has to outlive the take-back call that wrote it.
@@ -473,6 +473,13 @@ type ServiceConfig struct {
 	// The backend passes DefaultMemoryFloorMiB when unset; 0 disables the
 	// check.
 	MemoryFloorMiB int
+	// GiveBackMarginMiB is GIVE_BACK_MARGIN_MIB (spoond-aeo6): give-back
+	// resumes a taken-back lease only with its memory plus the floor plus
+	// this margin free. 0 means DefaultGiveBackMarginMiB; negative, none.
+	GiveBackMarginMiB int
+	// GiveBackOff is GIVE_BACK=off: spoond never resumes the leases its
+	// take-back paused; they come back on their holder's next call.
+	GiveBackOff bool
 	// MaxKeptPerLease is the per-lease kept-checkpoint cap (#126): a
 	// keep on a lease already holding this many kept builds answers 409
 	// and takes nothing. 0 = no cap. MAX_KEPT_PER_LEASE, default
@@ -813,6 +820,13 @@ type Service struct {
 	// instead of every tick. Written only by pressureCheck, which the
 	// loop calls alone (no other goroutine reads or writes it).
 	pressureAlertAt time.Time
+	// lastTakeBackAt is the UnixNano of the last take-back of any kind
+	// (admission or floor): give-back stays quiet for giveBackQuiet
+	// after it. Written by every takeBackPause.
+	lastTakeBackAt atomic.Int64
+	// giveBackSkip holds the leases whose give-back resume failed, until
+	// when they are passed over. Used only by the low-memory loop.
+	giveBackSkip map[string]time.Time
 	// drainGate serialises the admin drain with the rootfs probe's
 	// recovery (spoond-5ca). drain takes the write side around
 	// SetDraining and draining.Store(true); recoverDeadRootfs holds the
@@ -3792,6 +3806,8 @@ func (s *Service) resumeLeaseBody(ctx context.Context, l *Lease) (*Lease, error)
 	}
 	if preempted {
 		s.emitLeaseEvent(l.ID, l.Owner, LeaseResumed, "after preemption")
+	} else if takenBack && isGiveBack(ctx) {
+		s.emitLeaseEvent(l.ID, l.Owner, LeaseResumed, "give_back: spoond resumed it after take-back")
 	} else if takenBack {
 		s.emitLeaseEvent(l.ID, l.Owner, LeaseResumed, "after take-back")
 	} else {

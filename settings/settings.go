@@ -112,6 +112,8 @@ var Known = []string{
 	"GC_DELETE",
 	"GC_LOST_GRACE",
 	"GC_LOST_GRACE_PERSISTENT",
+	"GIVE_BACK",
+	"GIVE_BACK_MARGIN_MIB",
 	"HOST_API_PORT",
 	"HOST_GUEST_SERVICE_ADDR",
 	"HOST_GUEST_SERVICE_PORT",
@@ -438,6 +440,10 @@ var Specs = []Spec{
 	{"GC_DELETE", TypeBool, Backend, false},
 	{"GC_LOST_GRACE", TypeDuration, Backend, false},
 	{"GC_LOST_GRACE_PERSISTENT", TypeDuration, Backend, false},
+	// on or off (refused at startup otherwise; TypeString: on/off is not a bool spelling here).
+	{"GIVE_BACK", TypeString, Backend, false},
+	// A whole number of MiB, 0 = no margin.
+	{"GIVE_BACK_MARGIN_MIB", TypeInt, Backend, false},
 	{"HOST_API_PORT", TypeInt, Backend, false},
 	{"HOST_GUEST_SERVICE_ADDR", TypeString, Backend, false}, // a bare host or IP: the code builds <addr>/32 CIDRs from it
 	{"HOST_GUEST_SERVICE_PORT", TypeInt, Backend, false},

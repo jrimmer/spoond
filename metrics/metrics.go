@@ -152,6 +152,7 @@ type BackendMetrics struct {
 	// to hold the free hugepages at the floor.
 	MemoryCommittedMiB           prometheus.Gauge   // live-lease memory, set each tick
 	MemoryPressureTakebacksTotal prometheus.Counter // cumulative floor take-backs
+	MemoryGiveBacksTotal         prometheus.Counter // cumulative give-backs (taken-back leases resumed by spoond)
 
 	// Idle suspension (2.5, #129 part 2): persistent leases suspended by
 	// the idle sweep through the pause path; the next call resumes them.
@@ -517,6 +518,10 @@ func NewBackendMetrics() *BackendMetrics {
 		Namespace: "spoond", Name: "memory_pressure_takebacks_total",
 		Help: "Leases paused by the low-memory loop to hold the free hugepages at MEMORY_FLOOR_MIB.",
 	})
+	m.MemoryGiveBacksTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "spoond", Name: "memory_give_backs_total",
+		Help: "Taken-back leases spoond resumed itself once the box had room again (give-back).",
+	})
 
 	// Idle suspension (2.5, #129 part 2): persistent leases suspended by
 	// the idle sweep. The next call resumes them.
@@ -619,7 +624,7 @@ func NewBackendMetrics() *BackendMetrics {
 		m.PauseChainDepth, m.PauseChainBytes,
 		m.NamedSnapshots, m.NamedSnapshotBytes,
 		m.BoxFullTotal, m.TakeBacksTotal, m.HostPressure, m.SaturationRefusals,
-		m.MemoryCommittedMiB, m.MemoryPressureTakebacksTotal,
+		m.MemoryCommittedMiB, m.MemoryPressureTakebacksTotal, m.MemoryGiveBacksTotal,
 		m.SnapshotDiskReserved, m.SnapshotDiskUsable,
 		m.IdleSuspendsTotal,
 		m.GuestDialsActive, m.GuestDialsTotal,
