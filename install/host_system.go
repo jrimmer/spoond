@@ -256,7 +256,10 @@ const (
 // (via update-grub; a large pool rarely allocates fully on a running
 // host). HugePages_Total is read back: below the count, only a reboot
 // finishes the reservation and the phase asks for one after its other
-// steps ran.
+// steps ran. With --container both files land under Root and sysctl
+// -p gets the resolved path (the host path as the container sees it);
+// update-grub is the host's job, so a changed grub asks for the
+// reboot through the row instead.
 func hostHugepages(ctx context.Context, env *Env, r *Reporter, st *hostState) error {
 	pages, err := hugepagesCount(env)
 	if err != nil {
@@ -273,7 +276,13 @@ func hostHugepages(ctx context.Context, env *Env, r *Reporter, st *hostState) er
 		return err
 	}
 	if changed && !env.DryRun {
-		if err := env.exec(ctx, "sysctl", "-p", sysctlE2BPath); err != nil {
+		path := sysctlE2BPath
+		if env.Opt.Container {
+			// sysctl runs inside the container, so it needs the
+			// host file's path as the container sees it.
+			path = env.Resolve(sysctlE2BPath)
+		}
+		if err := env.exec(ctx, "sysctl", "-p", path); err != nil {
 			return fmt.Errorf("%w — sysctl could not apply %s; fix the kernel output above, then rerun", err, sysctlE2BPath)
 		}
 		r.Add(Changed, sysctlE2BPath, "applied with sysctl -p")
@@ -290,10 +299,17 @@ func hostHugepages(ctx context.Context, env *Env, r *Reporter, st *hostState) er
 		return err
 	}
 	if changed && !env.DryRun {
-		if err := env.exec(ctx, "update-grub"); err != nil {
-			return fmt.Errorf("%w — update-grub failed; fix the grub output above, then rerun", err)
+		if env.Opt.Container {
+			// grub.cfg regenerates on the host, and the new command
+			// line only applies at a boot: the row carries both.
+			st.RebootNeeded = true
+			r.Add(Skipped, "update-grub", "--container: run `update-grub` on the host, then reboot")
+		} else {
+			if err := env.exec(ctx, "update-grub"); err != nil {
+				return fmt.Errorf("%w — update-grub failed; fix the grub output above, then rerun", err)
+			}
+			r.Add(Changed, grubPath, "regenerated the grub config with update-grub")
 		}
-		r.Add(Changed, grubPath, "regenerated the grub config with update-grub")
 	}
 
 	// What did the kernel actually reserve?
