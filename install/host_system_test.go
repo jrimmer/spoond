@@ -376,14 +376,14 @@ func TestHugepagesForFormula(t *testing.T) {
 	if pages != 5120 {
 		t.Errorf("16 GiB -> %d pages, want 5120", pages)
 	}
-	// 128 GiB: keep 17% (21.76 GiB), the rest in pages, rounded down.
-	want := int((int64(128)<<30)*83/100) / (2 << 20)
+	// 128 GiB: keep 17%, 83% of the memory in 2 MiB pages, rounded
+	// down: 54394.
 	pages, err = hugepagesFor(128 << 30)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pages != want {
-		t.Errorf("128 GiB -> %d pages, want the formula's %d", pages, want)
+	if pages != 54394 {
+		t.Errorf("128 GiB -> %d pages, want the formula's 54394", pages)
 	}
 	// 8 GiB: keep 6 GiB leaves 2 GiB, below the 6 GiB lease floor.
 	_, err = hugepagesFor(8 << 30)
