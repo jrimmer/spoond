@@ -1,0 +1,206 @@
+// The host phase's store, Docker and AppArmor steps (hostOrder rows
+// "store", "docker", "apparmor"): the snapshot store on its ZFS pool
+// or an existing directory, Docker ordered after the store mount with
+// the local registry, and the AppArmor Unix-socket check. The manual
+// counterparts are steps 4 and 9 of deploy/e2b/host-setup.sh.
+package install
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"strings"
+)
+
+func init() {
+	hostSteps["store"] = storeStep
+}
+
+// The pool and dataset the store step manages; the pool mounts at
+// /forkdcache and the dataset at the store dir (default the dataset
+// mountpoint below).
+const (
+	storePool    = "forkdcache"
+	storeDataset = "forkdcache/e2b"
+)
+
+// zfsBcloneParam is the ZFS module parameter that says block cloning
+// is on; snapshots need it, so the pool is only created when it reads 1.
+const zfsBcloneParam = "/sys/module/zfs/parameters/zfs_bclone_enabled"
+
+// storeSubdirs is the directory layout under the store: one entry per
+// directory, created 0755 unless mode says otherwise (tmp holds
+// sandbox sockets and stays 0700). Ordered so parents come first.
+var storeSubdirs = []struct {
+	rel  string
+	mode os.FileMode
+}{
+	{"orchestrator", 0o755},
+	{"storage/templates", 0o755},
+	{"storage/build-cache", 0o755},
+	{"tmp", 0o700},
+	{"registry", 0o755},
+}
+
+// storeStep lays out the snapshot store: with --store-disk the
+// forkdcache ZFS pool and its dataset, without it a check of the
+// existing store directory and its filesystem. Either way the
+// directory layout under the store dir.
+func storeStep(ctx context.Context, env *Env, r *Reporter, st *hostState) error {
+	dir := env.Opt.storeDir()
+	if disk := env.Opt.StoreDisk; disk != "" {
+		if err := storeOnDisk(ctx, env, r, dir, disk); err != nil {
+			return err
+		}
+		return makeStoreDirs(env, r, dir)
+	}
+	if err := storeOnDir(ctx, env, r, dir); err != nil {
+		return err
+	}
+	return makeStoreDirs(env, r, dir)
+}
+
+// storeOnDisk brings the pool up when --store-disk names a disk: an
+// existing forkdcache is kept, a new one is created with the store
+// tunings after the ZFS module's block cloning is confirmed on (a pool
+// created without the feature never gains it), the dataset is created
+// unless it exists, and the pool's block-cloning feature is confirmed
+// enabled or active at the end.
+func storeOnDisk(ctx context.Context, env *Env, r *Reporter, dir, disk string) error {
+	if _, err := env.query(ctx, "zpool", "list", "-H", "-o", "name", storePool); err == nil {
+		r.Add(Kept, "zpool "+storePool, "pool exists")
+	} else {
+		// The pool would be new: block cloning must be on in the
+		// running module before the first pool is created.
+		b, err := os.ReadFile(env.Resolve(zfsBcloneParam))
+		if err != nil {
+			note := fmt.Sprintf("cannot read %s (is the ZFS module loaded? run modprobe zfs, with `options zfs zfs_bclone_enabled=1` in /etc/modprobe.d/zfs.conf): %v", zfsBcloneParam, err)
+			r.Add(Failed, "zfs block cloning", note)
+			return errors.New(note)
+		}
+		if v := strings.TrimSpace(string(b)); v != "1" {
+			note := fmt.Sprintf("ZFS block cloning is off (%s is %q) — write `options zfs zfs_bclone_enabled=1` to /etc/modprobe.d/zfs.conf and reload the zfs module (export the pool first, or reboot), then rerun", zfsBcloneParam, v)
+			r.Add(Failed, "zfs block cloning", note)
+			return errors.New(note)
+		}
+		if err := env.exec(ctx, "zpool", "create", "-o", "ashift=12", "-o", "autotrim=on",
+			"-O", "atime=off", "-O", "compression=lz4", "-O", "xattr=sa", "-O", "mountpoint=/forkdcache",
+			storePool, disk); err != nil {
+			note := fmt.Sprintf("zpool create %s on %s failed — check the disk is whole and unused (lsblk, wipefs -n): %v", storePool, disk, err)
+			r.Add(Failed, "zpool "+storePool, note)
+			return errors.New(note)
+		}
+		r.Add(Created, "zpool "+storePool, dryRunNote(env, "on "+disk+", mountpoint /forkdcache"))
+	}
+
+	if _, err := env.query(ctx, "zfs", "list", "-H", storeDataset); err != nil {
+		if err := env.exec(ctx, "zfs", "create", "-o", "mountpoint="+dir, storeDataset); err != nil {
+			note := fmt.Sprintf("zfs create %s failed: %v", storeDataset, err)
+			r.Add(Failed, "zfs "+storeDataset, note)
+			return errors.New(note)
+		}
+		r.Add(Created, "zfs "+storeDataset, dryRunNote(env, "mountpoint "+dir))
+	} else {
+		r.Add(Kept, "zfs "+storeDataset, "dataset exists")
+	}
+
+	out, err := env.query(ctx, "zpool", "get", "-H", "-o", "value", "feature@block_cloning", storePool)
+	if err != nil {
+		note := fmt.Sprintf("cannot read feature@block_cloning on %s: %v", storePool, err)
+		r.Add(Failed, "zfs block cloning", note)
+		return errors.New(note)
+	}
+	if v := strings.TrimSpace(string(out)); v != "enabled" && v != "active" {
+		note := fmt.Sprintf("%s reports feature@block_cloning=%q, want enabled or active — snapshots need block cloning; create the pool on a ZFS build with the feature (zfs-dkms from contrib)", storePool, v)
+		r.Add(Failed, "zfs block cloning", note)
+		return errors.New(note)
+	}
+	r.Add(Kept, "zfs block cloning", "feature@block_cloning enabled")
+	return nil
+}
+
+// storeOnDir checks an existing store directory when no --store-disk
+// was given: the directory must exist, and its filesystem is reported
+// — zfs and xfs are kept, anything else is a warning (reflink copies
+// degrade to full copies), never a failure.
+func storeOnDir(ctx context.Context, env *Env, r *Reporter, dir string) error {
+	full := env.Resolve(dir)
+	fi, err := os.Stat(full)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		note := fmt.Sprintf("%s does not exist — create it on an XFS (reflink) or ZFS filesystem, or pass --store-disk", dir)
+		r.Add(Failed, dir, note)
+		return errors.New(note)
+	case err != nil:
+		note := fmt.Sprintf("cannot read %s: %v", dir, err)
+		r.Add(Failed, dir, note)
+		return errors.New(note)
+	case !fi.IsDir():
+		note := fmt.Sprintf("%s is not a directory — create it on an XFS (reflink) or ZFS filesystem, or pass --store-disk", dir)
+		r.Add(Failed, dir, note)
+		return errors.New(note)
+	}
+
+	out, err := env.query(ctx, "findmnt", "-n", "-o", "FSTYPE", "--target", dir)
+	if err != nil {
+		r.Add(Skipped, "store filesystem", fmt.Sprintf("could not read the filesystem type under %s (findmnt: %v) — XFS (reflink) or ZFS is wanted", dir, err))
+		return nil
+	}
+	switch fstype := strings.TrimSpace(string(out)); fstype {
+	case "zfs", "xfs":
+		r.Add(Kept, "store filesystem", fmt.Sprintf("%s is on %s", dir, fstype))
+	default:
+		if fstype == "" {
+			fstype = "unknown"
+		}
+		r.Add(Skipped, "store filesystem", fmt.Sprintf("%s is on %s — reflink copies want XFS (reflink) or ZFS; snapshot saves and image builds fall back to full copies", dir, fstype))
+	}
+	return nil
+}
+
+// makeStoreDirs creates the store's directory layout, one row per
+// directory: kept when the directory exists with the wanted mode,
+// changed when the mode was corrected, created when new.
+func makeStoreDirs(env *Env, r *Reporter, dir string) error {
+	for _, sub := range storeSubdirs {
+		name := dir + "/" + sub.rel
+		full := env.Resolve(name)
+		res := Created
+		if fi, err := os.Stat(full); err == nil {
+			if !fi.IsDir() {
+				note := fmt.Sprintf("%s exists and is not a directory — remove it and rerun", full)
+				r.Add(Failed, name, note)
+				return errors.New(note)
+			}
+			if fi.Mode().Perm() == sub.mode {
+				r.Add(Kept, name, "")
+				continue
+			}
+			res = Changed
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("stat %s: %w", full, err)
+		}
+		if env.DryRun {
+			r.Add(res, name, "dry-run: nothing written")
+			continue
+		}
+		if err := os.MkdirAll(full, 0o755); err != nil {
+			return fmt.Errorf("create %s: %w", full, err)
+		}
+		if err := os.Chmod(full, sub.mode); err != nil {
+			return fmt.Errorf("chmod %s: %w", full, err)
+		}
+		r.Add(res, name, "")
+	}
+	return nil
+}
+
+// dryRunNote is the note for a row whose change env.exec skipped: the
+// report still shows what a real run would do.
+func dryRunNote(env *Env, note string) string {
+	if env.DryRun {
+		return "dry-run: nothing run"
+	}
+	return note
+}
