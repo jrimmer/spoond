@@ -383,6 +383,70 @@ func TestStoreStepSecondRunKeepsAll(t *testing.T) {
 	}
 }
 
+// TestStoreDiskWithContainerFails: the pool cannot be built from
+// inside the prepare container; the error says to create the store on
+// the host and pass --store-dir, and nothing runs.
+func TestStoreDiskWithContainerFails(t *testing.T) {
+	env, runner := storeEnv(t)
+	env.Opt.Container = true
+	env.Opt.StoreDisk = "/dev/sdb"
+	runner.reply = map[string]fakeReply{} // every command would error
+
+	items, err := runStore(t, env)
+	if err == nil {
+		t.Fatal("--store-disk with --container, want an error")
+	}
+	for _, want := range []string{"--store-disk is not available with --container", "create the store on the host", "--store-dir"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+	if len(runner.calls) != 0 {
+		t.Errorf("calls = %v, want none", runner.calls)
+	}
+	if len(items) != 1 || items[0].Result != Failed {
+		t.Fatalf("rows = %+v, want one failed row", items)
+	}
+}
+
+// TestStoreDirContainerCheckedUnderRoot: with --container (no
+// --store-disk) the store dir is still checked under Root, exactly
+// like a native run.
+func TestStoreDirContainerCheckedUnderRoot(t *testing.T) {
+	env, runner := storeEnv(t)
+	env.Opt.Container = true
+	if err := os.MkdirAll(env.Resolve(DefaultStoreDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runner.reply = storeReplies(false, false, "xfs")
+
+	items, err := runStore(t, env)
+	if err != nil {
+		t.Fatalf("store step: %v", err)
+	}
+	if it := storeRow(t, items, "store filesystem"); it.Result != Kept || !strings.Contains(it.Note, "xfs") {
+		t.Errorf("store filesystem row = %+v, want kept on xfs", it)
+	}
+	if _, err := os.Stat(env.Resolve(DefaultStoreDir + "/orchestrator")); err != nil {
+		t.Errorf("orchestrator dir under Root: %v", err)
+	}
+	// findmnt ran against the store dir as the container sees it.
+	if !sawCall(runner, "findmnt -n -o FSTYPE --target /forkdcache/e2b") {
+		t.Errorf("calls lack the findmnt query:\n%s", strings.Join(runner.calls, "\n"))
+	}
+}
+
+// sawCall reports whether the runner recorded exactly this command
+// line.
+func sawCall(runner *recordRunner, want string) bool {
+	for _, c := range runner.calls {
+		if c == want {
+			return true
+		}
+	}
+	return false
+}
+
 // dockerReplies loads the runner answers a docker run needs: the
 // registry inspect (running or not) plus the changing commands so a
 // successful run does not trip the runner's unknown-command error.
