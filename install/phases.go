@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // Phase names, in run order: each depends on the ones before it.
@@ -18,11 +19,12 @@ const (
 	PhaseSpoond  = "spoond"
 	PhaseImages  = "images"
 	PhaseDoctor  = "doctor"
-	errNotYetFmt = "%s: not implemented yet (4.0 install slice pending)"
 )
 
 // ErrNotImplemented is what the phases after check return until their
-// slice lands; `spoond install` with no phase argument stops on it.
+// slice lands; the CLI prints a hint with its `install` usage so the
+// operator knows the phase exists but this binary is from an earlier
+// slice.
 var ErrNotImplemented = errors.New("not implemented yet")
 
 // ErrBadPhase is returned for a phase name that is not in the table.
@@ -63,7 +65,7 @@ func RunAll(ctx context.Context, env *Env, names ...string) ([]Item, error) {
 	for _, name := range names {
 		fn, ok := Phases[name]
 		if !ok {
-			return all, fmt.Errorf("%w: %q (want one of check, host, runtime, spoond, images, doctor)", ErrBadPhase, name)
+			return all, fmt.Errorf("%w: %q (want one of %s)", ErrBadPhase, name, strings.Join(Order, ", "))
 		}
 		items, err := RunPhase(ctx, env, name, fn)
 		all = append(all, items...)
