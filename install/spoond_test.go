@@ -40,12 +40,9 @@ type spoondRunner struct {
 	ip       string
 	// calls records every invocation, queries included.
 	calls []string
-	// extra answers one-off queries (systemctl is-active).
+	// extra answers one-off queries (systemctl is-active) on top of
+	// the defaults.
 	extra map[string]reply
-
-	// errors records the commands answered with an error (the
-	// not-running is-active).
-	errored map[string]bool
 }
 
 func (s *spoondRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
@@ -163,6 +160,11 @@ func spoondTestEnv(t *testing.T) (*Env, *bytes.Buffer, *spoondRunner, *spoondFet
 	run := &spoondRunner{
 		hostname: "sb.example.com",
 		ip:       "10.0.0.11",
+		// A host the phase is installing is running the backend
+		// (the default answer; active-unit tests override it).
+		extra: map[string]reply{
+			"systemctl is-active --quiet spoond-backend": {out: []byte("active\n")},
+		},
 	}
 	fetch := &spoondFetch{getCodes: []int{http.StatusOK}, postCode: http.StatusCreated}
 	env := &Env{

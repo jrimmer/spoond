@@ -96,7 +96,8 @@ var spoondUnits = []struct {
 	embed string
 	path  string
 }{
-
+	{"spoond-backend.service", "/etc/systemd/system/spoond-backend.service"},
+	{"spoond-sshd-gateway.service", "/etc/systemd/system/spoond-sshd-gateway.service"},
 	{"spoond-dash.service", "/etc/systemd/system/spoond-dash.service"},
 	{"e2b/spoond-drain.service", "/etc/systemd/system/spoond-drain.service"},
 	{"e2b/e2b-orchestrator.service", orchestratorUnitPath},
