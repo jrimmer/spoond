@@ -1243,6 +1243,32 @@ func TestSpoondHealthWaitsAndFails(t *testing.T) {
 
 }
 
+// TestSpoondUnhealthyBackendStops: a backend that never answers /healthz
+// stops the install after the 60 s wait with the row and error naming
+// the journalctl command the operator runs next.
+func TestSpoondUnhealthyBackendStops(t *testing.T) {
+	env, _, _, fetch := spoondTestEnv(t)
+	fetch.getCodes = []int{0} // every try fails
+	setHealthWait(t, time.Second)
+	items, _, err := runSpoond(t, env)
+	if err == nil {
+		t.Fatal("want a failure for a never-healthy backend")
+	}
+	for _, want := range []string{"spoond-backend is not healthy", "journalctl -u spoond-backend -n 50"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the failure should say %q: %v", want, err)
+		}
+	}
+	row := firstFailedRow(t, items)
+	if row.Name != healthzURL() || !strings.HasSuffix(err.Error(), row.Note) {
+		t.Errorf("failed row = %+v, want the healthz row carrying the same failure (err %v)", row, err)
+	}
+	// The phase stops: the first user never ran (no POST).
+	if len(fetch.bodies) != 0 {
+		t.Errorf("the install continued past the failed health wait")
+	}
+}
+
 // setUptimeMono pins the boot clock the horizon reads and restores it.
 func setUptimeMono(t *testing.T, f func() (int64, error)) {
 	t.Helper()
