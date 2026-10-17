@@ -655,3 +655,22 @@ func TestApparmorDryRunSkipsTheCheck(t *testing.T) {
 		t.Errorf("row = %+v, want kept (the check is a probe, a dry run runs it)", items[0])
 	}
 }
+
+func TestStoreAndDockerStepsRegisteredInHostOrder(t *testing.T) {
+	for _, name := range []string{"store", "docker", "apparmor"} {
+		if hostSteps[name] == nil {
+			t.Errorf("hostSteps[%q] is not registered", name)
+		}
+	}
+	// The registry volume lands inside the store dir the store step
+	// creates: host_store.go's layout must keep the registry entry.
+	found := false
+	for _, sub := range storeSubdirs {
+		if sub.rel == "registry" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("storeSubdirs has no registry entry, the docker step's volume would dangle")
+	}
+}
