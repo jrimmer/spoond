@@ -1,12 +1,9 @@
 package api
 
-// The /api/leases path family (2.0): every /api/leases route is also
-// served there, in one rewrite at the top of the handler chain, with
-// identical auth and responses. /api/leases is the documented primary
-// path; /api/leases stays as a permanent alias (D5).
+// The /api/leases path family (4.0): one spelling, one registration
+// per route, no rewrite and no alias.
 
 import (
-	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -14,11 +11,9 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// TestLeaseAliasCRUD covers create, get, list, exec and delete through
-// /api/leases and checks each response matches the /api/leases twin:
-// same status, same body — the rewrite happens before auth and the mux,
-// so there is nothing to diverge.
-func TestLeaseAliasCRUD(t *testing.T) {
+// TestLeasesCRUD covers create, get, list, exec and delete through
+// /api/leases: the one lease surface since 4.0.
+func TestLeasesCRUD(t *testing.T) {
 	ts, _ := newTestServer(t)
 
 	// Create through /api/leases.
@@ -32,41 +27,22 @@ func TestLeaseAliasCRUD(t *testing.T) {
 		t.Fatalf("create response missing id: %v", lease)
 	}
 
-	// The same create through the alias must return an identical body.
-	respAlias, leaseAlias := doReq(t, "POST", ts.URL+"/api/leases", "token-a",
-		map[string]any{"image": "py-base", "ttl": 300})
-	if respAlias.StatusCode != http.StatusCreated {
-		t.Fatalf("create via /api/leases: %d: %v", respAlias.StatusCode, leaseAlias)
+	// Get it back.
+	resp, got := doReq(t, "GET", ts.URL+"/api/leases/"+id, "token-a", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("get via /api/leases: %d: %v", resp.StatusCode, got)
 	}
-	// ids differ by design; expires_at is derived from each grant's own
-	// wall clock and the two requests are back to back, so either may
-	// straddle a second boundary. Normalise both before comparing — the
-	// alias must not change anything that is not inherently per-request.
-	leaseAlias["id"] = id
-	leaseAlias["expires_at"] = lease["expires_at"]
-	if rawL, rawS := jsonBody(t, lease), jsonBody(t, leaseAlias); rawL != rawS {
-		t.Fatalf("create responses diverge:\nleases: %s\nsandboxes: %s", rawL, rawS)
+	if got["id"] != id {
+		t.Fatalf("get via /api/leases: id = %v, want %v", got["id"], id)
 	}
 
-	// Get through both paths.
-	respL, gotL := doReq(t, "GET", ts.URL+"/api/leases/"+id, "token-a", nil)
-	respS, gotS := doReq(t, "GET", ts.URL+"/api/leases/"+id, "token-a", nil)
-	if respL.StatusCode != http.StatusOK || respS.StatusCode != http.StatusOK {
-		t.Fatalf("get: leases %d, sandboxes %d", respL.StatusCode, respS.StatusCode)
+	// List sees the lease.
+	resp, list := doReq(t, "GET", ts.URL+"/api/leases", "token-a", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("list via /api/leases: %d", resp.StatusCode)
 	}
-	if jsonBody(t, gotL) != jsonBody(t, gotS) {
-		t.Fatalf("get responses diverge:\nleases: %v\nsandboxes: %v", gotL, gotS)
-	}
-
-	// List through both paths sees the lease created through either.
-	for _, base := range []string{"/api/leases", "/api/leases"} {
-		resp, list := doReq(t, "GET", ts.URL+base, "token-a", nil)
-		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("list via %s: %d", base, resp.StatusCode)
-		}
-		if rows := list["sandboxes"].([]any); len(rows) != 2 {
-			t.Fatalf("list via %s: %d rows, want 2", base, len(rows))
-		}
+	if rows := list["sandboxes"].([]any); len(rows) != 1 {
+		t.Fatalf("list via /api/leases: %d rows, want 1", len(rows))
 	}
 
 	// Exec through /api/leases.
@@ -82,69 +58,35 @@ func TestLeaseAliasCRUD(t *testing.T) {
 		t.Fatalf("exec stdout empty: %v", exec)
 	}
 
-	// Delete through /api/leases, then the get is 404 on both paths.
+	// Delete through /api/leases, then the get is 404.
 	resp, _ = doReq(t, "DELETE", ts.URL+"/api/leases/"+id, "token-a", nil)
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("delete via /api/leases: %d", resp.StatusCode)
 	}
-	for _, base := range []string{"/api/leases", "/api/leases"} {
-		resp, body := doReq(t, "GET", ts.URL+base+"/"+id, "token-a", nil)
-		if resp.StatusCode != http.StatusNotFound {
-			t.Fatalf("get after delete via %s: %d: %v", base, resp.StatusCode, body)
-		}
+	resp, body := doReq(t, "GET", ts.URL+"/api/leases/"+id, "token-a", nil)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("get after delete via /api/leases: %d: %v", resp.StatusCode, body)
 	}
 }
 
-// TestLeaseAliasCrossVisibility: a lease created through one path family
-// is visible and usable through the other.
-func TestLeaseAliasCrossVisibility(t *testing.T) {
+// TestLeasesAuth pins the auth gate on /api/leases: no token is 401,
+// a wrong token is 401, and an owned lease is not visible to another
+// consumer's token.
+func TestLeasesAuth(t *testing.T) {
 	ts, _ := newTestServer(t)
 
-	resp, lease := doReq(t, "POST", ts.URL+"/api/leases", "token-a",
-		map[string]any{"image": "py-base", "ttl": 300})
-	if resp.StatusCode != http.StatusCreated {
-		t.Fatalf("create via /api/leases: %d: %v", resp.StatusCode, lease)
+	// No token → 401.
+	resp, _ := doReq(t, "POST", ts.URL+"/api/leases", "", map[string]any{"image": "py-base"})
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("no-token create via /api/leases: %d, want 401", resp.StatusCode)
 	}
-	id, _ := lease["id"].(string)
-
-	// Visible through /api/leases...
-	resp, got := doReq(t, "GET", ts.URL+"/api/leases/"+id, "token-a", nil)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("get via /api/leases: %d: %v", resp.StatusCode, got)
-	}
-	// ...executable through /api/leases...
-	resp, exec := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/exec", "token-a",
-		map[string]any{"cmd": "echo via-leases"})
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("exec via /api/leases: %d: %v", resp.StatusCode, exec)
-	}
-	// ...and deletable through /api/leases.
-	resp, _ = doReq(t, "DELETE", ts.URL+"/api/leases/"+id, "token-a", nil)
-	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("delete via /api/leases: %d", resp.StatusCode)
-	}
-}
-
-// TestLeaseAliasAuth pins that /api/leases is gated exactly like
-// /api/leases: no token is 401, a wrong token is 401, and an owned
-// lease is not visible to another consumer's token.
-func TestLeaseAliasAuth(t *testing.T) {
-	ts, _ := newTestServer(t)
-
-	// No token → 401 on both path families.
-	for _, base := range []string{"/api/leases", "/api/leases"} {
-		resp, _ := doReq(t, "POST", ts.URL+base, "", map[string]any{"image": "py-base"})
-		if resp.StatusCode != http.StatusUnauthorized {
-			t.Fatalf("no-token create via %s: %d, want 401", base, resp.StatusCode)
-		}
-		resp, _ = doReq(t, "GET", ts.URL+base, "", nil)
-		if resp.StatusCode != http.StatusUnauthorized {
-			t.Fatalf("no-token list via %s: %d, want 401", base, resp.StatusCode)
-		}
+	resp, _ = doReq(t, "GET", ts.URL+"/api/leases", "", nil)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("no-token list via /api/leases: %d, want 401", resp.StatusCode)
 	}
 
-	// Wrong token → 401 on /api/leases too.
-	resp, _ := doReq(t, "GET", ts.URL+"/api/leases", "wrong", nil)
+	// Wrong token → 401 too.
+	resp, _ = doReq(t, "GET", ts.URL+"/api/leases", "wrong", nil)
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("wrong-token list via /api/leases: %d, want 401", resp.StatusCode)
 	}
@@ -162,10 +104,9 @@ func TestLeaseAliasAuth(t *testing.T) {
 	}
 }
 
-// TestLeaseAliasSubroutes pins the whole subroute surface: lifecycle,
-// tag and share subroutes all answer under /api/leases with the same
-// status codes their /api/leases twins give.
-func TestLeaseAliasSubroutes(t *testing.T) {
+// TestLeasesSubroutes pins the whole subroute surface: lifecycle,
+// tag and share subroutes all answer under /api/leases.
+func TestLeasesSubroutes(t *testing.T) {
 	ts, _ := newTestServer(t)
 
 	resp, lease := doReq(t, "POST", ts.URL+"/api/leases", "token-a",
@@ -182,7 +123,7 @@ func TestLeaseAliasSubroutes(t *testing.T) {
 		body   any
 		want   int
 	}{
-		{"tag", "POST", "/api/leases/" + id + "/tag", map[string]any{"name": "aliased"}, http.StatusOK},
+		{"tag", "POST", "/api/leases/" + id + "/tag", map[string]any{"name": "tagged"}, http.StatusOK},
 		{"comment", "POST", "/api/leases/" + id + "/comment", map[string]any{"comment": "hi"}, http.StatusOK},
 		{"endpoint", "GET", "/api/leases/" + id + "/endpoint", nil, http.StatusOK},
 		{"keepalive", "POST", "/api/leases/" + id + "/keepalive", nil, http.StatusOK},
@@ -194,17 +135,17 @@ func TestLeaseAliasSubroutes(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			respL, _ := doReq(t, tc.method, ts.URL+tc.path, "token-a", tc.body)
-			if respL.StatusCode != tc.want {
-				t.Fatalf("%s %s: %d, want %d", tc.method, tc.path, respL.StatusCode, tc.want)
+			resp, _ := doReq(t, tc.method, ts.URL+tc.path, "token-a", tc.body)
+			if resp.StatusCode != tc.want {
+				t.Fatalf("%s %s: %d, want %d", tc.method, tc.path, resp.StatusCode, tc.want)
 			}
 		})
 	}
 }
 
-// TestLeaseAliasStream pins that the WebSocket upgrade works under the
-// /api/leases path too.
-func TestLeaseAliasStream(t *testing.T) {
+// TestLeasesStream pins that the WebSocket upgrade works under
+// /api/leases.
+func TestLeasesStream(t *testing.T) {
 	ts, _ := newTestServer(t)
 	resp, lease := doReq(t, "POST", ts.URL+"/api/leases", "token-a",
 		map[string]any{"image": "py-base", "ttl": 300})
@@ -220,7 +161,7 @@ func TestLeaseAliasStream(t *testing.T) {
 		t.Fatalf("dial /api/leases stream: %v", err)
 	}
 	defer ws.Close()
-	ws.WriteMessage(websocket.TextMessage, []byte(`{"args":["echo","alias-ok"],"pty":false}`))
+	ws.WriteMessage(websocket.TextMessage, []byte(`{"args":["echo","leases-ok"],"pty":false}`))
 	_, payload, err := ws.ReadMessage()
 	if err != nil {
 		t.Fatalf("read started frame: %v", err)
@@ -259,12 +200,3 @@ func TestLeaseMetricLabels(t *testing.T) {
 	}
 }
 
-// jsonBody marshals v deterministically for response comparison.
-func jsonBody(t *testing.T, v any) string {
-	t.Helper()
-	b, err := json.Marshal(v)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	return string(b)
-}
