@@ -964,6 +964,11 @@ func TestBuildOnePullsPublishedBase(t *testing.T) {
 	if cmdLog[2] != "docker push localhost:5000/py-base:latest" {
 		t.Fatalf("after the tag: %v, want the push", cmdLog[2])
 	}
+	// Both tags leave dockerd after the push (spoond-07fn).
+	wantRm := "docker image rm localhost:5000/py-base:latest ghcr.io/jrimmer/spoond-images/py-base:v4.0.0"
+	if !slices.Contains(cmdLog, wantRm) {
+		t.Fatalf("commands = %v, want %q", cmdLog, wantRm)
+	}
 	// The pulled image is treated exactly like a built one: digest,
 	// template build, catalog row.
 	row, err := db.GetImage(context.Background(), "py-base")

@@ -515,7 +515,12 @@ func buildOne(ctx context.Context, db *store.DB, sub substrate.Substrate, img ma
 	// ref just pushed. Never a blanket `docker image prune -a`: other
 	// images on the host (the registry's own, the buildkit container's)
 	// must stay. Best effort: a failed rm never fails the build.
-	if err := runCmd(ctx, stdout, "docker", "image", "rm", ref); err != nil {
+	// A pulled base also left its published tag behind; drop it with ref.
+	rm := []string{"image", "rm", ref}
+	if pulled {
+		rm = append(rm, opts.baseRegistry+"/"+img.Name+":"+opts.baseTag)
+	}
+	if err := runCmd(ctx, stdout, "docker", rm...); err != nil {
 		fmt.Fprintf(stdout, "warning: docker image rm: %v\n", err)
 	}
 	// Re-tagging :latest leaves the previous build's image dangling; the
