@@ -7,6 +7,7 @@ package install
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -285,5 +286,219 @@ func TestHostPackagesContribCheckedBeforeInstall(t *testing.T) {
 	}
 	if runner.calls[len(runner.calls)-1] != "apt-get install -y --no-install-recommends linux-headers-amd64 zfs-dkms zfsutils-linux zfs-zed" {
 		t.Errorf("last call %q, want the one install", runner.calls[len(runner.calls)-1])
+	}
+}
+
+// meminfo builds a /proc/meminfo fake with the given totals (bytes)
+// and hugepage counts (pages).
+func meminfo(totalBytes int64, hugepagesTotal int) string {
+	s := fmt.Sprintf("MemTotal:       %d kB\n", totalBytes>>10)
+	if hugepagesTotal >= 0 {
+		s += fmt.Sprintf("HugePages_Total:    %d\n", hugepagesTotal)
+	}
+	return s + "MemAvailable:   12345678 kB\n"
+}
+
+// grubBody is a /etc/default/grub fake with the common lines around
+// the command line.
+const grubBody = `# If you change this file, run 'update-grub' afterwards.
+GRUB_DEFAULT=0
+GRUB_TIMEOUT=5
+GRUB_CMDLINE_LINUX_DEFAULT="quiet splash"
+GRUB_CMDLINE_LINUX=""
+`
+
+// TestHugepagesForFormula pins the auto formula: the host keeps
+// max(6 GiB, 17%) and the rest splits into 2 MiB pages, rounded down.
+func TestHugepagesForFormula(t *testing.T) {
+	// 16 GiB: keep 6 GiB, 10 GiB in pages = 5120.
+	pages, err := hugepagesFor(16 << 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pages != 5120 {
+		t.Errorf("16 GiB -> %d pages, want 5120", pages)
+	}
+	// 128 GiB: keep 17% (21.76 GiB), the rest in pages, rounded down.
+	want := int((int64(128)<<30)*83/100) / (2 << 20)
+	pages, err = hugepagesFor(128 << 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pages != want {
+		t.Errorf("128 GiB -> %d pages, want the formula's %d", pages, want)
+	}
+	// 8 GiB: keep 6 GiB leaves 2 GiB, below the 6 GiB lease floor.
+	_, err = hugepagesFor(8 << 30)
+	if err == nil {
+		t.Fatal("8 GiB should fail")
+	}
+	if !strings.Contains(err.Error(), "not enough memory for leases: 2048 MiB") {
+		t.Errorf("8 GiB error = %q, want the memory note", err)
+	}
+}
+
+// TestHostHugepagesExplicitCount: --hugepages 4096 is used as given,
+// no MemTotal read involved (there is no meminfo fake here).
+func TestHostHugepagesExplicitCount(t *testing.T) {
+	env, _, runner := testEnv(t)
+	env.Opt.Hugepages = "4096"
+	runner.reply = map[string]fakeReply{}
+	addReply(runner, "sysctl -p /etc/sysctl.d/90-e2b.conf", "")
+	addReply(runner, "update-grub", "")
+	writeRootFile(t, env, grubPath, grubBody)
+	writeRootFile(t, env, meminfoPath, meminfo(16<<30, 0))
+
+	st := &hostState{}
+	if err := hostHugepages(context.Background(), env, &Reporter{Phase: PhaseHost}, st); err != nil {
+		t.Fatal(err)
+	}
+	if st.Hugepages != 4096 {
+		t.Errorf("st.Hugepages = %d, want 4096 as given", st.Hugepages)
+	}
+	b, _ := read(t, env, sysctlE2BPath)
+	if !strings.Contains(string(b), "vm.nr_hugepages = 4096\n") {
+		t.Errorf("sysctl conf = %q, want the 4096 reservation", b)
+	}
+}
+
+// TestHostHugepagesAutoAndGrub walks the auto path over a real grub
+// body: 16 GiB yields 5120; the existing hugepages= token is replaced
+// and the other tokens survive; update-grub runs only when the file
+// changed.
+func TestHostHugepagesAutoAndGrub(t *testing.T) {
+	env, _, runner := testEnv(t)
+	runner.reply = map[string]fakeReply{}
+	addReply(runner, "sysctl -p /etc/sysctl.d/90-e2b.conf", "")
+	addReply(runner, "update-grub", "")
+	writeRootFile(t, env, meminfoPath, meminfo(16<<30, 0))
+	// An existing token and other tokens that must survive.
+	writeRootFile(t, env, grubPath, strings.Replace(grubBody,
+		`GRUB_CMDLINE_LINUX_DEFAULT="quiet splash"`,
+		`GRUB_CMDLINE_LINUX_DEFAULT="quiet hugepages=12288"`, 1))
+
+	st := &hostState{}
+	if err := hostHugepages(context.Background(), env, &Reporter{Phase: PhaseHost}, st); err != nil {
+		t.Fatal(err)
+	}
+	if st.Hugepages != 5120 {
+		t.Errorf("st.Hugepages = %d, want 5120 for 16 GiB", st.Hugepages)
+	}
+	b, _ := read(t, env, grubPath)
+	if !strings.Contains(string(b), `GRUB_CMDLINE_LINUX_DEFAULT="quiet hugepages=5120"`) {
+		t.Errorf("grub = %q, want the token replaced inside the line", b)
+	}
+	if strings.Contains(string(b), "12288") {
+		t.Errorf("grub = %q, the old token is still there", b)
+	}
+	// 5120 pages = 10 GiB; the fake kernel reserved none, so the
+	// phase asks for the reboot but does not fail.
+	if !st.RebootNeeded {
+		t.Error("HugePages_Total 0 below 5120: st.RebootNeeded not set")
+	}
+
+	// The reservation file, the same run.
+	sysctl, _ := read(t, env, sysctlE2BPath)
+	want := "vm.nr_hugepages = 5120\nvm.max_map_count = 1048576\nnet.ipv4.ip_forward = 1\n"
+	if string(sysctl) != want {
+		t.Errorf("sysctl conf = %q, want %q", sysctl, want)
+	}
+	for _, c := range runner.calls {
+		if c == "update-grub" {
+			return // ran, the grub file changed: right
+		}
+	}
+	t.Errorf("calls = %v, want update-grub after the grub change", runner.calls)
+}
+
+// TestHostHugepagesGrubKeepsTokensAndSkipsUpdateGrub: a second run
+// changes nothing, so update-grub does not run again; the non-grub
+// lines stay byte for byte.
+func TestHostHugepagesGrubKeepsTokensAndSkipsUpdateGrub(t *testing.T) {
+	env, _, runner := testEnv(t)
+	runner.reply = map[string]fakeReply{}
+	addReply(runner, "sysctl -p /etc/sysctl.d/90-e2b.conf", "")
+	addReply(runner, "update-grub", "")
+	// The kernel has the pages now: no reboot.
+	writeRootFile(t, env, meminfoPath, meminfo(16<<30, 5120))
+	writeRootFile(t, env, grubPath, strings.Replace(grubBody,
+		`GRUB_CMDLINE_LINUX_DEFAULT="quiet splash"`,
+		`GRUB_CMDLINE_LINUX_DEFAULT="quiet hugepages=5120"`, 1))
+	writeRootFile(t, env, sysctlE2BPath,
+		"vm.nr_hugepages = 5120\nvm.max_map_count = 1048576\nnet.ipv4.ip_forward = 1\n")
+
+	st := &hostState{}
+	if err := hostHugepages(context.Background(), env, &Reporter{Phase: PhaseHost}, st); err != nil {
+		t.Fatal(err)
+	}
+	if st.RebootNeeded {
+		t.Error("HugePages_Total 5120 covers the want: no reboot")
+	}
+	for _, c := range runner.calls {
+		if c == "update-grub" || c == "sysctl -p /etc/sysctl.d/90-e2b.conf" {
+			t.Errorf("second run ran %q with nothing to change", c)
+		}
+	}
+	b, _ := read(t, env, grubPath)
+	if !strings.Contains(string(b), "GRUB_DEFAULT=0") || !strings.Contains(string(b), `GRUB_CMDLINE_LINUX_DEFAULT="quiet hugepages=5120"`) {
+		t.Errorf("grub = %q, want the untouched body with the token kept", b)
+	}
+}
+
+// TestHostHugepagesShortMemoryFails: 8 GiB auto is below the lease
+// floor; the error carries the fix.
+func TestHostHugepagesShortMemoryFails(t *testing.T) {
+	env, _, _ := testEnv(t)
+	writeRootFile(t, env, meminfoPath, meminfo(8<<30, 0))
+	err := hostHugepages(context.Background(), env, &Reporter{Phase: PhaseHost}, &hostState{})
+	if err == nil {
+		t.Fatal("8 GiB should fail")
+	}
+	if !strings.Contains(err.Error(), "not enough memory for leases: 2048 MiB") {
+		t.Errorf("error = %q, want the memory note", err)
+	}
+}
+
+// TestSetGrubHugepagesTable covers the token surgery directly: append
+// when absent, replace when present, keep everything else, and report
+// changed honestly.
+func TestSetGrubHugepagesTable(t *testing.T) {
+	cases := []struct {
+		name    string
+		in, out string
+		changed bool
+	}{
+		{
+			name:    "append",
+			in:      `GRUB_CMDLINE_LINUX_DEFAULT="quiet splash"` + "\n",
+			out:     `GRUB_CMDLINE_LINUX_DEFAULT="quiet splash hugepages=5120"` + "\n",
+			changed: true,
+		},
+		{
+			name:    "replace",
+			in:      `GRUB_CMDLINE_LINUX_DEFAULT="quiet hugepages=12288"` + "\n",
+			out:     `GRUB_CMDLINE_LINUX_DEFAULT="quiet hugepages=5120"` + "\n",
+			changed: true,
+		},
+		{
+			name:    "same",
+			in:      `GRUB_CMDLINE_LINUX_DEFAULT="hugepages=5120"` + "\n",
+			out:     `GRUB_CMDLINE_LINUX_DEFAULT="hugepages=5120"` + "\n",
+			changed: false,
+		},
+		{
+			name:    "other lines untouched",
+			in:      "GRUB_TIMEOUT=5\nGRUB_CMDLINE_LINUX_DEFAULT=\"quiet hugepages=9\"\nGRUB_CMDLINE_LINUX=\"\"",
+			out:     "GRUB_TIMEOUT=5\nGRUB_CMDLINE_LINUX_DEFAULT=\"quiet hugepages=5120\"\nGRUB_CMDLINE_LINUX=\"\"",
+			changed: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, changed := setGrubHugepages(tc.in, 5120)
+			if out != tc.out || changed != tc.changed {
+				t.Errorf("setGrubHugepages(%q) = %q, %v; want %q, %v", tc.in, out, changed, tc.out, tc.changed)
+			}
+		})
 	}
 }

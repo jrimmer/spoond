@@ -7,6 +7,7 @@
 package install
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -19,6 +20,7 @@ func init() {
 	hostSteps["packages"] = hostPackages
 	hostSteps["modules"] = hostModules
 	hostSteps["udev"] = hostUdev
+	hostSteps["hugepages"] = hostHugepages
 }
 
 // basePackages are the host packages every install needs: the firewall
@@ -166,4 +168,196 @@ const nbdUdevRule = `KERNEL=="nbd*", GROUP="disk", MODE="0660"
 // re-reads the rules directory on every udevadm trigger.
 func hostUdev(ctx context.Context, env *Env, r *Reporter, st *hostState) error {
 	return env.writeFile(r, "/etc/udev/rules.d/97-nbd-device.rules", []byte(nbdUdevRule), 0o644)
+}
+
+func init() { hostSteps["hugepages"] = hostHugepages }
+
+// Hugepage sizing: 2 MiB pages, and the host keeps max(6 GiB, 17% of
+// MemTotal); pages = what is left over 2 MiB, rounded down. 6 GiB in
+// 2 MiB pages is 3072, the floor below which leases do not fit.
+const (
+	hugepageSize   = 2 << 20
+	hugepagesFloor = 3072
+)
+
+// hugepagesFor is the auto formula: (MemTotal - max(6 GiB, 17%)) / 2 MiB,
+// rounded down; the error carries the total when the host is too small.
+func hugepagesFor(memTotalBytes int64) (int, error) {
+	keep := memTotalBytes * 17 / 100
+	if min := int64(6) << 30; keep < min {
+		keep = min
+	}
+	left := memTotalBytes - keep
+	if left < int64(hugepagesFloor)*hugepageSize {
+		return 0, fmt.Errorf("not enough memory for leases: %d MiB", left>>20)
+	}
+	return int(left / hugepageSize), nil
+}
+
+// grubPath is the grub default file the kernel command line comes
+// from; hugepagesToken is the token inside GRUB_CMDLINE_LINUX_DEFAULT
+// that carries the reservation.
+const (
+	grubPath       = "/etc/default/grub"
+	hugepagesToken = "hugepages="
+)
+
+// hostHugepages reserves the 2 MiB pages the lease pool runs from.
+// The count is --hugepages, or auto: MemTotal minus what the host
+// keeps. The count lands in /etc/sysctl.d/90-e2b.conf (applies now,
+// via sysctl -p) and on the kernel command line in /etc/default/grub
+// (via update-grub; a large pool rarely allocates fully on a running
+// host). HugePages_Total is read back: below the count, only a reboot
+// finishes the reservation and the phase asks for one after its other
+// steps ran.
+func hostHugepages(ctx context.Context, env *Env, r *Reporter, st *hostState) error {
+	pages, err := hugepagesCount(env)
+	if err != nil {
+		return err
+	}
+	st.Hugepages = pages
+
+	// The sysctl file: the reservation plus the two settings the
+	// leases and the gateway networking need.
+	sysctl := fmt.Sprintf("vm.nr_hugepages = %d\nvm.max_map_count = 1048576\nnet.ipv4.ip_forward = 1\n", pages)
+	before, err := os.ReadFile(env.Resolve(sysctlE2BPath))
+	changed := err != nil || string(before) != sysctl
+	if err := env.writeFile(r, sysctlE2BPath, []byte(sysctl), 0o644); err != nil {
+		return err
+	}
+	if changed && !env.DryRun {
+		if err := env.exec(ctx, "sysctl", "-p", sysctlE2BPath); err != nil {
+			return fmt.Errorf("%w — sysctl could not apply %s; fix the kernel output above, then rerun", err, sysctlE2BPath)
+		}
+		r.Add(Changed, sysctlE2BPath, "applied with sysctl -p")
+	}
+
+	// The kernel command line: replace an existing hugepages= token
+	// inside GRUB_CMDLINE_LINUX_DEFAULT, keep every other token.
+	grub, err := os.ReadFile(env.Resolve(grubPath))
+	if err != nil {
+		return fmt.Errorf("read %s: %w", grubPath, err)
+	}
+	out, changed := setGrubHugepages(string(grub), pages)
+	if err := env.writeFile(r, grubPath, []byte(out), 0o644); err != nil {
+		return err
+	}
+	if changed && !env.DryRun {
+		if err := env.exec(ctx, "update-grub"); err != nil {
+			return fmt.Errorf("%w — update-grub failed; fix the grub output above, then rerun", err)
+		}
+		r.Add(Changed, grubPath, "regenerated the grub config with update-grub")
+	}
+
+	// What did the kernel actually reserve?
+	total, err := hugepagesTotal(env)
+	if err != nil {
+		return err
+	}
+	if total < pages {
+		st.RebootNeeded = true
+		r.Add(Skipped, hugepagesToken+strconv.Itoa(pages), fmt.Sprintf("%d of %d pages reserved; the rest comes at boot", total, pages))
+		return nil
+	}
+	r.Add(Kept, hugepagesToken+strconv.Itoa(pages), fmt.Sprintf("%d pages reserved", total))
+	return nil
+}
+
+// sysctlE2BPath is the sysctl drop-in the step writes.
+const sysctlE2BPath = "/etc/sysctl.d/90-e2b.conf"
+
+// hugepagesCount reads the wanted page count: --hugepages when it is a
+// number, the auto formula over /proc/meminfo otherwise.
+func hugepagesCount(env *Env) (int, error) {
+	if hp := env.Opt.hugepages(); hp != HugepagesAuto {
+		n, err := strconv.Atoi(hp)
+		if err != nil || n <= 0 {
+			return 0, fmt.Errorf("--hugepages %q: want a positive page count or %q", hp, HugepagesAuto)
+		}
+		return n, nil
+	}
+	total, err := memTotal(env)
+	if err != nil {
+		return 0, err
+	}
+	return hugepagesFor(total)
+}
+
+// meminfoValue reads the first "Name:   value kB" line for name from
+// Root/proc/meminfo and returns the value in bytes.
+func meminfoValue(env *Env, name string) (int64, error) {
+	fh, err := os.Open(env.Resolve(meminfoPath))
+	if err != nil {
+		return 0, fmt.Errorf("read %s: %w", meminfoPath, err)
+	}
+	defer fh.Close()
+	sc := bufio.NewScanner(fh)
+	for sc.Scan() {
+		line := sc.Text()
+		if !strings.HasPrefix(line, name+":") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			return 0, fmt.Errorf("%s: %s without a value", meminfoPath, name)
+		}
+		kb, err := strconv.ParseInt(fields[1], 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("%s: %s %q: not a number", meminfoPath, name, fields[1])
+		}
+		return kb << 10, nil
+	}
+	return 0, fmt.Errorf("%s: no %s line", meminfoPath, name)
+}
+
+// hugepagesTotal reads HugePages_Total (pages, not kB) from
+// /proc/meminfo; meminfoValue shifts by 1 KiB, so undo that.
+func hugepagesTotal(env *Env) (int, error) {
+	b, err := meminfoValue(env, "HugePages_Total")
+	if err != nil {
+		return 0, err
+	}
+	return int(b >> 10), nil
+}
+
+// setGrubHugepages rewrites GRUB_CMDLINE_LINUX_DEFAULT in a
+// /etc/default/grub body: the hugepages= token inside it is replaced
+// (or appended, or dropped at 0), every other token and every other
+// line stays. changed reports whether the body differs.
+func setGrubHugepages(body string, pages int) (out string, changed bool) {
+	token := hugepagesToken + strconv.Itoa(pages)
+	lines := strings.Split(body, "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimLeft(line, " \t")
+		if !strings.HasPrefix(trimmed, "GRUB_CMDLINE_LINUX_DEFAULT=") {
+			continue
+		}
+		// The value is one quoted shell word; the tokens are its
+		// space-separated fields.
+		open := strings.Index(line, "\"")
+		close := strings.LastIndex(line, "\"")
+		if open < 0 || close <= open {
+			continue // unquoted or malformed: leave the line alone
+		}
+		prefix, suffix := line[:open+1], line[close:]
+		inner := line[open+1 : close]
+		var toks []string
+		for _, f := range strings.Fields(inner) {
+			if strings.HasPrefix(f, hugepagesToken) {
+				continue
+			}
+			toks = append(toks, f)
+		}
+		if pages > 0 {
+			toks = append(toks, token)
+		}
+		newline := prefix + strings.Join(toks, " ") + suffix
+		if newline != line {
+			lines[i] = newline
+		}
+		// Grub files carry one such line.
+		break
+	}
+	out = strings.Join(lines, "\n")
+	return out, out != body
 }
