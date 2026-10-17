@@ -252,8 +252,14 @@ const registryContainer = "spoond-registry"
 // dockerStep writes Docker's drop-in (RequiresMountsFor the store
 // dir, After=zfs-mount.service with --store-disk), reloads the daemon
 // only when the drop-in changed, enables and starts Docker, and brings
-// up the local registry container unless it already runs.
+// up the local registry container unless it already runs. With
+// --container the whole step is skipped: compose runs the registry,
+// and the host's Docker daemon is not ours to configure.
 func dockerStep(ctx context.Context, env *Env, r *Reporter, st *hostState) error {
+	if env.Opt.Container {
+		r.Add(Skipped, "docker", "--container: docker compose runs the registry")
+		return nil
+	}
 	dir := env.Opt.storeDir()
 	var b strings.Builder
 	b.WriteString("[Unit]\n")
@@ -343,7 +349,14 @@ var errAppArmorDenies = errors.New("Docker's AppArmor profile denies Unix socket
 // apparmorStep probes the Docker-in-AppArmor behaviour only where it
 // exists: with the module unloaded (or off) the row is skipped, with
 // it loaded the check container must be able to bind a Unix socket.
+// With --container the probe would exercise the prepare image's own
+// runtime instead of the host's Docker, so it is skipped with a
+// pointer at the host-side check in the docs.
 func apparmorStep(ctx context.Context, env *Env, r *Reporter, st *hostState) error {
+	if env.Opt.Container {
+		r.Add(Skipped, "apparmor", "--container: run the AppArmor check on the host (docs/install.md)")
+		return nil
+	}
 	b, err := os.ReadFile(env.Resolve(apparmorParam))
 	if err != nil || strings.TrimSpace(string(b)) != "Y" {
 		note := fmt.Sprintf("AppArmor is not enabled on this kernel (%s), the check does not apply", apparmorParam)

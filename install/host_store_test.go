@@ -801,6 +801,56 @@ func TestApparmorDryRunSkipsTheCheck(t *testing.T) {
 	}
 }
 
+// TestDockerContainerSkipsComposeRunsIt: with --container the step is
+// one skipped row and runs no systemctl or docker command.
+func TestDockerContainerSkipsComposeRunsIt(t *testing.T) {
+	env, runner := storeEnv(t)
+	env.Opt.Container = true
+	runner.reply = map[string]fakeReply{} // every command would error
+
+	items, err := runDocker(t, env)
+	if err != nil {
+		t.Fatalf("docker step: %v", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Errorf("calls = %v, want none", runner.calls)
+	}
+	mustNotExist(t, env, dockerDropin)
+	if len(items) != 1 || items[0].Result != Skipped {
+		t.Fatalf("rows = %+v, want one skipped row", items)
+	}
+	if items[0].Name != "docker" || !strings.Contains(items[0].Note, "docker compose runs the registry") {
+		t.Errorf("row = %+v, want the compose note", items[0])
+	}
+}
+
+// TestApparmorContainerSkipsTheProbe: with --container the step is one
+// skipped row pointing at the host-side check, and runs no docker.
+func TestApparmorContainerSkipsTheProbe(t *testing.T) {
+	env, runner := storeEnv(t)
+	env.Opt.Container = true
+	setApparmor(t, env, "Y") // even with AppArmor on, the probe is the host's job
+	runner.reply = apparmorReplies()
+
+	items, err := runApparmor(t, env)
+	if err != nil {
+		t.Fatalf("apparmor step: %v", err)
+	}
+	for _, call := range runner.calls {
+		if strings.Contains(call, "docker run") {
+			t.Errorf("the check container ran although the step is skipped: %s", call)
+		}
+	}
+	if len(items) != 1 || items[0].Result != Skipped {
+		t.Fatalf("rows = %+v, want one skipped row", items)
+	}
+	for _, want := range []string{"--container", "run the AppArmor check on the host", "docs/install.md"} {
+		if !strings.Contains(items[0].Note, want) {
+			t.Errorf("note %q does not mention %q", items[0].Note, want)
+		}
+	}
+}
+
 func TestStoreAndDockerStepsRegisteredInHostOrder(t *testing.T) {
 	for _, name := range []string{"store", "docker", "apparmor"} {
 		if hostSteps[name] == nil {
