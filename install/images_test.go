@@ -251,7 +251,7 @@ func TestImagesPhaseSelection(t *testing.T) {
 		// already has.
 		got := runner.buildNames()
 		want := []string{"py-base", "dev-base", "elixir-base", "elixir-release",
-			"llm-review", "rust-qt-base", "scylla"}
+			"llm-review", "rust-qt-base", "rust-gpui-base", "scylla"}
 		if strings.Join(got, ",") != strings.Join(want, ",") {
 			t.Errorf("built %v, want the manifest's baked images %v", got, want)
 		}
