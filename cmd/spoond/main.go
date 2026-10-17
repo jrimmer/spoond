@@ -31,8 +31,8 @@
 //	go build -tags 'nobackend,nomcp,norunner' -o spoond ./cmd/spoond
 //
 // Supported exclusion tags: nobackend, nogateway, nomcp, norunner,
-// noctl, noimages, nocapabilities, nodoctor, nodrain, noconfig, nodash (dash and top
-// together), nonotify, nohistory.
+// noctl, noimages, nocapabilities, nodoctor, nodrain, noinstall, noconfig,
+// nodash (dash and top together), nonotify, nohistory.
 package main
 
 import (
@@ -75,10 +75,10 @@ func main() {
 
 func usage() {
 	fmt.Fprint(os.Stderr, "spoond — isolated ephemeral compute for people and agents (microVM lease service)\n\nusage:\n  spoond <command> [args...]\n\ncommands:\n")
-	for _, name := range []string{"backend", "gateway", "mcp", "runner", "ctl", "images", "capabilities", "doctor", "drain", "history", "config", "dash", "top", "notify", "version"} {
+	for _, name := range []string{"backend", "gateway", "mcp", "runner", "ctl", "images", "capabilities", "doctor", "drain", "install", "history", "config", "dash", "top", "notify", "version"} {
 		if c, ok := commands[name]; ok {
 			fmt.Fprintf(os.Stderr, "  %-9s %s\n", c.name, c.desc)
 		}
 	}
-	fmt.Fprint(os.Stderr, "\nbuild tags (exclude modules): nobackend, nogateway, nomcp, norunner, noctl, noimages, nocapabilities, nodoctor, nodrain, noconfig, nodash, nonotify, nohistory\n")
+	fmt.Fprint(os.Stderr, "\nbuild tags (exclude modules): nobackend, nogateway, nomcp, norunner, noctl, noimages, nocapabilities, nodoctor, nodrain, noinstall, noconfig, nodash, nonotify, nohistory\n")
 }
