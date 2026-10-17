@@ -205,6 +205,31 @@ func TestHostModulesLowNbdsMaxFails(t *testing.T) {
 	}
 }
 
+// TestHostUdevWritesRule: the rule lands with host-setup.sh's exact
+// content; a rerun over it is a kept.
+func TestHostUdevWritesRule(t *testing.T) {
+	env, _, _ := testEnv(t)
+	r := &Reporter{Phase: PhaseHost}
+	if err := hostUdev(context.Background(), env, r, &hostState{}); err != nil {
+		t.Fatal(err)
+	}
+	want := "KERNEL==\"nbd*\", GROUP=\"disk\", MODE=\"0660\"\n"
+	if b, mode := read(t, env, "/etc/udev/rules.d/97-nbd-device.rules"); string(b) != want || mode != 0o644 {
+		t.Errorf("rule = %q, mode %#o; want %q at 0644", b, mode, want)
+	}
+	if len(r.Items()) != 1 || r.Items()[0].Result != Created {
+		t.Errorf("rows = %+v, want one created row", r.Items())
+	}
+
+	r = &Reporter{Phase: PhaseHost}
+	if err := hostUdev(context.Background(), env, r, &hostState{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Items()) != 1 || r.Items()[0].Result != Kept {
+		t.Errorf("rerun rows = %+v, want one kept row", r.Items())
+	}
+}
+
 // TestHostModulesSecondRunKeeps: the configs match, so the rerun
 // reports kept rows and still runs the modprobes (the runner answers
 // them either way), and the nbds_max row is kept again.

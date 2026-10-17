@@ -18,6 +18,7 @@ import (
 func init() {
 	hostSteps["packages"] = hostPackages
 	hostSteps["modules"] = hostModules
+	hostSteps["udev"] = hostUdev
 }
 
 // basePackages are the host packages every install needs: the firewall
@@ -150,4 +151,19 @@ func hostModules(ctx context.Context, env *Env, r *Reporter, st *hostState) erro
 	}
 	r.Add(Kept, nbdParamPath, fmt.Sprintf("nbds_max=%d", got))
 	return nil
+}
+
+func init() { hostSteps["udev"] = hostUdev }
+
+// nbdUdevRule gives every nbd device to group disk, mode 0660, so the
+// leases' users can open them; host-setup.sh ships the same rule.
+const nbdUdevRule = `KERNEL=="nbd*", GROUP="disk", MODE="0660"
+`
+
+// hostUdev writes the nbd device rule. The reload is skipped: the rule
+// applies when the devices next appear (after the reboot the hugepages
+// step may ask for, or at the next module load), and systemd-udevd
+// re-reads the rules directory on every udevadm trigger.
+func hostUdev(ctx context.Context, env *Env, r *Reporter, st *hostState) error {
+	return env.writeFile(r, "/etc/udev/rules.d/97-nbd-device.rules", []byte(nbdUdevRule), 0o644)
 }
