@@ -97,8 +97,8 @@ type capabilityAPI struct {
 	// named absolute in endpoints below so a caller can join either
 	// way; both spellings are stable (#52).
 	Base string `json:"base"`
-	// Primary is the documented lease path prefix; Auth the auth
-	// model, from docs/api.md's "Who can do what".
+	// Primary is the documented lease path prefix (apiLeasePathPrefix);
+	// Auth the auth model, from docs/api.md's "Who can do what".
 	Primary string `json:"primary"`
 	// Auth is the auth model, from docs/api.md's "Who can do what".
 	Auth string `json:"auth"`
@@ -157,9 +157,8 @@ type capabilityJSON struct {
 // mux.HandleFunc registrations and fails on drift: a route registered
 // without a row here, or a row the mux no longer registers (wrong path,
 // method or count), is a test failure — the anti-drift guarantee. The
-// /api/leases twin routes are not rows: they are the same registrations
-// reached through the rewrite in server.go's Handler (one route table,
-// one auth path); the document's api block names the alias instead.
+// one lease path prefix is apiLeasePathPrefix; the removed /api/sandboxes
+// alias is not a route and is not a row.
 var endpointTable = []endpointSpec{
 	ep("POST", "/api/leases", "create a lease"),
 	ep("GET", "/api/leases", "list leases"),
