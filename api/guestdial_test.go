@@ -95,7 +95,6 @@ func TestGuestDialEcho(t *testing.T) {
 	id := create["id"].(string)
 	pointHostIP(t, svc, id, host, port)
 
-	// The /api/leases alias must work like the /api/leases spelling.
 	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/api/leases/" + id + "/ports/" + strconv.Itoa(port) + "/dial"
 	ws, _, err := websocket.DefaultDialer.Dial(wsURL, http.Header{"Authorization": {"Bearer token-a"}})
 	if err != nil {
@@ -339,7 +338,7 @@ func TestGuestDialDialFailureIsBadGateway(t *testing.T) {
 	}
 }
 
-func TestGuestDialMetricsAndAlias(t *testing.T) {
+func TestGuestDialMetrics(t *testing.T) {
 	ts, svc, _, _ := newTestServerWithService(t)
 	host, port := newEchoServer(t)
 

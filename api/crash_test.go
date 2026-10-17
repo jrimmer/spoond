@@ -130,8 +130,7 @@ func TestCrashTestRecoversFromCheckpoint(t *testing.T) {
 }
 
 // TestCrashTestLostWithoutCheckpoint: the owner crashes a lease with no
-// checkpoint; it is marked lost and its stale sandbox row goes. Driven
-// through the /api/leases alias.
+// checkpoint; it is marked lost and its stale sandbox row goes.
 func TestCrashTestLostWithoutCheckpoint(t *testing.T) {
 	ts, svc, db, _ := newCrashServer(t, true)
 	ctx := context.Background()
