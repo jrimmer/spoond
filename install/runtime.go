@@ -212,20 +212,18 @@ type runtimeState struct {
 // parallel).
 var runtimeImpl = runtimeState{}
 
-func init() {
-	// The closure reads runtimeImpl per run, so a test's stubbed value
-	// (runtimeImpl is replaced, not mutated) is the one that runs.
-	Phases[PhaseRuntime] = func(ctx context.Context, env *Env) ([]Item, error) {
-		return runtimeImpl.run(ctx, env)
-	}
-}
-
 // run is the phase body, in the plan's order: the runtime binaries,
 // the pinned artifacts, /fc-vm, the e2b config, the token seed, the
 // firewall, the orchestrator unit, systemd (daemon-reload, enable,
 // restart) and the health wait. Every added row, the systemd step's
 // included, is in the returned items (r.Items() is read after the
 // last step ran, so no row is lost).
+func runtimePhase(ctx context.Context, env *Env) ([]Item, error) {
+	return runtimeImpl.run(ctx, env)
+}
+
+func init() { Phases[PhaseRuntime] = runtimePhase }
+
 func (p *runtimeState) run(ctx context.Context, env *Env) ([]Item, error) {
 	r := &Reporter{Phase: PhaseRuntime, Out: env.Out}
 
