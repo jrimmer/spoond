@@ -152,10 +152,9 @@ func backendEnvWrite(env *Env, r *Reporter, dd hostDefaults, pair tlsPair) (*tok
 			// the key, never its value.
 			return nil, nil, fmt.Errorf("%s: CONSUMER_TOKENS does not parse as token=consumer pairs (token=consumer,key=consumer,...); repair it and rerun", backendEnvPath)
 		}
-		// The metrics token never appears in a pre-existing backend.env
-		// parsed as five keys, but this phase's own writes carry it
-		// (docs/install.md section 4's minimum contents): take it when
-		// present, mint one only when dash.env lacks both.
+		// METRICS_TOKEN is taken from backend.env when it has one, so
+		// dash.env scrapes with the backend's own token; writeDashFiles
+		// mints one only for a backend.env without it.
 		tk := &tokens{
 			consumer:  consumer,
 			bootstrap: vals["BOOTSTRAP_TOKEN"],

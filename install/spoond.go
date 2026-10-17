@@ -26,9 +26,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
-	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -179,7 +176,7 @@ func spoondPhase(ctx context.Context, env *Env) ([]Item, error) {
 			return r.Items(), fmt.Errorf("systemctl daemon-reload: %w", err)
 		}
 	}
-	horizonUS, uerr := spoondUnitsEnable(ctx, env, r)
+	wasActive, uerr := spoondUnitsEnable(ctx, env, r)
 	if uerr != nil {
 		return r.Items(), uerr
 	}
@@ -190,8 +187,11 @@ func spoondPhase(ctx context.Context, env *Env) ([]Item, error) {
 	// would start a fresh install's backend twice. A kept backend.env
 	// changed nothing.
 	if !env.DryRun && !env.Opt.Container && (binChanged || envChanged[backendEnvPath]) {
-		if err := restartBackendIfActive(ctx, env, horizonUS); err != nil {
-			return r.Items(), err
+		if wasActive {
+			if err := env.exec(ctx, "systemctl", "restart", "spoond-backend"); err != nil {
+				return r.Items(), fmt.Errorf("systemctl restart spoond-backend: %w", err)
+			}
+			r.Add(Changed, "spoond-backend", "restarted for the new binary or backend.env")
 		}
 	}
 
@@ -215,41 +215,6 @@ func spoondPhase(ctx context.Context, env *Env) ([]Item, error) {
 	}
 
 	return r.Items(), nil
-}
-
-// restartBackendIfActive restarts spoond-backend when it is running
-// and its start predates the enable horizon (µs since boot, taken just
-// before enable --now): the backend must pick up a changed binary or
-// env file, but a unit enable --now started seconds ago is this run's
-// own start and restarting it would double-start a fresh install. An
-// inactive unit is left alone, and so is one whose start the horizon
-// cannot answer for (the restart stays available to the next run).
-func restartBackendIfActive(ctx context.Context, env *Env, horizonUS int64) error {
-	out, err := env.query(ctx, "systemctl", "is-active", "--quiet", "spoond-backend")
-	if err != nil {
-		// is-active exits non-zero for inactive/unknown: not an
-		// install failure, only nothing to restart.
-		_ = out
-		return nil
-	}
-	// slackUS absorbs the milliseconds between the horizon read and
-	// systemd stamping the enable --now start on the same
-	// CLOCK_MONOTONIC.
-	const slackUS = 2_000_000
-	started, err := env.query(ctx, "systemctl", "show", "-p", "ActiveEnterTimestampMonotonic", "--value", "spoond-backend")
-	if err != nil {
-		return nil // cannot ask when it started: leave it alone
-	}
-	us, perr := strconv.ParseInt(strings.TrimSpace(string(started)), 10, 64)
-	if perr != nil || us >= horizonUS-slackUS {
-		// Started at or after the horizon (this run's enable --now,
-		// or an unreadable stamp): no restart.
-		return nil
-	}
-	if err := env.exec(ctx, "systemctl", "restart", "spoond-backend"); err != nil {
-		return fmt.Errorf("systemctl restart spoond-backend: %w", err)
-	}
-	return nil
 }
 
 // spoondUnitsWrite installs the shipped units through writeFile (plain
@@ -280,57 +245,26 @@ func spoondUnitsWrite(env *Env, r *Reporter) (bool, error) {
 }
 
 // spoondUnitsEnable enables and starts the four spoond services (item
-// 10) and answers the restart horizon, µs since boot, read just before
-// the enable: restartBackendIfActive compares a unit's
-// ActiveEnterTimestampMonotonic against it. Rows: kept when systemd
-// reported the unit names (a rerun), or a created row for the one
-// enable --now call; failures carry systemd's stderr through the
-// runner's error.
-func spoondUnitsEnable(ctx context.Context, env *Env, r *Reporter) (int64, error) {
+// 10) and answers whether spoond-backend was already running before
+// it: only a backend that was running needs a restart for a new binary
+// or backend.env, since enable --now just started any other.
+func spoondUnitsEnable(ctx context.Context, env *Env, r *Reporter) (bool, error) {
 	switch {
 	case env.Opt.Container:
 		r.Add(Skipped, "systemctl enable --now", "--container: docker compose runs the services")
-		return 0, nil
+		return false, nil
 	case env.DryRun:
 		r.Add(Kept, "systemctl enable --now", "dry-run: not starting "+strings.Join(spoondServices, " "))
-		return 0, nil
+		return false, nil
 	}
-	// The horizon is the boot clock just before the enable: a unit
-	// stamped at or after it was started by this call. An unreadable
-	// clock (math.MaxInt64) only disables the guard, never the start.
-	horizonUS := int64(math.MaxInt64)
-	if us, err := uptimeMono(); err == nil {
-		horizonUS = us
-	}
+	// is-active exits non-zero for an inactive or unknown unit.
+	_, err := env.query(ctx, "systemctl", "is-active", "--quiet", "spoond-backend")
+	wasActive := err == nil
 	if err := env.exec(ctx, "systemctl", append([]string{"enable", "--now"}, spoondServices...)...); err != nil {
-		return 0, fmt.Errorf("systemctl enable --now %s: %w", strings.Join(spoondServices, " "), err)
+		return false, fmt.Errorf("systemctl enable --now %s: %w", strings.Join(spoondServices, " "), err)
 	}
 	r.Add(Kept, "systemctl enable --now", "started: "+strings.Join(spoondServices, " "))
-	return horizonUS, nil
-}
-
-// uptimeMono answers µs since boot, the same boot-relative
-// CLOCK_MONOTONIC systemd's ActiveEnterTimestampMonotonic counts, so a
-// unit's start compares against the pre-enable horizon without wall
-// clock or zone math. A package var so a test drives both sides.
-var uptimeMono = procUptimeUS
-
-// procUptimeUS reads /proc/uptime's first field (seconds since boot, a
-// host file, not a command) as microseconds.
-func procUptimeUS() (int64, error) {
-	b, err := os.ReadFile("/proc/uptime")
-	if err != nil {
-		return 0, err
-	}
-	fields := strings.Fields(string(b))
-	if len(fields) == 0 {
-		return 0, errors.New("/proc/uptime is empty")
-	}
-	sec, err := strconv.ParseFloat(fields[0], 64)
-	if err != nil {
-		return 0, fmt.Errorf("parse /proc/uptime: %w", err)
-	}
-	return int64(sec * 1e6), nil
+	return wasActive, nil
 }
 
 // errNoIPv4 is the host-IP default's failure with the fix (the task's

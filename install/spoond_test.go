@@ -154,11 +154,9 @@ func spoondTestEnv(t *testing.T) (*Env, *bytes.Buffer, *spoondRunner, *spoondFet
 	run := &spoondRunner{
 		hostname: "sb.example.com",
 		ip:       "10.0.0.11",
-		// A host the phase is installing is running the backend
-		// (the default answer; active-unit tests override it).
-		extra: map[string]reply{
-			"systemctl is-active --quiet spoond-backend": {out: []byte("active\n")},
-		},
+		// A fresh host is not running the backend yet (is-active
+		// fails); the restart tests set it running.
+		extra: map[string]reply{},
 	}
 	fetch := &spoondFetch{getCodes: []int{http.StatusOK}, postCode: http.StatusCreated}
 	env := &Env{
@@ -461,20 +459,13 @@ func TestSpoondFirstRun(t *testing.T) {
 	if !strings.Contains(joined, "systemctl enable --now spoond-backend spoond-sshd-gateway spoond-dash spoond-drain") {
 		t.Errorf("no enable --now of the four units in %v", run.calls)
 	}
-	// One restart: this run was the first (a fresh root), but a
-	// first run counts as a run when its env file and binary both
-	// changed; the guard asked is-active and the unit's start stamp.
-	// No restart happened: enable --now started the unit seconds ago
-	// (at the horizon guard), and restarting this run's own start
-	// would start a fresh install's backend twice.
+	// No restart: the backend was not running before this run, so
+	// enable --now started it with the new binary and env already.
 	if got := countSubstring(joined, "systemctl restart spoond-backend"); got != 0 {
 		t.Errorf("restart spoond-backend = %d, want 0 (enable --now started it this run)", got)
 	}
 	if got := countSubstring(joined, "systemctl is-active"); got != 1 {
-		t.Errorf("is-active asked %d times, want 1 (the restart's guard)", got)
-	}
-	if got := countSubstring(joined, "systemctl show -p ActiveEnterTimestampMonotonic"); got != 1 {
-		t.Errorf("the unit's start stamp read %d times, want 1", got)
+		t.Errorf("is-active asked %d times, want 1 (before the enable)", got)
 	}
 
 	// One health GET (200 at once) and one user POST (201).
@@ -1269,32 +1260,18 @@ func TestSpoondUnhealthyBackendStops(t *testing.T) {
 	}
 }
 
-// setUptimeMono pins the boot clock the horizon reads and restores it.
-func setUptimeMono(t *testing.T, f func() (int64, error)) {
-	t.Helper()
-	old := uptimeMono
-	uptimeMono = f
-	t.Cleanup(func() { uptimeMono = old })
-}
-
 // TestSpoondRestartAfterChange: a changed binary is followed by a
-// restart when the unit was active before this run started it, and
-// skipped when it is inactive, when it was started by this run's
-// enable --now, or when its start stamp cannot be read.
+// restart only when spoond-backend was running before this run's
+// enable --now; a backend that enable --now started is not restarted.
 func TestSpoondRestartAfterChange(t *testing.T) {
-	t.Run("active unit started before this install", func(t *testing.T) {
+	t.Run("running before the run", func(t *testing.T) {
 		env, _, run, _ := spoondTestEnv(t)
-		// The boot clock read just before the enable, and the unit's
-		// start stamp: started at 500 s, the install ran at 1000 s.
-		setUptimeMono(t, func() (int64, error) { return 1_000_000_000, nil })
-		run.extra = map[string]reply{
-			"systemctl is-active --quiet spoond-backend":                             {out: []byte("active\n")},
-			"systemctl show -p ActiveEnterTimestampMonotonic --value spoond-backend": {out: []byte("500000000\n")},
-		}
 		if _, _, err := runSpoond(t, env); err != nil {
 			t.Fatalf("first run: %v", err)
 		}
-		// Second run with a different binary: restart expected.
+		run.extra = map[string]reply{
+			"systemctl is-active --quiet spoond-backend": {out: []byte("active\n")},
+		}
 		dir := filepath.Join(env.Root, "fake-bin-home")
 		if err := os.WriteFile(filepath.Join(dir, "spoond"), []byte("new binary bytes\n"), 0o755); err != nil {
 			t.Fatal(err)
@@ -1303,47 +1280,29 @@ func TestSpoondRestartAfterChange(t *testing.T) {
 		if _, _, err := runSpoond(t, env); err != nil {
 			t.Fatalf("second run: %v", err)
 		}
-		joined := strings.Join(run.calls, "\n")
-		if !strings.Contains(joined, "systemctl restart spoond-backend") {
-			t.Errorf("no restart after a binary change: %v", run.calls)
+		if got := countSubstring(strings.Join(run.calls, "\n"), "systemctl restart spoond-backend"); got != 1 {
+			t.Errorf("restart spoond-backend = %d after a binary change, want 1: %v", got, run.calls)
 		}
 	})
-	t.Run("unit this run started", func(t *testing.T) {
+	t.Run("running before the run, nothing changed", func(t *testing.T) {
 		env, _, run, _ := spoondTestEnv(t)
-		// The unit's start stamp sits just after the horizon: enable
-		// --now started it seconds ago, so this run's own start is
-		// not restarted a second time.
-		setUptimeMono(t, func() (int64, error) { return 1_000_000_000, nil })
-		run.extra = map[string]reply{
-			"systemctl is-active --quiet spoond-backend":                             {out: []byte("active\n")},
-			"systemctl show -p ActiveEnterTimestampMonotonic --value spoond-backend": {out: []byte("1000000001\n")},
-		}
 		if _, _, err := runSpoond(t, env); err != nil {
-			t.Fatalf("run: %v", err)
+			t.Fatalf("first run: %v", err)
+		}
+		run.extra = map[string]reply{
+			"systemctl is-active --quiet spoond-backend": {out: []byte("active\n")},
+		}
+		run.calls = nil
+		if _, _, err := runSpoond(t, env); err != nil {
+			t.Fatalf("second run: %v", err)
 		}
 		for _, call := range run.calls {
 			if strings.Contains(call, "systemctl restart") {
-				t.Errorf("restarted a unit this run started: %s", call)
+				t.Errorf("restarted with nothing changed: %s", call)
 			}
 		}
 	})
-	t.Run("unreadable start stamp", func(t *testing.T) {
-		env, _, run, _ := spoondTestEnv(t)
-		setUptimeMono(t, func() (int64, error) { return 1_000_000_000, nil })
-		run.extra = map[string]reply{
-			"systemctl is-active --quiet spoond-backend":                             {out: []byte("active\n")},
-			"systemctl show -p ActiveEnterTimestampMonotonic --value spoond-backend": {err: fmt.Errorf("no such property")},
-		}
-		if _, _, err := runSpoond(t, env); err != nil {
-			t.Fatalf("run: %v", err)
-		}
-		for _, call := range run.calls {
-			if strings.Contains(call, "systemctl restart") {
-				t.Errorf("restarted a unit whose start could not be dated: %s", call)
-			}
-		}
-	})
-	t.Run("inactive unit", func(t *testing.T) {
+	t.Run("not running before the run", func(t *testing.T) {
 		env, _, run, _ := spoondTestEnv(t)
 		if _, _, err := runSpoond(t, env); err != nil {
 			t.Fatalf("first run: %v", err)
@@ -1359,7 +1318,7 @@ func TestSpoondRestartAfterChange(t *testing.T) {
 		}
 		for _, call := range run.calls {
 			if strings.Contains(call, "systemctl restart") {
-				t.Errorf("restarted an inactive unit: %s", call)
+				t.Errorf("restarted a backend that enable --now started: %s", call)
 			}
 		}
 	})
