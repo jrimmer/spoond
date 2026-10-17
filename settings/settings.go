@@ -455,7 +455,7 @@ var Specs = []Spec{
 	{"LLM_DEFAULT_MODEL", TypeString, Backend, false},
 	{"LLM_GATEWAY_URL", TypeURL, Gateway, false},
 	{"LLM_MAX_CONCURRENT_PER_USER", TypeInt, Backend, false},
-	{"LLM_MODEL_MAP", TypeList, Backend, false},   // pattern=model pairs
+	{"LLM_MODEL_MAP", TypeList, Backend, false}, // pattern=model pairs
 	{"LLM_UPSTREAM_KEY", TypeString, Backend, true},
 	{"LLM_UPSTREAM_URL", TypeURL, Backend, false},
 	{"MAX_ADMIT_WAIT_SECS", TypeInt, Backend, false},
