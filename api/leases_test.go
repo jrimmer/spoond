@@ -1,7 +1,7 @@
 package api
 
 // The /api/leases path family (4.0): one spelling, one registration
-// per route, no rewrite and no alias.
+// per route.
 
 import (
 	"net/http"
