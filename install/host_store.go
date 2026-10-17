@@ -48,10 +48,18 @@ var storeSubdirs = []struct {
 // storeStep lays out the snapshot store: with --store-disk the
 // forkdcache ZFS pool and its dataset, without it a check of the
 // existing store directory and its filesystem. Either way the
-// directory layout under the store dir.
+// directory layout under the store dir. With --container --store-disk
+// fails: the pool must exist before the compose stack comes up, so it
+// is created on the host (or by one native run) and handed over as
+// --store-dir.
 func storeStep(ctx context.Context, env *Env, r *Reporter, st *hostState) error {
 	dir := env.Opt.storeDir()
 	if disk := env.Opt.StoreDisk; disk != "" {
+		if env.Opt.Container {
+			note := "--store-disk is not available with --container: create the store on the host (or run `spoond install host` natively once) and pass --store-dir"
+			r.Add(Failed, "--store-disk", note)
+			return errors.New(note)
+		}
 		if err := storeOnDisk(ctx, env, r, dir, disk); err != nil {
 			return err
 		}
