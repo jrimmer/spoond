@@ -24,3 +24,24 @@ func TestVersionString(t *testing.T) {
 		}
 	}
 }
+
+// TestReleaseVersion: only a clean release tag names a runtime download.
+func TestReleaseVersion(t *testing.T) {
+	bi := func(v string) *debug.BuildInfo { return &debug.BuildInfo{Main: debug.Module{Version: v}} }
+	for _, c := range []struct {
+		v    string
+		bi   *debug.BuildInfo
+		want string
+	}{
+		{"v4.0.0", nil, "v4.0.0"},
+		{"", bi("v4.0.1"), "v4.0.1"},
+		{"", bi("(devel)"), ""},
+		{"", bi("v4.0.1-0.20261017120000-0123456789ab"), ""},
+		{"", bi("v4.0.0+dirty"), ""},
+		{"", nil, ""},
+	} {
+		if got := releaseVersion(c.v, c.bi); got != c.want {
+			t.Errorf("releaseVersion(%q, %v) = %q, want %q", c.v, c.bi, got, c.want)
+		}
+	}
+}

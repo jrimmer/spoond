@@ -676,11 +676,22 @@ func (p *runtimeState) orchestration(r *Reporter, ctx context.Context, env *Env)
 		if err := env.exec(ctx, "systemctl", "daemon-reload"); err != nil {
 			return fmt.Errorf("systemctl daemon-reload: %w", err)
 		}
-		// The units' contents just changed, or a first install puts
-		// them in place.
+	}
+	// A first install puts the units in place; a stopped orchestrator
+	// with unchanged units must be started too, or the health wait
+	// below fails. enable --now leaves a running unit alone.
+	if anyUnitChanged || !active {
 		if err := env.exec(ctx, "systemctl", "enable", "--now", guardUnit, orchestratorUnit); err != nil {
 			return fmt.Errorf("systemctl enable --now %s %s: %w", guardUnit, orchestratorUnit, err)
 		}
+	}
+	// The guard is a oneshot that loads the table at start: new rules
+	// take effect only when it runs again.
+	if changed[guardNftPath] || changed[guardUnitPath] {
+		if err := env.exec(ctx, "systemctl", "restart", guardUnit); err != nil {
+			return fmt.Errorf("systemctl restart %s: %w", guardUnit, err)
+		}
+		r.Add(Changed, "restart "+guardUnit, "its table or unit changed")
 	}
 	if orchChanged {
 		if active {

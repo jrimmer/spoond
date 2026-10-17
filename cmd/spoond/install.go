@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"runtime/debug"
+	"strings"
 	"syscall"
 
 	"github.com/jrimmer/spoond/v3/install"
@@ -118,7 +120,7 @@ func installMain(args []string) int {
 		Out:     os.Stdout,
 		DryRun:  *dryRun,
 		Opt:     opt,
-		Version: version,
+		Version: releaseVersion(version, readBuildInfo()),
 	}
 	items, err := install.RunAll(ctx, env, names...)
 	if err != nil {
@@ -162,4 +164,19 @@ func summarize(items []install.Item, dryRun bool) {
 	}
 	fmt.Printf("spoond install %s: %d created, %d changed, %d kept, %d skipped, %d failed\n",
 		verb, created, changed, kept, skipped, failed)
+}
+
+// releaseVersion is the release tag the runtime phase downloads for:
+// the -ldflags version, else the module version of a `go install
+// ...@vX.Y.Z` build. A pseudo-version, a dirty or pre-release build
+// and a plain checkout have no release, so they give "" (the phase then
+// asks for --runtime).
+func releaseVersion(v string, bi *debug.BuildInfo) string {
+	if v == "" && bi != nil {
+		v = bi.Main.Version
+	}
+	if !strings.HasPrefix(v, "v") || strings.ContainsAny(v, "-+") || strings.Count(v, ".") != 2 {
+		return ""
+	}
+	return v
 }

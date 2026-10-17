@@ -215,6 +215,7 @@ func activeRunner() *recordRunner {
 		"systemctl daemon-reload":                           {},
 		"systemctl enable --now e2b-guard e2b-orchestrator": {},
 		"systemctl restart e2b-orchestrator":                {},
+		"systemctl restart e2b-guard":                       {},
 	}}
 }
 
@@ -225,6 +226,7 @@ func idleRunner() *recordRunner {
 		"systemctl is-active e2b-orchestrator":              {out: []byte("inactive\n")},
 		"systemctl daemon-reload":                           {},
 		"systemctl enable --now e2b-guard e2b-orchestrator": {},
+		"systemctl restart e2b-guard":                       {},
 	}}
 }
 
@@ -1259,6 +1261,34 @@ func TestGuardUnitChangedAloneDoesNotRestartOrchestrator(t *testing.T) {
 	}
 	if got := runnerCommands(runner, "daemon-reload"); len(got) != 1 {
 		t.Errorf("daemon-reload %v, want one (a unit changed)", got)
+	}
+	if got := runnerCommands(runner, "systemctl restart e2b-guard"); len(got) != 1 {
+		t.Errorf("guard restarts %v, want one (it reloads the table)", got)
+	}
+}
+
+// TestStoppedOrchestratorIsStarted: with every file in place and the
+// orchestrator stopped, the run starts it rather than waiting on a
+// health check nothing will answer.
+func TestStoppedOrchestratorIsStarted(t *testing.T) {
+	env, _, _, _, health := runtimeEnv(t)
+	satisfyPins(t, env)
+	env.Run = activeRunner()
+	health.answers = nil
+	withTarball(t, env)
+	if _, _, err := runRuntime(t, env); err != nil {
+		t.Fatalf("setup run: %v", err)
+	}
+	runner := idleRunner()
+	env.Run = runner
+	if _, _, err := runRuntime(t, env); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if got := runnerCommands(runner, "enable --now"); len(got) != 1 {
+		t.Errorf("enable --now %v, want one (the orchestrator was stopped)", got)
+	}
+	if got := runnerCommands(runner, "daemon-reload"); len(got) != 0 {
+		t.Errorf("daemon-reload %v, want none (no unit changed)", got)
 	}
 }
 
