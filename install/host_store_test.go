@@ -858,3 +858,22 @@ func TestDockerDryRunSecondRunKeptPlan(t *testing.T) {
 		}
 	}
 }
+
+// A registry container that exists but is stopped is started, not
+// re-created (docker run would fail on the name).
+func TestDockerRegistryStoppedIsStarted(t *testing.T) {
+	env, runner := storeEnv(t)
+	runner.reply = dockerReplies(false)
+	runner.reply["docker inspect -f {{.State.Running}} spoond-registry"] = fakeReply{out: []byte("false\n")}
+	runner.reply["docker start spoond-registry"] = fakeReply{}
+	if _, err := runDocker(t, env); err != nil {
+		t.Fatalf("docker step: %v", err)
+	}
+	joined := strings.Join(runner.calls, "\n")
+	if !strings.Contains(joined, "docker start spoond-registry") {
+		t.Errorf("no docker start in %v", runner.calls)
+	}
+	if strings.Contains(joined, "docker run -d --name spoond-registry") {
+		t.Errorf("re-created a stopped registry: %v", runner.calls)
+	}
+}

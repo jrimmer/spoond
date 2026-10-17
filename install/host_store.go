@@ -290,6 +290,17 @@ func dockerStep(ctx context.Context, env *Env, r *Reporter, st *hostState) error
 		r.Add(Kept, "registry "+registryContainer, "container is running")
 		return nil
 	}
+	if err == nil && strings.TrimSpace(string(out)) == "false" {
+		// The container exists but is stopped: start it; a docker run
+		// would fail on the name.
+		if err := env.exec(ctx, "docker", "start", registryContainer); err != nil {
+			note := fmt.Sprintf("docker start %s failed — check `docker logs %s`: %v", registryContainer, registryContainer, err)
+			r.Add(Failed, "registry "+registryContainer, note)
+			return errors.New(note)
+		}
+		r.Add(Changed, "registry "+registryContainer, dryRunNote(env, "started the stopped container"))
+		return nil
+	}
 	runArgs := []string{"run", "-d", "--name", registryContainer, "--restart=always",
 		"-p", "127.0.0.1:5000:5000",
 		"-v", dir + "/registry:/var/lib/registry",
