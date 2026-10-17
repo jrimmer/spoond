@@ -97,8 +97,8 @@ type capabilityAPI struct {
 	// named absolute in endpoints below so a caller can join either
 	// way; both spellings are stable (#52).
 	Base string `json:"base"`
-	// Primary is the documented lease path prefix (apiLeasePathPrefix);
-	// Auth the auth model, from docs/api.md's "Who can do what".
+	// Primary is the documented lease path prefix; Auth the auth
+	// model, from docs/api.md's "Who can do what".
 	Primary string `json:"primary"`
 	// Auth is the auth model, from docs/api.md's "Who can do what".
 	Auth string `json:"auth"`
