@@ -68,7 +68,27 @@ const dashPasswordLen = 10
 // regenerating a password the dashboard then rejects is the failure to
 // avoid). The bcrypt hash is made with the same call and cost `spoond
 // dash hash` uses, so the printed hash and this one verify the same way.
+//
+// The metrics token appears only in dash.env: a kept dash.env keeps its
+// own scrape token and a fresh one gets it generated here. The token
+// set's zero metrics never reaches a written file.
 func writeDashFiles(env *Env, r *Reporter, tk *tokens, pair tlsPair) error {
+	// A fresh dash.env needs a metrics token (it never appears in
+	// backend.env's parse): the token set has one when backend.env
+	// was written this run, and one is minted only when backend.env
+	// pre-existed and dash.env is missing — never on a rerun, where
+	// dash.env is kept and the value would be discarded.
+	if _, err := os.Stat(env.Resolve(dashEnvPath)); errors.Is(err, os.ErrNotExist) {
+		if tk.metrics == "" {
+			metrics, err := randHex(metricsTokenLen)
+			if err != nil {
+				return err
+			}
+			tk.metrics = metrics
+		}
+	} else if err != nil {
+		return fmt.Errorf("stat %s: %w", dashEnvPath, err)
+	}
 	full := env.Resolve(dashPasswordPath)
 	pw, err := os.ReadFile(full)
 	switch {

@@ -577,6 +577,7 @@ func TestSpoondExistingBackendEnv(t *testing.T) {
 		gateway   = "cccc"
 		admin     = "dddd"
 		events    = "eeee"
+		metrics   = "ffff"
 	)
 	writeTestBackendEnv(t, env, map[string]string{
 		"CONSUMER_TOKENS": consumer,
@@ -602,11 +603,21 @@ func TestSpoondExistingBackendEnv(t *testing.T) {
 	if got, want := envVal(t, env, dashEnvPath, "DASH_EVENTS_TOKEN"), events; got != want {
 		t.Errorf("DASH_EVENTS_TOKEN = %q, want backend.env's %q", got, want)
 	}
-	// The bootstrap header rides the POST with backend.env's token.
+	// The fresh dash.env's metrics token is 64 hex chars.
+	if got := envVal(t, env, dashEnvPath, "METRICS_TOKEN"); len(got) != 64 || !isHex(got) {
+		t.Errorf("dash METRICS_TOKEN = %d chars, want 64 lowercase hex", len(got))
+	}
+	// The POST's Authorization carries the bare first consumer token
+	// (the docs' ${CONSUMER_TOKENS%%=*}), not the whole
+	// token=consumer value; the bootstrap header the file's token.
 	if len(fetch.bodies) != 1 {
 		t.Fatalf("POSTs = %d, want 1", len(fetch.bodies))
 	}
-	if got := fetch.requests[len(fetch.requests)-1].Header.Get("X-Bootstrap-Token"); got != bootstrap {
+	req := fetch.requests[len(fetch.requests)-1]
+	if got, want := req.Header.Get("Authorization"), "Bearer aaaa"; got != want {
+		t.Errorf("Authorization = %q, want the bare consumer token %q", got, want)
+	}
+	if got := req.Header.Get("X-Bootstrap-Token"); got != bootstrap {
 		t.Errorf("X-Bootstrap-Token = %q, want backend.env's %q", got, bootstrap)
 	}
 	_ = items
@@ -1225,7 +1236,8 @@ func TestSpoondRestartAfterChange(t *testing.T) {
 }
 
 // TestSpoondSecondRunNoRegeneratedSecrets pins the exact file set a
-// second run leaves byte-identical plus the rows' results.
+// second run leaves byte-identical plus the rows' results, and that no
+// token is minted for a rerun: dash.env, kept, keeps its metrics token.
 func TestSpoondSecondRunNoRegeneratedSecrets(t *testing.T) {
 	env, _, _, _ := spoondTestEnv(t)
 	if _, _, err := runSpoond(t, env); err != nil {
@@ -1243,6 +1255,45 @@ func TestSpoondSecondRunNoRegeneratedSecrets(t *testing.T) {
 		if !bytes.Equal(got, want) {
 			t.Errorf("%s changed on the second run", p)
 		}
+	}
+	// Kept dash.env keeps its own metrics token (nothing minted for
+	// a rerun gets discarded on the keep path).
+	if got := envVal(t, env, dashEnvPath, "METRICS_TOKEN"); got == "" || !isHex(got) {
+		t.Errorf("dash METRICS_TOKEN = %q, want 64 hex", got)
+	}
+}
+
+// TestSpoondDashEnvMissingOnRerun: the metric token never appears in
+// backend.env, so a host whose dash.env (or dash-password) was deleted
+// between runs gets a fresh one in the rewritten dash.env while every
+// other file keeps.
+func TestSpoondDashEnvMissingOnRerun(t *testing.T) {
+	env, _, _, _ := spoondTestEnv(t)
+	if _, _, err := runSpoond(t, env); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	firstDash, _ := read(t, env, dashEnvPath)
+	if err := os.Remove(env.Resolve(dashEnvPath)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := runSpoond(t, env); err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	secondDash, _ := read(t, env, dashEnvPath)
+	if bytes.Equal(secondDash, firstDash) {
+		t.Fatalf("dash.env was not rewritten after deletion")
+	}
+	// The other files are untouched, and the fresh dash.env still
+	// agrees with backend.env on the tokens backend.env carries.
+	if got, want := envVal(t, env, dashEnvPath, "METRICS_TOKEN"), envVal(t, env, backendEnvPath, "METRICS_TOKEN"); got != want {
+		t.Errorf("dash METRICS_TOKEN = %q, want backend.env's", got)
+	}
+	if got, want := envVal(t, env, dashEnvPath, "DASH_EVENTS_TOKEN"), envVal(t, env, backendEnvPath, "EVENTS_TOKEN"); got != want {
+		t.Errorf("DASH_EVENTS_TOKEN = %q, want backend.env's", got)
+	}
+	pw, _ := read(t, env, dashPasswordPath)
+	if hash := envVal(t, env, dashEnvPath, "DASH_PASSWORD_HASH"); !verifyBcrypt(string(pw), hash) {
+		t.Errorf("the rewritten hash does not verify the kept password")
 	}
 }
 

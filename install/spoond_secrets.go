@@ -39,6 +39,19 @@ type tokens struct {
 	events    string
 }
 
+// firstConsumerToken reads the first token=consumer pair's token from a
+// CONSUMER_TOKENS value: what the first-user POST's Authorization header
+// carries (the docs' ${CONSUMER_TOKENS%%=*}; the backend resolves the
+// owner through the bare token). Empty when the value holds no pairs.
+func firstConsumerToken(consumerTokens string) string {
+	first, _, _ := strings.Cut(consumerTokens, ",")
+	s, _, ok := strings.Cut(first, "=")
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(s)
+}
+
 // randHex reads n bytes of crypto/rand and hex-encodes them lowercase:
 // the generated secret's shape (openssl rand -hex N).
 func randHex(n int) (string, error) {
@@ -133,22 +146,20 @@ func backendEnvWrite(env *Env, r *Reporter, dd hostDefaults, pair tlsPair) (*tok
 		if len(missing) > 0 {
 			return nil, nil, fmt.Errorf("%s: token variables %s not set; rerun after setting them (a fresh install generates them)", backendEnvPath, strings.Join(missing, ", "))
 		}
-		consumer := vals["CONSUMER_TOKENS"]
-		if _, _, ok := strings.Cut(consumer, "="); !ok {
-			return nil, nil, fmt.Errorf("%s: CONSUMER_TOKENS=%q is not token=consumer pairs", backendEnvPath, consumer)
+		consumer := firstConsumerToken(vals["CONSUMER_TOKENS"])
+		if consumer == "" {
+			return nil, nil, fmt.Errorf("%s: CONSUMER_TOKENS=%q is not token=consumer pairs", backendEnvPath, vals["CONSUMER_TOKENS"])
 		}
-		// The metrics token never appears in backend.env; a fresh
-		// one rides dash.env's fresh write.
-		metrics, err := randHex(metricsTokenLen)
-		if err != nil {
-			return nil, nil, err
-		}
+		// The metrics token never appears in a pre-existing backend.env
+		// parsed as five keys, but this phase's own writes carry it
+		// (docs/install.md section 4's minimum contents): take it when
+		// present, mint one only when dash.env lacks both.
 		tk := &tokens{
 			consumer:  consumer,
 			bootstrap: vals["BOOTSTRAP_TOKEN"],
 			gateway:   vals["GATEWAY_TOKEN"],
 			admin:     vals["ADMIN_TOKEN"],
-			metrics:   metrics,
+			metrics:   vals["METRICS_TOKEN"],
 			events:    vals["EVENTS_TOKEN"],
 		}
 		return tk, states, nil
