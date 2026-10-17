@@ -50,6 +50,13 @@ const installUsage = `usage: spoond install [--dry-run] [phase]
 // the Env (a temp-rooted run for tests and --root; the host for real
 // runs), run all phases or the one named, exit non-zero on failure.
 func installMain(args []string) int {
+	if len(args) == 0 || args[0] == "help" || args[0] == "-h" || args[0] == "--help" {
+		fmt.Fprint(os.Stderr, installUsage)
+		if len(args) == 0 {
+			return 2
+		}
+		return 0
+	}
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, installUsage) }
 	dryRun := fs.Bool("dry-run", false, "show what would change, write nothing, run no command")

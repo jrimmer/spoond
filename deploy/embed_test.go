@@ -12,28 +12,28 @@ import (
 func TestFilesListed(t *testing.T) {
 	want := map[string]bool{
 		// top-level units and their env examples
-		"spoond-backend.service":          true,
-		"spoond-backend.env.example":      true,
-		"spoond-sshd-gateway.service":     true,
-		"spoond-gateway.env.example":      true,
-		"spoond-dash.service":             true,
-		"spoond-runner.service":           true,
-		"spoond-runner.env.example":       true,
+		"spoond-backend.service":      true,
+		"spoond-backend.env.example":  true,
+		"spoond-sshd-gateway.service": true,
+		"spoond-gateway.env.example":  true,
+		"spoond-dash.service":         true,
+		"spoond-runner.service":       true,
+		"spoond-runner.env.example":   true,
 		// e2b orchestrator, firewall, flags, netwatch, otelcol
 		// (e2b/spoond-netwatch.env.example is not embedded this slice:
 		// netwatch is a runtime-phase unit, installed in slice S4)
-		"e2b/e2b-orchestrator.service":    true,
-		"e2b/orchestrator.env":            true,
-		"e2b/e2b-guard.service":           true,
-		"e2b/e2b-guard.nft":               true,
-		"e2b/flags.json":                  true,
-		"e2b/spoond-netwatch.service":     true,
-		"e2b/spoond-netwatch.sh":          true,
-		"e2b/otelcol-config.yaml":         true,
+		"e2b/e2b-orchestrator.service": true,
+		"e2b/orchestrator.env":         true,
+		"e2b/e2b-guard.service":        true,
+		"e2b/e2b-guard.nft":            true,
+		"e2b/flags.json":               true,
+		"e2b/spoond-netwatch.service":  true,
+		"e2b/spoond-netwatch.sh":       true,
+		"e2b/otelcol-config.yaml":      true,
 		// e2b/*.service also ships the drain and soak units (the drain
 		// unit is what the spoond phase installs for --stop hooks)
-		"e2b/spoond-drain.service":        true,
-		"e2b/spoond-soak.service":         true,
+		"e2b/spoond-drain.service": true,
+		"e2b/spoond-soak.service":  true,
 	}
 	got := map[string]bool{}
 	err := fs.WalkDir(Files, ".", func(path string, d fs.DirEntry, err error) error {

@@ -80,6 +80,16 @@ var (
 // defaultGoarch is the production arch answer: the compiler's target.
 func defaultGoarch() string { return runtime.GOARCH }
 
+// TestProbes swaps the port and free-space probes for the test and
+// returns the restore: it lets another package's test (the CLI's)
+// drive a whole check run against a fake host, which the unexported
+// vars cannot reach from there.
+func TestProbes(p prober, s spacer) (restore func()) {
+	oldP, oldS := hostProber, hostSpacer
+	hostProber, hostSpacer = p, s
+	return func() { hostProber, hostSpacer = oldP, oldS }
+}
+
 // sysProber binds :port on tcp4 and tcp6 and closes immediately: the
 // plain "does anybody already listen here" test.
 type sysProber struct{}
