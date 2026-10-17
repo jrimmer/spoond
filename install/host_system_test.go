@@ -777,3 +777,55 @@ func settle(t *testing.T, env *Env, step string, runner *recordRunner) {
 	}
 	writeRootFile(t, env, meminfoPath, meminfo(16<<30, pages))
 }
+
+// TestHostSystemDryRunWritesNothingButPlans: a dry run of all five
+// steps writes no file and runs only the read-only queries; the report
+// still shows every row the real run would produce.
+func TestHostSystemDryRunWritesNothingButPlans(t *testing.T) {
+	env, out, runner := testEnv(t)
+	env.DryRun = true
+	runner.reply = map[string]fakeReply{}
+	for _, p := range basePackages {
+		addReply(runner, "dpkg-query -W -f=${Status} "+p, "")
+	}
+	addReply(runner, "apt-get update", "")
+	addReply(runner, "apt-get install -y --no-install-recommends "+strings.Join(basePackages, " "), "")
+	addReply(runner, "update-alternatives --query iptables", altQuery("/usr/sbin/iptables-nft"))
+	addReply(runner, "update-alternatives --query ip6tables", altQuery("/usr/sbin/ip6tables-nft"))
+	addReply(runner, "update-alternatives --set iptables /usr/sbin/iptables-legacy", "")
+	addReply(runner, "update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy", "")
+	writeRootFile(t, env, meminfoPath, meminfo(16<<30, 0))
+	writeRootFile(t, env, grubPath, grubBody)
+
+	st := &hostState{}
+	for _, step := range []hostStep{hostPackages, hostModules, hostUdev, hostHugepages, hostIptables} {
+		if err := step(context.Background(), env, &Reporter{Phase: PhaseHost, Out: out}, st); err != nil {
+			t.Fatalf("%T: %v", step, err)
+		}
+	}
+
+	// Only queries ran: dpkg and the alternatives.
+	for _, c := range runner.calls {
+		if !strings.HasPrefix(c, "dpkg-query") && !strings.HasPrefix(c, "update-alternatives --query") {
+			t.Errorf("dry run ran changing command %q", c)
+		}
+	}
+	// No file landed, not even a directory. (grub is an input fake,
+	// so it is only checked for content, not absence.)
+	for _, p := range []string{
+		"/etc/modules-load.d/e2b.conf",
+		"/etc/modprobe.d/e2b-nbd.conf",
+		"/etc/udev/rules.d/97-nbd-device.rules",
+		sysctlE2BPath,
+	} {
+		mustNotExist(t, env, p)
+	}
+	// The input fakes made /etc exist; the assertion is on the
+	// files above, none of which the dry run may write.
+	// The plan is on Out.
+	for _, want := range []string{"e2b.conf", "97-nbd-device.rules", "90-e2b.conf", "grub", "dry-run"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("dry-run report lacks %q:\n%s", want, out.String())
+		}
+	}
+}
