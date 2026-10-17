@@ -35,8 +35,8 @@ func runDoctorPhase(t *testing.T, env *Env) ([]Item, error) {
 func doctorRunnerReply(out []byte, err error) map[string]fakeReply {
 	return map[string]fakeReply{
 		"systemd-run --wait --pipe --quiet --collect " +
-			"-p EnvironmentFile=/etc/spoond/backend.env " +
 			"-p EnvironmentFile=-/etc/spoond/llm.env " +
+			"-p EnvironmentFile=/etc/spoond/backend.env " +
 			"/opt/spoond/spoond doctor -manifest /var/lib/spoond/images/manifest.yaml": {out: out, err: err},
 	}
 }
@@ -64,8 +64,8 @@ func TestDoctorPhaseCommandPinned(t *testing.T) {
 		t.Fatalf("doctor phase: %v", err)
 	}
 	want := "systemd-run --wait --pipe --quiet --collect " +
-		"-p EnvironmentFile=/etc/spoond/backend.env " +
 		"-p EnvironmentFile=-/etc/spoond/llm.env " +
+		"-p EnvironmentFile=/etc/spoond/backend.env " +
 		"/opt/spoond/spoond doctor -manifest /var/lib/spoond/images/manifest.yaml"
 
 	if len(runner.calls) != 1 || runner.calls[0] != want {

@@ -63,8 +63,9 @@ func doctorPhase(ctx context.Context, env *Env) ([]Item, error) {
 	out, err := env.Run.Run(ctx,
 		"systemd-run",
 		"--wait", "--pipe", "--quiet", "--collect",
-		"-p", "EnvironmentFile="+doctorBackendEnv,
+		// The backend unit's order, so the same value wins.
 		"-p", "EnvironmentFile=-"+doctorLLMEnv,
+		"-p", "EnvironmentFile="+doctorBackendEnv,
 		"/opt/spoond/spoond",
 		"doctor", "-manifest", doctorManifest,
 	)
