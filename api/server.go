@@ -515,15 +515,13 @@ const apiLeasePathPrefix = "/api/leases"
 const apiRemovedAlias = "/api/sandboxes"
 
 // removedAliasGone answers a request on the removed /api/sandboxes
-// alias (4.0): 410 Gone, the API's JSON error shape, and the Link
-// successor naming the same route under /api/leases. It runs before
-// auth, so even a misconfigured client learns where the API moved; the
-// answer is otherwise identical for every caller.
+// alias (4.0): 410 Gone, writeErrorCode's JSON error shape, and the
+// Link successor naming the same route under /api/leases. It runs
+// before auth, so even a misconfigured client learns where the API
+// moved; the answer is otherwise identical for every caller.
 func removedAliasGone(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Link", `<`+aliasSuccessorPath(r.URL.Path)+`>; rel="successor-version"`)
-	w.WriteHeader(http.StatusGone)
-	_, _ = w.Write([]byte(`{"error":"` + apiRemovedAlias + ` is removed in 4.0; use /api/leases","code":"path_removed"}` + "\n"))
+	writeErrorCode(w, http.StatusGone, "path_removed", apiRemovedAlias+" is removed in 4.0; use /api/leases")
 }
 
 // aliasSuccessorPath maps a removed /api/sandboxes path onto its

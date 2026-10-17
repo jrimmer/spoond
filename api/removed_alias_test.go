@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"sync"
 	"testing"
 
 	"github.com/jrimmer/spoond/v3/identity"
@@ -41,10 +40,7 @@ func doRaw(t *testing.T, method, url, token string) (int, string, http.Header) {
 // this file does not assert).
 func newRecordingUpstream(t *testing.T) *httptest.Server {
 	t.Helper()
-	var mu sync.Mutex
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		defer mu.Unlock()
 		fmt.Fprint(w, `{"ok":true}`)
 	}))
 	t.Cleanup(upstream.Close)
@@ -73,7 +69,8 @@ func TestRemovedSandboxesAlias(t *testing.T) {
 		if code != http.StatusGone {
 			t.Fatalf("%s %s: %d, want 410", tc.method, tc.path, code)
 		}
-		wantBody := `{"error":"/api/sandboxes is removed in 4.0; use /api/leases","code":"path_removed"}` + "\n"
+		// writeErrorCode encodes the map, so the code field sorts first.
+		wantBody := `{"code":"path_removed","error":"/api/sandboxes is removed in 4.0; use /api/leases"}` + "\n"
 		if body != wantBody {
 			t.Fatalf("%s %s: body = %q, want %q", tc.method, tc.path, body, wantBody)
 		}
