@@ -50,13 +50,12 @@ type BackendMetrics struct {
 	HTTPDur  *prometheus.HistogramVec // {path}: API latency
 
 	// LLM gateway
-	LLMReqs       *prometheus.CounterVec   // {provider}: requests
-	LLMDur        *prometheus.HistogramVec // {provider}: upstream latency
-	LLMErrors     *prometheus.CounterVec   // {provider,code}: upstream errors
-	LLMRateLimit  prometheus.Counter       // 429 from per-user cap
-	LLMKeyFail    prometheus.Counter       // LLM key auth failures
-	LLMKeylessDen prometheus.Counter       // keyless denied (requireKey)
-	LLMInflight   *prometheus.GaugeVec     // {owner}: in-flight per owner
+	LLMReqs      *prometheus.CounterVec   // {provider}: requests
+	LLMDur       *prometheus.HistogramVec // {provider}: upstream latency
+	LLMErrors    *prometheus.CounterVec   // {provider,code}: upstream errors
+	LLMRateLimit prometheus.Counter       // 429 from per-user cap
+	LLMKeyFail   prometheus.Counter       // LLM key auth failures
+	LLMInflight  *prometheus.GaugeVec     // {owner}: in-flight per owner
 
 	// Proxy
 	ProxyReqs    *prometheus.CounterVec // {host}: proxy requests
@@ -170,14 +169,6 @@ type BackendMetrics struct {
 	// disk and is recovered like a crash.
 	RootfsProbeFailuresTotal prometheus.Counter // probe failures (transport, timeout or EIO)
 	RootfsDeadTotal          prometheus.Counter // leases declared dead after consecutive probe failures
-
-	// Deprecation (4.0 groundwork): requests served through a surface
-	// the 4.0 release removes. kind is `sandboxes_alias` (the
-	// /api/sandboxes spelling of the lease API) or `llm_keyless`
-	// (a request the LLM gateway served only because LLM_OPEN_LEGACY
-	// kept a keyless owner open). Reading these tells whether removing
-	// either in 4.0 would break callers.
-	DeprecatedReqs *prometheus.CounterVec // {kind}: deprecated-surface requests
 
 	// Substrate (U11)
 	LeasesByState     *prometheus.GaugeVec     // {state}: leases per state
@@ -304,10 +295,6 @@ func NewBackendMetrics() *BackendMetrics {
 	m.LLMKeyFail = prometheus.NewCounter(prometheus.CounterOpts{
 		Namespace: "spoond", Name: "llm_key_auth_failures_total",
 		Help: "LLM key authentication failures.",
-	})
-	m.LLMKeylessDen = prometheus.NewCounter(prometheus.CounterOpts{
-		Namespace: "spoond", Name: "llm_keyless_denied_total",
-		Help: "Keyless owners denied in requireKey mode.",
 	})
 	m.LLMInflight = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: "spoond", Name: "llm_inflight",
@@ -554,14 +541,6 @@ func NewBackendMetrics() *BackendMetrics {
 		Help: "Leases declared dead because their root disk was unreadable.",
 	})
 
-	// Deprecation (4.0 groundwork): one counter, the two removal
-	// candidates as kinds. The backend sets the label; see
-	// api/deprecated.go.
-	m.DeprecatedReqs = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: "spoond", Name: "deprecated_requests_total",
-		Help: "Requests served through a surface 4.0 removes, by kind: sandboxes_alias (the /api/sandboxes spelling of the lease API) or llm_keyless (keyless LLM access under LLM_OPEN_LEGACY).",
-	}, []string{"kind"})
-
 	// Substrate (U11)
 	m.LeasesByState = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: "spoond", Name: "leases",
@@ -602,7 +581,7 @@ func NewBackendMetrics() *BackendMetrics {
 		m.AdmitWait, m.AdmitTimeouts,
 		m.HTTPReqs, m.HTTPDur,
 		m.LLMReqs, m.LLMDur, m.LLMErrors, m.LLMRateLimit,
-		m.LLMKeyFail, m.LLMKeylessDen, m.LLMInflight,
+		m.LLMKeyFail, m.LLMInflight,
 		m.ProxyReqs, m.ProxyAuthRes,
 		m.NetpolApply, m.NetpolErrors, m.NetpolDur,
 		m.IdentityUsers, m.IdentityAdmins, m.AuthFailures,
@@ -625,7 +604,6 @@ func NewBackendMetrics() *BackendMetrics {
 		m.GuestDialsActive, m.GuestDialsTotal,
 		m.JobsRunning, m.JobsExitedTotal,
 		m.RootfsProbeFailuresTotal, m.RootfsDeadTotal,
-		m.DeprecatedReqs,
 		m.LeasesByState, m.LeasesByImage, m.NodeRunning, m.NodeHugepagesFree, m.NodeWork,
 		m.CreateDur, m.CapacityRej,
 	)

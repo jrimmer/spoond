@@ -208,11 +208,9 @@ func TestValidateTypes(t *testing.T) {
 		{"NOTIFY_UNITS", []string{"a.service,b.service", "none", "one.service"}, nil},
 		// string: read verbatim, nothing to check.
 		{"SPOOND_DB_PATH", []string{"/var/lib/spoond/spoond.db", "a b c"}, nil},
-		// The exceptions, pinned in the table too: DASH_INTERVAL takes
-		// no bare seconds (dash's own reader wants a Go duration), and
-		// LLM_OPEN_LEGACY accepts any non-empty value.
+		// The exception, pinned in the table too: DASH_INTERVAL takes
+		// no bare seconds (dash's own reader wants a Go duration).
 		{"DASH_INTERVAL", []string{"2s", "500ms", "5s"}, []string{"2", "soon"}},
-		{"LLM_OPEN_LEGACY", []string{"1", "yes-please"}, nil},
 	}
 	for _, c := range cases {
 		spec, ok := SpecOf(c.name)

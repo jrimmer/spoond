@@ -132,7 +132,6 @@ var Known = []string{
 	"LLM_GATEWAY_URL",
 	"LLM_MAX_CONCURRENT_PER_USER",
 	"LLM_MODEL_MAP",
-	"LLM_OPEN_LEGACY",
 	"LLM_UPSTREAM_KEY",
 	"LLM_UPSTREAM_URL",
 	"MAX_ADMIT_WAIT_SECS",
@@ -220,8 +219,7 @@ const (
 	// TypeBool is a switch. The readers accept the usual spellings: envBoolOr
 	// (SANDBOX_PROBE) counts "0" "false" "no" as off, anything else on; the
 	// == "1" readers (GC_DELETE, SPOOND_DRAIN_INSECURE, the conformance
-	// flags) count only "1" on; == "" readers (LLM_OPEN_LEGACY) accept any
-	// non-empty value, so no spelling is wrong and Validate passes it.
+	// flags) count only "1" on.
 	TypeBool
 	// TypeDuration is a time: the readers take a Go duration
 	// (time.ParseDuration, "5m", "1h30m") or, for every duration
@@ -458,7 +456,6 @@ var Specs = []Spec{
 	{"LLM_GATEWAY_URL", TypeURL, Gateway, false},
 	{"LLM_MAX_CONCURRENT_PER_USER", TypeInt, Backend, false},
 	{"LLM_MODEL_MAP", TypeList, Backend, false},   // pattern=model pairs
-	{"LLM_OPEN_LEGACY", TypeBool, Backend, false}, // any non-empty value turns it on: no spelling is wrong, so Validate passes every spelling
 	{"LLM_UPSTREAM_KEY", TypeString, Backend, true},
 	{"LLM_UPSTREAM_URL", TypeURL, Backend, false},
 	{"MAX_ADMIT_WAIT_SECS", TypeInt, Backend, false},
@@ -616,12 +613,6 @@ func validateOne(s Spec, v string) error {
 			return bad("not an integer")
 		}
 	case TypeBool:
-		// LLM_OPEN_LEGACY turns the legacy keyless mode on for any
-		// non-empty value (the code tests == ""), so no spelling is
-		// wrong for it — every value passes.
-		if s.Name == "LLM_OPEN_LEGACY" {
-			return nil
-		}
 		// The readers' spellings, unioned: envBoolOr counts 0/false/no
 		// off and 1/true/yes/on on; the == "1" readers (GC_DELETE,
 		// SPOOND_DRAIN_INSECURE, the conformance flags) count only "1";
