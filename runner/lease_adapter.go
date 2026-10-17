@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
@@ -120,8 +121,9 @@ func (c *HTTPLeaseClient) WithLabel(label string) {
 // node, so Create logs the wait, sleeps for Retry-After (or a default)
 // and tries again until the create is admitted or ctx ends. ctx is the
 // job's own timeout — a capacity refusal must never fail a job, but a
-// job that has run out of time must stop waiting. Any other refusal
-// (bad request, auth, unknown image, quota) is returned at once.
+// job that has run out of time must stop waiting. A 429 box_full is
+// waited out the same way. Any other refusal (bad request, auth,
+// unknown image, quota) is returned at once.
 func (c *HTTPLeaseClient) Create(ctx context.Context, image string, ttl int) (string, error) {
 	c.labelMu.Lock()
 	label := c.label
@@ -181,7 +183,26 @@ func (c *HTTPLeaseClient) createOnce(ctx context.Context, body []byte) (id strin
 	if resp.StatusCode == http.StatusServiceUnavailable {
 		return "", parseRetryAfter(resp.Header.Get("Retry-After")), true, fmt.Errorf("create sandbox: status %d", resp.StatusCode)
 	}
+	if resp.StatusCode == http.StatusTooManyRequests && errorCode(resp.Body) == "box_full" {
+		// The runner's identity is the box's biggest borrower (every CI
+		// job shares it), so fair shares refuses at once instead of
+		// queueing. Room comes back as earlier jobs finish: wait like a
+		// full node. Other 429s (quota codes) stay final.
+		return "", parseRetryAfter(resp.Header.Get("Retry-After")), true, fmt.Errorf("create sandbox: status %d box_full", resp.StatusCode)
+	}
 	return "", 0, false, fmt.Errorf("create sandbox: status %d", resp.StatusCode)
+}
+
+// errorCode reads the "code" field of a JSON error body ("" when the
+// body is not one).
+func errorCode(body io.Reader) string {
+	var e struct {
+		Code string `json:"code"`
+	}
+	if err := json.NewDecoder(io.LimitReader(body, 64<<10)).Decode(&e); err != nil {
+		return ""
+	}
+	return e.Code
 }
 
 // admitWaitSecs is the effective wait sent on Create; negative reads as 0.
