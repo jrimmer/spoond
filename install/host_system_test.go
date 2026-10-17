@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -146,9 +147,11 @@ func writeRootFile(t *testing.T, env *Env, path, content string) {
 	}
 }
 
-// kernelSim stands in for the kernel: every command goes through the
-// inner recordRunner, and a successful modprobe leaves the module
-// markers the step reads back, as the real kernel would.
+// kernelSim stands in for the kernel and the alternatives database:
+// every command goes through the inner recordRunner (whose reply table
+// still answers), a successful modprobe leaves the module markers the
+// step reads back, and a successful update-alternatives --set flips
+// the --query answer to the legacy path.
 type kernelSim struct {
 	t     *testing.T
 	env   *Env
@@ -157,15 +160,20 @@ type kernelSim struct {
 
 func (k *kernelSim) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
 	out, err := k.inner.Run(ctx, name, args...)
-	if err == nil && name == "modprobe" && len(args) > 0 {
-		switch args[0] {
-		case "nbd":
-			writeRootFile(k.t, k.env, nbdParamPath, "256\n")
-		case "tun":
-			writeRootFile(k.t, k.env, tunModulePath, "")
-		}
+	if err != nil {
+		return out, err
 	}
-	return out, err
+	switch {
+	case name == "modprobe" && len(args) > 0 && args[0] == "nbd":
+		writeRootFile(k.t, k.env, nbdParamPath, "256\n")
+	case name == "modprobe" && len(args) > 0 && args[0] == "tun":
+		writeRootFile(k.t, k.env, tunModulePath, "")
+	case name == "update-alternatives" && len(args) == 3 && args[0] == "--set":
+		legacy := legacyPath(args[1])
+		k.inner.reply["update-alternatives --query "+args[1]] =
+			fakeReply{out: []byte("Value: " + legacy + "\n")}
+	}
+	return out, nil
 }
 
 // modprobeReplies teaches runner the two modprobes and seeds the
@@ -552,6 +560,16 @@ func TestSetGrubHugepagesTable(t *testing.T) {
 	}
 }
 
+// dpkgQueries lists the package check commands: read-only, so a
+// settled second run may make them.
+func dpkgQueries() []string {
+	var out []string
+	for _, p := range basePackages {
+		out = append(out, "dpkg-query -W -f=${Status} "+p)
+	}
+	return out
+}
+
 // altQuery builds `update-alternatives --query` output for a Value.
 func altQuery(value string) string { return "Alternative: " + value + "\nValue: " + value + "\n" }
 
@@ -627,4 +645,135 @@ func TestHostIptablesQueryFails(t *testing.T) {
 	if !strings.Contains(err.Error(), "iptables package") {
 		t.Errorf("error = %q, want the package hint", err)
 	}
+}
+
+// TestHostSystemStepsSecondRunQuiet runs every system step twice over
+// the same root: the second pass reports kept only and runs no
+// changing command (queries and modprobe-free reads aside).
+func TestHostSystemStepsSecondRunQuiet(t *testing.T) {
+	type stepCase struct {
+		name string
+		run  func(t *testing.T, env *Env, runner *recordRunner) error
+		// noChangeCalls counts the runner calls the settled second run
+		// may still make (read-only ones).
+		allowed []string
+	}
+	cases := []stepCase{
+		{
+			name: "packages",
+			run: func(t *testing.T, env *Env, runner *recordRunner) error {
+				for _, p := range basePackages {
+					addReply(runner, "dpkg-query -W -f=${Status} "+p, "install ok installed")
+				}
+				return hostPackages(context.Background(), env, &Reporter{Phase: PhaseHost}, &hostState{})
+			},
+			allowed: dpkgQueries(),
+		},
+		{
+			name: "modules",
+			run: func(t *testing.T, env *Env, runner *recordRunner) error {
+				return hostModules(context.Background(), env, &Reporter{Phase: PhaseHost}, &hostState{})
+			},
+			allowed: []string{},
+		},
+		{
+			name: "udev",
+			run: func(t *testing.T, env *Env, runner *recordRunner) error {
+				return hostUdev(context.Background(), env, &Reporter{Phase: PhaseHost}, &hostState{})
+			},
+			allowed: []string{},
+		},
+		{
+			name: "hugepages",
+			run: func(t *testing.T, env *Env, runner *recordRunner) error {
+				return hostHugepages(context.Background(), env, &Reporter{Phase: PhaseHost}, &hostState{})
+			},
+			allowed: []string{},
+		},
+		{
+			name: "iptables",
+			run: func(t *testing.T, env *Env, runner *recordRunner) error {
+				return hostIptables(context.Background(), env, &Reporter{Phase: PhaseHost}, &hostState{})
+			},
+			allowed: []string{
+				"update-alternatives --query iptables",
+				"update-alternatives --query ip6tables",
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env, _, runner := testEnv(t)
+			runner.reply = map[string]fakeReply{}
+			// A host the first run settles: packages installed,
+			// modules absent then loaded by the sim, hugepages
+			// reserved by the "kernel" at 16 GiB/5120, legacy
+			// iptables.
+			for _, p := range append([]string{}, basePackages...) {
+				addReply(runner, "dpkg-query -W -f=${Status} "+p, "install ok installed")
+			}
+			addReply(runner, "sysctl -p /etc/sysctl.d/90-e2b.conf", "")
+			addReply(runner, "update-grub", "")
+			addReply(runner, "update-alternatives --query iptables", altQuery("/usr/sbin/iptables-nft"))
+			addReply(runner, "update-alternatives --query ip6tables", altQuery("/usr/sbin/ip6tables-nft"))
+			addReply(runner, "update-alternatives --set iptables /usr/sbin/iptables-legacy", "")
+			addReply(runner, "update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy", "")
+			// modprobe runs through the sim, but the recordRunner it
+			// wraps still needs the reply entries.
+			addReply(runner, "modprobe nbd nbds_max=256 max_part=16", "")
+			addReply(runner, "modprobe tun", "")
+			writeRootFile(t, env, meminfoPath, meminfo(16<<30, 0))
+			writeRootFile(t, env, grubPath, grubBody)
+			kr := &kernelSim{t: t, env: env, inner: runner}
+			env.Run = kr
+
+			// The first pass runs the step over the fresh fake host;
+			// settle then fakes what the real host would keep.
+			if err := tc.run(t, env, runner); err != nil {
+				t.Fatalf("first run: %v", err)
+			}
+			settle(t, env, tc.name, runner)
+			runner.calls = nil
+			if err := tc.run(t, env, runner); err != nil {
+				t.Fatalf("second run: %v", err)
+			}
+			for _, c := range runner.calls {
+				allowed := false
+				for _, a := range tc.allowed {
+					if c == a {
+						allowed = true
+					}
+				}
+				if !allowed {
+					t.Errorf("second run ran changing command %q", c)
+				}
+			}
+		})
+	}
+}
+
+// settle fakes the host state the step's first run left behind, where
+// the file fakes cannot follow the commands: the hugepages "kernel"
+// reserves what the sysctl file asked for.
+func settle(t *testing.T, env *Env, step string, runner *recordRunner) {
+	t.Helper()
+	if step != "hugepages" {
+		return
+	}
+	b, err := os.ReadFile(env.Resolve(sysctlE2BPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const tag = "vm.nr_hugepages = "
+	pages := 0
+	for _, line := range strings.Split(string(b), "\n") {
+		if v, ok := strings.CutPrefix(line, tag); ok {
+			n, err := strconv.Atoi(strings.TrimSpace(v))
+			if err != nil {
+				t.Fatal(err)
+			}
+			pages = n
+		}
+	}
+	writeRootFile(t, env, meminfoPath, meminfo(16<<30, pages))
 }
