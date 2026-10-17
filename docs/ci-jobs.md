@@ -85,6 +85,64 @@ not abort apt), drops
 waits on a ready file. The snapshot is taken after the ready command
 succeeds.
 
+## The rust-gpui image
+
+`rust-gpui-base` (`runs-on: rust-gpui`) is `rust-qt-base` with what an
+app on gpui 0.2.2 (Zed's GUI crate) needs to build and test on Linux:
+libxcb, libxkbcommon and libxkbcommon-x11 (linked), wayland and
+wayland-protocols, the Vulkan loader and headers, and Mesa's lavapipe
+(`vulkan-swrast`) as a software Vulkan driver. gpui renders only through
+Vulkan, so a test that opens a real window runs under `xvfb-run` on
+lavapipe; tests on gpui's `TestPlatform` need no display. It is a
+`from: rust-qt-base` layer, so it keeps that image's Arch snapshot,
+Rust 1.99.0 and env. It is sized at 4 vCPU, 8 GiB and 24 GiB of disk,
+because a cold gpui release build needs about 5 GB of target dir.
+
+Deploying it on the host:
+
+1. Check that `rust-qt-base` has a current build (`spoond images list`),
+   then build the layer from a checkout that has it:
+
+   ```bash
+   spoond images build rust-gpui-base --manifest images/manifest.yaml --context images
+   ```
+
+2. Add the label and the mapping in `/etc/spoond/runner.env` (append to
+   the existing lists; labels take no spaces):
+
+   ```
+   RUNNER_LABELS=<existing labels>,rust-gpui
+   IMAGE_MAP=<existing pairs>,rust-gpui=rust-gpui-base
+   ```
+
+3. Make the runners register again, as in [Adding a label](#adding-a-label).
+
+### Adding a label
+
+A runner sends its labels to Forgejo only when it registers. Each worker
+saves its Forgejo credentials in `RUNNER_STATE_FILE` (default
+`/var/lib/spoond/runner-state.json`), and on restart a worker with saved
+credentials restores them and goes straight to fetching jobs
+(`runner/pool.go`, `worker.run`); nothing re-declares labels. So a plain
+restart after changing `RUNNER_LABELS` leaves Forgejo with the old labels,
+and jobs for the new label sit waiting. Workers spawned fresh by scale-up
+do register with the new labels, which makes this intermittent.
+
+To re-register every worker, while the runner is idle:
+
+```bash
+systemctl stop spoond-runner
+mv /var/lib/spoond/runner-state.json /var/lib/spoond/runner-state.json.bak
+systemctl start spoond-runner
+```
+
+The old runner entries stay in Forgejo, offline. With
+`FORGEJO_ADMIN_TOKEN` set, a later start deletes offline runners named
+with the `RUNNER_NAME` prefix; without it, delete them under Site
+Administration > Actions > Runners. That page also shows each runner's
+labels, which is where to check that the new one arrived. Delete the
+`.bak` file once the runners show the new label.
+
 ## Writing inside the sandbox
 
 A job gets an ordinary writable root filesystem, its own copy-on-write
