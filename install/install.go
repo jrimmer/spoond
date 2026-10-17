@@ -40,6 +40,8 @@ type Env struct {
 	// DryRun stops all writes and command execution; the report
 	// still shows what a real run would do.
 	DryRun bool
+	// Opt holds the install flags; each phase reads its own fields.
+	Opt Options
 	// Prober, Spacer and Arch stand in for the host in the check
 	// phase: the port probe, the free-space probe and the binary's
 	// own architecture. Nil and empty mean the real host; tests set
@@ -203,8 +205,8 @@ func (env *Env) Resolve(path string) string {
 }
 
 // writeFile writes path with content, mode 0600 unless mode says
-// otherwise, comparing before it writes so an unchanged file is a
-// kept, and honouring DryRun (dry-run reports created or changed but
+// otherwise, comparing before it writes so an unchanged file with the
+// right mode is a kept, and honouring DryRun (dry-run reports created or changed but
 // writes nothing).
 // DryRun before MkdirAll: a dry run changes nothing, not even the
 // directories under the target.
@@ -216,11 +218,17 @@ func (env *Env) writeFile(r *Reporter, path string, content []byte, mode os.File
 	}
 	res := Created
 	if old, err := os.ReadFile(full); err == nil {
-		if bytes.Equal(old, content) {
-			r.Add(Kept, path, "")
-			return nil
-		}
 		res = Changed
+		if bytes.Equal(old, content) {
+			fi, err := os.Stat(full)
+			if err != nil {
+				return fmt.Errorf("stat %s: %w", full, err)
+			}
+			if fi.Mode().Perm() == mode.Perm() {
+				r.Add(Kept, path, "")
+				return nil
+			}
+		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("read %s: %w", full, err)
 	}
@@ -233,6 +241,11 @@ func (env *Env) writeFile(r *Reporter, path string, content []byte, mode os.File
 	}
 	if err := os.WriteFile(full, content, mode); err != nil {
 		return fmt.Errorf("write %s: %w", full, err)
+	}
+	// WriteFile keeps an existing file's mode; a changed file takes
+	// the requested one.
+	if err := os.Chmod(full, mode); err != nil {
+		return fmt.Errorf("chmod %s: %w", full, err)
 	}
 	r.Add(res, path, "")
 	return nil

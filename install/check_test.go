@@ -554,7 +554,7 @@ func TestCheckStoreFreeLow(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "want >= 100") {
 		t.Errorf("err = %v, want the store message", err)
 	}
-	if !strings.Contains(out.String(), env.Resolve(defaultStore)) {
+	if !strings.Contains(out.String(), env.Resolve(DefaultStoreDir)) {
 		t.Fatalf("the row should name the store path under this Root:\n%s", out.String())
 	}
 }
@@ -573,7 +573,7 @@ func TestCheckStoreMissingMeasuresAncestor(t *testing.T) {
 	// on — the walk must stop at Root itself (the temp dir, the
 	// first existing directory), not go past it.
 	root := env.Resolve("/")
-	store := env.Resolve(defaultStore)
+	store := env.Resolve(DefaultStoreDir)
 	var asked []string
 	spacer := recordingSpacer{root: root, dirs: &asked, rest: fakeSpacer{free: 1 << 30}}
 	swapProbes(t, env, fakeProber{}, spacer)

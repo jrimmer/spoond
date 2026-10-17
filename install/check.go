@@ -39,9 +39,6 @@ const (
 	// snapshot path and the nbd module want >= 6.1.
 	minKernelMajor = 6
 	minKernelMinor = 1
-	// defaultStore is the snapshot store whose free space is
-	// checked; the host phase's --store-dir overrides it later.
-	defaultStore = "/forkdcache/e2b"
 )
 
 // checkPaths are the host files check reads; every read resolves them
@@ -115,6 +112,8 @@ func (sysSpacer) FreeBytes(dir string) (uint64, error) {
 }
 
 // checkPhase implements the check row. Every failure names the fix.
+func init() { Phases[PhaseCheck] = checkPhase }
+
 func checkPhase(ctx context.Context, env *Env) ([]Item, error) {
 	r := &Reporter{Phase: PhaseCheck, Out: env.Out}
 
@@ -214,18 +213,23 @@ func checkPhase(ctx context.Context, env *Env) ([]Item, error) {
 		}
 	}
 
-	// the snapshot store has >= 100 GiB free.
+	// the snapshot store has >= 100 GiB free. With --store-disk the
+	// store does not exist yet; the host phase checks the disk.
+	if env.Opt.StoreDisk != "" {
+		r.Add(Skipped, "store free space", "--store-disk "+env.Opt.StoreDisk+": the host phase creates the store")
+		return r.Items(), nil
+	}
 	free, err := storeFree(env)
 	switch {
 	case err != nil:
 		r.Add(Failed, "store free space", "check failed: "+err.Error())
 		return r.Items(), err
 	case free < minStoreFree:
-		note := fmt.Sprintf("%s: %d GiB free, want >= 100 — point --store-disk/--store-dir at a bigger volume, or free space on the store filesystem", env.Resolve(defaultStore), free>>30)
+		note := fmt.Sprintf("%s: %d GiB free, want >= 100 — point --store-disk/--store-dir at a bigger volume, or free space on the store filesystem", env.Resolve(env.Opt.storeDir()), free>>30)
 		r.Add(Failed, "store free space", note)
 		return r.Items(), errors.New(note)
 	default:
-		r.Add(Kept, "store free space", fmt.Sprintf("%s: %d GiB free", env.Resolve(defaultStore), free>>30))
+		r.Add(Kept, "store free space", fmt.Sprintf("%s: %d GiB free", env.Resolve(env.Opt.storeDir()), free>>30))
 	}
 
 	return r.Items(), nil
@@ -237,7 +241,7 @@ func checkPhase(ctx context.Context, env *Env) ([]Item, error) {
 // do not exist either, so the walk goes up to the first directory that
 // does; the file system it lands on is the one the store would use.
 func storeFree(env *Env) (uint64, error) {
-	dir := env.Resolve(defaultStore)
+	dir := env.Resolve(env.Opt.storeDir())
 	spacer := env.spacer()
 	free, err := spacer.FreeBytes(dir)
 	if err == nil {

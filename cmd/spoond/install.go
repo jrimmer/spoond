@@ -38,7 +38,21 @@ const installUsage = `usage: spoond install [--dry-run] [phase]
 
   Flags:
 
-      --dry-run  print what would change, run no command, write nothing
+      --dry-run              print what would change, run no command, write nothing
+      --host-name NAME       the name clients reach this host by (TLS, gateway)
+      --admin-key FILE       SSH public key for the first admin user
+      --tls-cert FILE        an existing certificate (with --tls-key);
+      --tls-key FILE         without them a self-signed pair is made
+      --hugepages N|auto     2 MiB pages to reserve (default auto)
+      --store-disk DEV       make the snapshot store a ZFS pool on DEV
+      --store-dir DIR        the snapshot store (default /forkdcache/e2b)
+      --runtime FILE         a local spoond-runtime tarball, not the download
+      --images SET           minimal (default), all or none
+      --base-registry PFX    pull base Docker images from PFX, not build
+      --runner-url URL       register a Forgejo Actions runner
+      --runner-token-file F  its registration token, read from a file
+      --container            run from inside the Docker image (Docker install)
+      --config-only          with --container: write config, start nothing
 
   A run that fails is safe to rerun: every phase reports each item as
   created, changed or kept, and a secret or env file that exists is
@@ -60,7 +74,26 @@ func installMain(args []string) int {
 	fs.Usage = func() { fmt.Fprint(os.Stderr, installUsage) }
 	dryRun := fs.Bool("dry-run", false, "show what would change, write nothing, run no command")
 	root := fs.String("root", "/", "write under DIR instead of /")
+	var opt install.Options
+	fs.StringVar(&opt.HostName, "host-name", "", "the name clients reach this host by")
+	fs.StringVar(&opt.AdminKey, "admin-key", "", "SSH public key file for the first admin user")
+	fs.StringVar(&opt.TLSCert, "tls-cert", "", "existing TLS certificate")
+	fs.StringVar(&opt.TLSKey, "tls-key", "", "existing TLS key")
+	fs.StringVar(&opt.Hugepages, "hugepages", install.HugepagesAuto, "2 MiB pages to reserve, or auto")
+	fs.StringVar(&opt.StoreDisk, "store-disk", "", "disk or partition for the snapshot store's ZFS pool")
+	fs.StringVar(&opt.StoreDir, "store-dir", install.DefaultStoreDir, "snapshot store directory")
+	fs.StringVar(&opt.Runtime, "runtime", "", "local spoond-runtime tarball")
+	fs.StringVar(&opt.Images, "images", install.ImagesMinimal, "image catalog: minimal, all or none")
+	fs.StringVar(&opt.BaseRegistry, "base-registry", "", "registry prefix to pull base images from")
+	fs.StringVar(&opt.RunnerURL, "runner-url", "", "Forgejo URL to register an Actions runner with")
+	fs.StringVar(&opt.RunnerTokenFile, "runner-token-file", "", "file holding the runner registration token")
+	fs.BoolVar(&opt.Container, "container", false, "run from inside the Docker image")
+	fs.BoolVar(&opt.ConfigOnly, "config-only", false, "with --container: write config, start nothing")
 	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if err := opt.Validate(); err != nil {
+		fmt.Fprintf(os.Stderr, "spoond install: %v\n", err)
 		return 2
 	}
 	if fs.NArg() > 1 {
@@ -84,6 +117,7 @@ func installMain(args []string) int {
 		Run:    install.Cmd{},
 		Out:    os.Stdout,
 		DryRun: *dryRun,
+		Opt:    opt,
 	}
 	items, err := install.RunAll(ctx, env, names...)
 	if err != nil {

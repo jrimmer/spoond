@@ -45,16 +45,21 @@ func errNotYet() error {
 // Order is the phase table in run order.
 var Order = []string{PhaseCheck, PhaseHost, PhaseRuntime, PhaseSpoond, PhaseImages, PhaseDoctor}
 
-// Phases maps a phase name to its implementation. Phase rows not yet
-// written return errNotYet so later slices fill them one by one.
+// Phases maps a phase name to its implementation. Every row starts as
+// a placeholder returning errNotYet; each phase's own file replaces its
+// row from an init function (check.go: Phases[PhaseCheck] = checkPhase),
+// so the phases land independently without touching this table.
 var Phases = map[string]Phase{
-	PhaseCheck:   checkPhase,
-	PhaseHost:    func(ctx context.Context, env *Env) ([]Item, error) { return nil, errNotYet() },
-	PhaseRuntime: func(ctx context.Context, env *Env) ([]Item, error) { return nil, errNotYet() },
-	PhaseSpoond:  func(ctx context.Context, env *Env) ([]Item, error) { return nil, errNotYet() },
-	PhaseImages:  func(ctx context.Context, env *Env) ([]Item, error) { return nil, errNotYet() },
-	PhaseDoctor:  func(ctx context.Context, env *Env) ([]Item, error) { return nil, errNotYet() },
+	PhaseCheck:   notYet,
+	PhaseHost:    notYet,
+	PhaseRuntime: notYet,
+	PhaseSpoond:  notYet,
+	PhaseImages:  notYet,
+	PhaseDoctor:  notYet,
 }
+
+// notYet is the placeholder phase.
+func notYet(ctx context.Context, env *Env) ([]Item, error) { return nil, errNotYet() }
 
 // RunAll runs the named phases in table order and stops at the first
 // failure; with no names it runs every phase. It returns the rows of
