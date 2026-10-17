@@ -89,7 +89,8 @@ func spoondTLS(env *Env, r *Reporter, dd hostDefaults) (tlsPair, error) {
 // makeSelfSigned generates the ECDSA P-256 pair and writes cert.pem
 // (0644) and privkey.pem (0600) through the file helpers; the rows go
 // to the phase's reporter.
-func makeSelfSigned(env *Env, r *Reporter, dd hostDefaults) error {	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+func makeSelfSigned(env *Env, r *Reporter, dd hostDefaults) error {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return fmt.Errorf("generating the TLS key: %w", err)
 	}
