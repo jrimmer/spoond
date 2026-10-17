@@ -71,6 +71,13 @@ const runtimeHTTPTimeout = 5 * time.Minute
 // artifact locally and passes it.
 const devBuildHint = "development build: pass --runtime spoond-runtime_<v>_linux_amd64.tar.gz (deploy/release/build-runtime.sh builds one)"
 
+// The skipped rows' notes in container mode: the image brings the
+// artifacts, the orchestrator container runs what systemd would.
+const (
+	containerImageNote = "--container: the Docker image brings it"
+	containerRunsNote  = "--container: the orchestrator container runs it"
+)
+
 // Fetcher downloads a URL's bytes whole: the runtime tarball, its
 // SHA256SUMS and the pinned artifacts. Production is httpFetcher
 // (net/http with a timeout); a test stubs runtimeState.Fetch so no
@@ -226,6 +233,18 @@ func init() { Phases[PhaseRuntime] = runtimePhase }
 func (p *runtimeState) run(ctx context.Context, env *Env) ([]Item, error) {
 	r := &Reporter{Phase: PhaseRuntime, Out: env.Out}
 
+	// --container: the Docker image already holds the orchestrator,
+	// envd, Firecracker, the kernel and busybox, and the orchestrator
+	// container loads the e2b-guard rules and runs without systemd.
+	// The phase writes config only (step 2) and skips the rest, one
+	// row per skipped group.
+	if env.Opt.Container {
+		if err := p.runContainer(r, env); err != nil {
+			return r.Items(), err
+		}
+		return r.Items(), nil
+	}
+
 	if err := p.installBinaries(r, ctx, env); err != nil {
 		return r.Items(), err
 	}
@@ -255,6 +274,37 @@ func (p *runtimeState) run(ctx context.Context, env *Env) ([]Item, error) {
 	// The rows land in r before Items() is read, so none is lost.
 	err := p.orchestration(r, ctx, env)
 	return r.Items(), err
+}
+
+// runContainer is run's --container shape: the four files the
+// orchestrator container reads, written exactly as the native run's
+// steps write them, and one skipped row per group the image already
+// brings or the container itself runs. It fetches nothing and runs no
+// command: the binaries, the pinned artifacts and /fc-vm live in the
+// image, and systemd (the units, the guard unit, restart and the
+// health wait) does not exist under compose.
+func (p *runtimeState) runContainer(r *Reporter, env *Env) error {
+	for _, c := range operatorConfigs() {
+		if err := installOperatorConfig(r, env, c); err != nil {
+			return err
+		}
+	}
+	if err := installSeed(r, env); err != nil {
+		return err
+	}
+	if err := installGuardRules(r, env); err != nil {
+		return err
+	}
+	r.Add(Skipped, orchestratorBinPath, containerImageNote)
+	for _, art := range pinned {
+		r.Add(Skipped, art.path, containerImageNote)
+	}
+	r.Add(Skipped, fcVMPath, containerImageNote)
+	r.Add(Skipped, guardUnitPath+" (unit)", containerRunsNote)
+	r.Add(Skipped, orchestratorUnitPath, containerRunsNote)
+	r.Add(Skipped, "systemctl", containerRunsNote)
+	r.Add(Skipped, "orchestrator /health", containerRunsNote)
+	return nil
 }
 
 // fetch runs the phase's fetcher (production or test fake).
