@@ -1,10 +1,10 @@
 // Tests for the `spoond install` CLI (install.go): registration, flag
 // parsing and exit codes (0 success, 1 phase failure, 2 argument
-// error), the phase argument (one named, all by default), --dry-run
-// and --root pass-through into the Env, and that a phase failure still
-// prints the counts line. The check phase runs against a fake host
-// tree so the CLI tests never touch the real host; the other phases
-// are stubbed.
+// error), the phase argument (one named, the whole table by default),
+// --dry-run and --root pass-through into the Env, and that a phase
+// failure still prints the counts line. The phase table is stubbed for
+// every run, so the CLI tests never touch the real host; the check
+// phase's own matrix lives in install/check_test.go.
 package main
 
 import (
@@ -12,7 +12,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -51,37 +50,25 @@ func stdoutPipe(t *testing.T) func() string {
 	}
 }
 
-// fakeProber answers the port probe from a table: a port in the map
-// is busy, anything else is free; see install/check_test.go.
-type fakeProber struct{ busy map[string]bool }
-
-func (f fakeProber) ListenOK(port string) (bool, error) {
-	return !f.busy[port], nil
-}
-
-// fakeSpacer answers the free-space probe with a fixed byte count; see
-// install/check_test.go.
-type fakeSpacer struct{ free uint64 }
-
-func (f fakeSpacer) FreeBytes(string) (uint64, error) { return f.free, nil }
-
-// seedFakeHost writes the files the check phase reads under root, for
-// a passing host; see install/check_test.go for the full matrix.
-func seedFakeHost(t *testing.T, root string) {
+// stubTable replaces every phase in the table with a recorder that
+// appends its name and stops, so a CLI run touches no host. It
+// restores the table when the test ends.
+func stubTable(t *testing.T, order *[]string) {
 	t.Helper()
-	write := func(rel, content string) {
-		path := filepath.Join(root, rel)
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-			t.Fatal(err)
+	old := install.Phases
+	restored := map[string]install.Phase{}
+	for _, name := range install.Order {
+		restored[name] = old[name]
+	}
+	t.Cleanup(func() { install.Phases = old })
+	install.Phases = map[string]install.Phase{}
+	for _, name := range install.Order {
+		n := name
+		install.Phases[name] = func(ctx context.Context, env *install.Env) ([]install.Item, error) {
+			*order = append(*order, n)
+			return nil, nil
 		}
 	}
-	write("etc/os-release", "ID=debian\nVERSION_ID=13\n")
-	write("proc/meminfo", "MemTotal:       134217728 kB\n") // 128 GiB
-	write("proc/sys/kernel/osrelease", "6.1.0-13-amd64\n")
-	write("dev/kvm", "")
 }
 
 // withPhase swaps one entry of the phases table for fn and restores it
@@ -114,15 +101,46 @@ func TestCLIRegistered(t *testing.T) {
 	}
 }
 
-// TestCLIUsageBare: no arguments print the usage and exit 2.
-func TestCLIUsageBare(t *testing.T) {
-	// installMain with no args must print usage and stop; the bare
-	// parse must not fall through to running phases on the real host.
-	restore := install.TestProbes(fakeProber{}, fakeSpacer{free: 200 << 30})
-	defer restore()
-	code := installMain([]string{})
-	if code != 2 {
-		t.Errorf("bare install: exit %d, want 2 (usage)", code)
+// TestCLIRunsAllByDefault: no phase argument runs every phase in table
+// order — the usage says "runs every phase", and the plan's "`spoond
+// install` runs all phases in order" is this path.
+func TestCLIRunsAllByDefault(t *testing.T) {
+	var order []string
+	stubTable(t, &order)
+	out := stdoutPipe(t)
+	code := installMain([]string{"--dry-run", "--root", t.TempDir()})
+	if code != 0 {
+		t.Fatalf("bare install: exit %d", code)
+	}
+	var named []string
+	for _, name := range install.Order {
+		named = append(named, name)
+	}
+	if strings.Join(order, ",") != strings.Join(named, ",") {
+		t.Errorf("phases ran %v, want the table %v in order", order, named)
+	}
+	if text := out(); !strings.Contains(text, "spoond install dry run; nothing written, no command run: ") {
+		t.Errorf("the counts line is missing:\n%s", text)
+	}
+}
+
+// TestCLIUsageHelp: help, -h and --help print the usage and exit 0;
+// a flag or parse error points at it and exits 2.
+func TestCLIUsageHelp(t *testing.T) {
+	os.Stderr = os.NewFile(0, os.DevNull) // not captured; usage is not asserted here
+	t.Cleanup(func() {})
+	for _, args := range [][]string{{"help"}, {"-h"}, {"--help"}} {
+		if code := installMain(args); code != 0 {
+			t.Errorf("install %v: exit %d, want 0", args, code)
+		}
+	}
+	var order []string
+	stubTable(t, &order)
+	if code := installMain([]string{"--nope", "--root", t.TempDir()}); code != 2 {
+		t.Errorf("unknown flag: exit %d, want 2", code)
+	}
+	if len(order) != 0 {
+		t.Errorf("a parse error must not run phases (%v)", order)
 	}
 }
 
@@ -143,63 +161,17 @@ func TestCLITooManyPhases(t *testing.T) {
 	}
 }
 
-// TestCLIRunsOnePhase: only the named phase runs — the stubbed host
-// phase records itself when called, and is silent when only check was
-// asked for.
+// TestCLIRunsOnePhase: only the named phase runs — the recorder stops
+// every stub, and the other phases stay silent.
 func TestCLIRunsOnePhase(t *testing.T) {
-	root := t.TempDir()
-	seedFakeHost(t, root)
-	ran := ""
-	withPhase(t, "host", func(ctx context.Context, env *install.Env) ([]install.Item, error) {
-		ran = "host"
-		return nil, nil
-	})
-	// The real check's port and space probes read the test host; the
-	// CLI passes its own unswapped Env. Point them at the fakes the
-	// install package exposes to tests.
-	restore := install.TestProbes(fakeProber{}, fakeSpacer{free: 200 << 30})
-	defer restore()
-	code := installMain([]string{"--root", root, "check"})
-	if code != 0 {
-		t.Fatalf("check on a good host: exit %d", code)
-	}
-	if ran != "" {
-		t.Error("the host phase ran when only check was named")
-	}
-}
-
-// TestCLIRunsAllByDefault: no phase argument runs every phase in
-// table order; the stubbed host notes itself between check and the
-// unimplemented runtime.
-func TestCLIRunsAllByDefault(t *testing.T) {
-	root := t.TempDir()
-	seedFakeHost(t, root)
 	var order []string
-	withPhase(t, "host", func(ctx context.Context, env *install.Env) ([]install.Item, error) {
-		order = append(order, "host")
-		return nil, nil
-	})
-	// The four phases after check are placeholder rows in this slice;
-	// patch them so the whole table can run (check would fail through
-	// the real probes otherwise).
-	for _, name := range []string{"runtime", "spoond", "images", "doctor"} {
-		withPhase(t, name, func(ctx context.Context, env *install.Env) ([]install.Item, error) {
-			order = append(order, "patched")
-			return nil, nil
-		})
-	}
-	restore := install.TestProbes(fakeProber{}, fakeSpacer{free: 200 << 30})
-	defer restore()
-	out := stdoutPipe(t)
-	code := installMain([]string{"--root", root})
+	stubTable(t, &order)
+	code := installMain([]string{"--root", t.TempDir(), "host"})
 	if code != 0 {
-		t.Fatalf("all phases: exit %d", code)
+		t.Fatalf("host: exit %d", code)
 	}
-	if len(order) != 5 {
-		t.Errorf("phases after check = %v, want host once and the 4 stubs", order)
-	}
-	if text := out(); !strings.Contains(text, "spoond install done: ") {
-		t.Errorf("the counts line is missing:\n%s", text)
+	if strings.Join(order, ",") != "host" {
+		t.Errorf("phases ran %v, want [host]", order)
 	}
 }
 
@@ -208,25 +180,22 @@ func TestCLIRunsAllByDefault(t *testing.T) {
 // went through.
 func TestCLIFailureExitAndSummary(t *testing.T) {
 	root := t.TempDir()
-	ran := ""
+	var order []string
+	stubTable(t, &order)
 	withPhase(t, "check", func(ctx context.Context, env *install.Env) ([]install.Item, error) {
 		r := &install.Reporter{Phase: "check", Out: env.Out}
 		r.Add(install.Created, "/etc/spoond/one", "")
 		r.Add(install.Failed, "the-wall", "tear down the wall first")
-		ran = "check"
-		return r.Items(), errors.New("check: the-wall: tear down the wall first")
-	})
-	withPhase(t, "host", func(ctx context.Context, env *install.Env) ([]install.Item, error) {
-		ran += "+host"
-		return nil, nil
+		order = append(order, "real-check")
+		return r.Items(), errors.New("the-wall: tear down the wall first")
 	})
 	out := stdoutPipe(t)
 	code := installMain([]string{"--dry-run", "--root", root, "check"})
 	if code != 1 {
 		t.Errorf("failing phase: exit %d, want 1", code)
 	}
-	if ran != "check" {
-		t.Errorf("the later phases ran after the failure (%q)", ran)
+	if strings.Join(order, ",") != "real-check" {
+		t.Errorf("the later phases ran after the failure (%q)", order)
 	}
 	text := out()
 	if !strings.Contains(text, "1 created, 0 changed, 0 kept, 0 skipped, 1 failed") {
@@ -241,16 +210,21 @@ func TestCLIFailureExitAndSummary(t *testing.T) {
 // the summary says nothing was written.
 func TestCLIDryRunPassesThrough(t *testing.T) {
 	root := t.TempDir()
-	seedFakeHost(t, root)
+	var order []string
+	stubTable(t, &order)
 	var dry bool
 	withPhase(t, "doctor", func(ctx context.Context, env *install.Env) ([]install.Item, error) {
 		dry = env.DryRun
+		order = append(order, "real-doctor")
 		return nil, nil
 	})
 	out := stdoutPipe(t)
 	code := installMain([]string{"--root", root, "--dry-run", "doctor"})
 	if code != 0 {
 		t.Fatalf("dry-run doctor: exit %d", code)
+	}
+	if strings.Join(order, ",") != "real-doctor" {
+		t.Errorf("phases ran %q, want only doctor", order)
 	}
 	if !dry {
 		t.Error("the phase saw DryRun=false under --dry-run")
@@ -263,6 +237,8 @@ func TestCLIDryRunPassesThrough(t *testing.T) {
 // TestCLIRootPassesThrough: --root is the Env's Root.
 func TestCLIRootPassesThrough(t *testing.T) {
 	root := t.TempDir()
+	var order []string
+	stubTable(t, &order)
 	var seen string
 	withPhase(t, "doctor", func(ctx context.Context, env *install.Env) ([]install.Item, error) {
 		seen = env.Root
@@ -271,24 +247,5 @@ func TestCLIRootPassesThrough(t *testing.T) {
 	installMain([]string{"--root", root, "doctor"})
 	if seen != root {
 		t.Errorf("phase saw Root=%q, want the --root value %q", seen, root)
-	}
-}
-
-// TestCLIRealCheckRunsAgainstRoot: the real check phase through the
-// CLI over a seeded temp root. The file readings are real; the port
-// and space probes hit the test host, so they are swapped through
-// install's test hook, the same one install/check_test.go uses.
-func TestCLIRealCheckRunsAgainstRoot(t *testing.T) {
-	root := t.TempDir()
-	seedFakeHost(t, root)
-	restore := install.TestProbes(fakeProber{}, fakeSpacer{free: 200 << 30})
-	defer restore()
-	out := stdoutPipe(t)
-	code := installMain([]string{"--root", root, "check"})
-	if code != 0 {
-		t.Errorf("check over a good seeded host: exit %d", code)
-	}
-	if !strings.Contains(out(), "kept     /dev/kvm") {
-		t.Errorf("the report should show the real phase's rows:\n%s", out())
 	}
 }

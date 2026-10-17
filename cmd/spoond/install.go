@@ -39,7 +39,6 @@ const installUsage = `usage: spoond install [--dry-run] [phase]
   Flags:
 
       --dry-run  print what would change, run no command, write nothing
-      --root DIR write under DIR instead of / (tests; production omits it)
 
   A run that fails is safe to rerun: every phase reports each item as
   created, changed or kept, and a secret or env file that exists is
@@ -47,20 +46,20 @@ const installUsage = `usage: spoond install [--dry-run] [phase]
 `
 
 // installMain is the `spoond install` entry point: parse flags, build
-// the Env (a temp-rooted run for tests and --root; the host for real
-// runs), run all phases or the one named, exit non-zero on failure.
+// the Env (the host in production, Root for the documented test path),
+// run all phases or the one named, and exit non-zero on failure. With
+// no phase argument the whole table runs in order.
 func installMain(args []string) int {
-	if len(args) == 0 || args[0] == "help" || args[0] == "-h" || args[0] == "--help" {
-		fmt.Fprint(os.Stderr, installUsage)
-		if len(args) == 0 {
-			return 2
+	for _, a := range args {
+		if a == "help" || a == "-h" || a == "--help" {
+			fmt.Fprint(os.Stderr, installUsage)
+			return 0
 		}
-		return 0
 	}
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, installUsage) }
 	dryRun := fs.Bool("dry-run", false, "show what would change, write nothing, run no command")
-	root := fs.String("root", "/", "write under DIR instead of / (tests)")
+	root := fs.String("root", "/", "write under DIR instead of /")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -88,14 +87,13 @@ func installMain(args []string) int {
 	}
 	items, err := install.RunAll(ctx, env, names...)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "spoond install: %v\n", err)
 		if errors.Is(err, install.ErrBadPhase) {
-			fmt.Fprintf(os.Stderr, "spoond install: %v\n", err)
 			fs.Usage()
 			return 2
 		}
-		fmt.Fprintf(os.Stderr, "spoond install: %v\n", err)
 		// A phase failure already printed its failed row and the fix;
-		// the summary line under it says what went through first.
+		// the counts line under it says what went through first.
 		summarize(items, *dryRun)
 		return 1
 	}
