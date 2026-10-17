@@ -327,3 +327,203 @@ func TestStoreStepSecondRunKeepsAll(t *testing.T) {
 		}
 	}
 }
+
+// dockerReplies loads the runner answers a docker run needs: the
+// registry inspect (running or not) plus the changing commands so a
+// successful run does not trip the runner's unknown-command error.
+func dockerReplies(registryRunning bool) map[string]fakeReply {
+	reply := map[string]fakeReply{
+		"systemctl daemon-reload":       {},
+		"systemctl enable --now docker": {},
+	}
+	if registryRunning {
+		reply["docker inspect -f {{.State.Running}} spoond-registry"] = fakeReply{out: []byte("true\n")}
+	}
+	reply["docker run -d --name spoond-registry --restart=always -p 127.0.0.1:5000:5000 -v /forkdcache/e2b/registry:/var/lib/registry registry:2.8.3"] = fakeReply{out: []byte("sha256:deadbeef\n")}
+	return reply
+}
+
+func runDocker(t *testing.T, env *Env) ([]Item, error) {
+	t.Helper()
+	r := &Reporter{Phase: PhaseHost}
+	err := dockerStep(context.Background(), env, r, &hostState{})
+	return r.Items(), err
+}
+
+func TestDockerDropinWithoutStoreDisk(t *testing.T) {
+	env, runner := storeEnv(t)
+	runner.reply = dockerReplies(false)
+
+	items, err := runDocker(t, env)
+	if err != nil {
+		t.Fatalf("docker step: %v", err)
+	}
+	b, mode := read(t, env, dockerDropin)
+	want := "[Unit]\nRequiresMountsFor=/forkdcache/e2b\n"
+	if string(b) != want {
+		t.Errorf("drop-in = %q, want %q", b, want)
+	}
+	if mode != 0o644 {
+		t.Errorf("drop-in mode = %#o, want 0644", mode)
+	}
+	// No zfs-mount.service line without --store-disk.
+	if strings.Contains(string(b), "zfs-mount") {
+		t.Errorf("drop-in names zfs-mount.service without --store-disk: %q", b)
+	}
+	// The drop-in was new, so daemon-reload ran.
+	sawReload := false
+	for _, call := range runner.calls {
+		if call == "systemctl daemon-reload" {
+			sawReload = true
+		}
+	}
+	if !sawReload {
+		t.Errorf("calls have no daemon-reload after a new drop-in:\n%s", strings.Join(runner.calls, "\n"))
+	}
+	_ = items
+}
+
+func TestDockerDropinWithStoreDisk(t *testing.T) {
+	env, runner := storeEnv(t)
+	env.Opt.StoreDisk = "/dev/sdb"
+	runner.reply = dockerReplies(false)
+
+	if _, err := runDocker(t, env); err != nil {
+		t.Fatalf("docker step: %v", err)
+	}
+	b, _ := read(t, env, dockerDropin)
+	want := "[Unit]\nRequiresMountsFor=/forkdcache/e2b\nAfter=zfs-mount.service\n"
+	if string(b) != want {
+		t.Errorf("drop-in = %q, want %q", b, want)
+	}
+}
+
+func TestDockerReloadOnlyWhenChanged(t *testing.T) {
+	env, runner := storeEnv(t)
+	runner.reply = dockerReplies(false)
+	if _, err := runDocker(t, env); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	// Second run: the drop-in is identical, no daemon-reload.
+	runner.calls = nil
+	if _, err := runDocker(t, env); err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	for _, call := range runner.calls {
+		if call == "systemctl daemon-reload" {
+			t.Errorf("second run reloaded the daemon although the drop-in is unchanged")
+		}
+	}
+
+	// A changed drop-in reloads again. The registry inspect answers
+	// running this time, so the store-dir change is the only delta.
+	env.Opt.StoreDir = "/other/store"
+	runner.reply = dockerReplies(true)
+	runner.calls = nil
+	if _, err := runDocker(t, env); err != nil {
+		t.Fatalf("changed run: %v", err)
+	}
+	sawReload := false
+	for _, call := range runner.calls {
+		if call == "systemctl daemon-reload" {
+			sawReload = true
+		}
+	}
+	if !sawReload {
+		t.Errorf("a changed drop-in did not reload the daemon:\n%s", strings.Join(runner.calls, "\n"))
+	}
+}
+
+func TestDockerRegistry(t *testing.T) {
+	t.Run("running is kept", func(t *testing.T) {
+		env, runner := storeEnv(t)
+		runner.reply = dockerReplies(true)
+		items, err := runDocker(t, env)
+		if err != nil {
+			t.Fatalf("docker step: %v", err)
+		}
+		it := storeRow(t, items, "registry spoond-registry")
+		if it.Result != Kept {
+			t.Errorf("registry row = %+v, want kept", it)
+		}
+		for _, call := range runner.calls {
+			if strings.Contains(call, "docker run") {
+				t.Errorf("docker run executed although the registry runs: %s", call)
+			}
+		}
+	})
+	t.Run("missing runs the registry", func(t *testing.T) {
+		env, runner := storeEnv(t)
+		runner.reply = dockerReplies(false)
+		items, err := runDocker(t, env)
+		if err != nil {
+			t.Fatalf("docker step: %v", err)
+		}
+		it := storeRow(t, items, "registry spoond-registry")
+		if it.Result != Created {
+			t.Errorf("registry row = %+v, want created", it)
+		}
+		want := "docker run -d --name spoond-registry --restart=always -p 127.0.0.1:5000:5000 -v /forkdcache/e2b/registry:/var/lib/registry registry:2.8.3"
+		saw := false
+		for _, call := range runner.calls {
+			if call == want {
+				saw = true
+			}
+		}
+		if !saw {
+			t.Errorf("calls have the registry line:\n%s", strings.Join(runner.calls, "\n"))
+		}
+	})
+}
+
+func TestDockerStepSecondRunKeepsAll(t *testing.T) {
+	env, runner := storeEnv(t)
+	runner.reply = dockerReplies(false)
+	if _, err := runDocker(t, env); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	// Second run: the registry container now exists, so the inspect
+	// answers true and nothing changes.
+	runner.reply = dockerReplies(true)
+	runner.calls = nil
+	items, err := runDocker(t, env)
+	if err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	for _, it := range items {
+		if it.Result == Created || it.Result == Changed {
+			t.Errorf("second run row %+v, want kept or skipped", it)
+		}
+	}
+	for _, call := range runner.calls {
+		if call == "systemctl daemon-reload" {
+			t.Errorf("second run reloaded the daemon")
+		}
+		if strings.Contains(call, "docker run") {
+			t.Errorf("second run re-ran the registry: %s", call)
+		}
+	}
+}
+
+func TestDockerDryRunWritesNothingQueriesOnly(t *testing.T) {
+	env, runner := storeEnv(t)
+	env.DryRun = true
+	runner.reply = dockerReplies(false)
+
+	items, err := runDocker(t, env)
+	if err != nil {
+		t.Fatalf("docker dry run: %v", err)
+	}
+	mustNotExist(t, env, dockerDropin)
+	if it := storeRow(t, items, dockerDropin); it.Result != Created {
+		t.Errorf("drop-in row = %+v, want created (the plan still shows it)", it)
+	}
+	for _, call := range runner.calls {
+		switch {
+		case call == "docker inspect -f {{.State.Running}} spoond-registry":
+			// query: runs in a dry run.
+		default:
+			t.Errorf("dry run ran a changing command: %s", call)
+		}
+	}
+}

@@ -15,6 +15,7 @@ import (
 
 func init() {
 	hostSteps["store"] = storeStep
+	hostSteps["docker"] = dockerStep
 }
 
 // The pool and dataset the store step manages; the pool mounts at
@@ -203,4 +204,73 @@ func dryRunNote(env *Env, note string) string {
 		return "dry-run: nothing run"
 	}
 	return note
+}
+
+// dockerDropin is the systemd drop-in path ordering Docker after the
+// store mount, so the registry's volume exists before Docker starts.
+const dockerDropin = "/etc/systemd/system/docker.service.d/10-forkdcache.conf"
+
+// registryContainer is the local registry container the docker step
+// keeps running: image builds push to 127.0.0.1:5000 and pulls stay
+// off the internet.
+const registryContainer = "spoond-registry"
+
+// dockerStep writes Docker's drop-in (RequiresMountsFor the store
+// dir, After=zfs-mount.service with --store-disk), reloads the daemon
+// only when the drop-in changed, enables and starts Docker, and brings
+// up the local registry container unless it already runs.
+func dockerStep(ctx context.Context, env *Env, r *Reporter, st *hostState) error {
+	dir := env.Opt.storeDir()
+	var b strings.Builder
+	b.WriteString("[Unit]\n")
+	b.WriteString("RequiresMountsFor=" + dir + "\n")
+	if env.Opt.StoreDisk != "" {
+		b.WriteString("After=zfs-mount.service\n")
+	}
+	if err := env.writeFile(r, dockerDropin, []byte(b.String()), 0o644); err != nil {
+		return err
+	}
+	// The daemon reloads only when this run changed the drop-in: a
+	// created or changed row is the signal writeFile left, a kept or
+	// dry-run row leaves systemd alone.
+	reloaded := false
+	for _, it := range r.Items() {
+		if it.Name == dockerDropin && (it.Result == Created || it.Result == Changed) {
+			reloaded = true
+		}
+	}
+	if reloaded && !env.DryRun {
+		if err := env.exec(ctx, "systemctl", "daemon-reload"); err != nil {
+			note := fmt.Sprintf("systemctl daemon-reload failed — run it by hand so the drop-in takes effect: %v", err)
+			r.Add(Failed, "systemd daemon-reload", note)
+			return errors.New(note)
+		}
+		r.Add(Changed, "systemd daemon-reload", "drop-in "+dockerDropin)
+	} else {
+		r.Add(Kept, "systemd daemon-reload", "drop-in unchanged")
+	}
+
+	if err := env.exec(ctx, "systemctl", "enable", "--now", "docker"); err != nil {
+		note := fmt.Sprintf("systemctl enable --now docker failed — install Docker (apt install docker.io) and check `systemctl status docker`: %v", err)
+		r.Add(Failed, "docker service", note)
+		return errors.New(note)
+	}
+	r.Add(Kept, "docker service", "enabled and running (systemctl enable --now docker)")
+
+	out, err := env.query(ctx, "docker", "inspect", "-f", "{{.State.Running}}", registryContainer)
+	if err == nil && strings.TrimSpace(string(out)) == "true" {
+		r.Add(Kept, "registry "+registryContainer, "container is running")
+		return nil
+	}
+	runArgs := []string{"run", "-d", "--name", registryContainer, "--restart=always",
+		"-p", "127.0.0.1:5000:5000",
+		"-v", dir + "/registry:/var/lib/registry",
+		"registry:2.8.3"}
+	if err := env.exec(ctx, "docker", runArgs...); err != nil {
+		note := fmt.Sprintf("docker run %s failed — check `docker logs %s` and that %s/registry exists: %v", registryContainer, registryContainer, dir, err)
+		r.Add(Failed, "registry "+registryContainer, note)
+		return errors.New(note)
+	}
+	r.Add(Created, "registry "+registryContainer, dryRunNote(env, "registry:2.8.3 on 127.0.0.1:5000, data in "+dir+"/registry"))
+	return nil
 }
