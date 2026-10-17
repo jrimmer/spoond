@@ -35,9 +35,11 @@ var ErrBadPhase = errors.New("unknown phase")
 // root; tests are unaffected (they set a temp Root).
 var ErrNotRoot = errors.New("spoond install must run as root (it writes /etc, /opt, /lib and /var/lib)")
 
-// errNotYet is the placeholder the unimplemented phases return.
-func errNotYet(name string) error {
-	return fmt.Errorf("%s: %w (4.0 install slice pending)", name, ErrNotImplemented)
+// errNotYet is the placeholder the unimplemented phases return:
+// the fix for the operator (this phase is not in this slice yet),
+// without the phase-name prefix RunPhase adds on top.
+func errNotYet() error {
+	return fmt.Errorf("%w (4.0 install slice pending)", ErrNotImplemented)
 }
 
 // Order is the phase table in run order.
@@ -47,11 +49,11 @@ var Order = []string{PhaseCheck, PhaseHost, PhaseRuntime, PhaseSpoond, PhaseImag
 // written return errNotYet so later slices fill them one by one.
 var Phases = map[string]Phase{
 	PhaseCheck:   checkPhase,
-	PhaseHost:    func(ctx context.Context, env *Env) ([]Item, error) { return nil, errNotYet(PhaseHost) },
-	PhaseRuntime: func(ctx context.Context, env *Env) ([]Item, error) { return nil, errNotYet(PhaseRuntime) },
-	PhaseSpoond:  func(ctx context.Context, env *Env) ([]Item, error) { return nil, errNotYet(PhaseSpoond) },
-	PhaseImages:  func(ctx context.Context, env *Env) ([]Item, error) { return nil, errNotYet(PhaseImages) },
-	PhaseDoctor:  func(ctx context.Context, env *Env) ([]Item, error) { return nil, errNotYet(PhaseDoctor) },
+	PhaseHost:    func(ctx context.Context, env *Env) ([]Item, error) { return nil, errNotYet() },
+	PhaseRuntime: func(ctx context.Context, env *Env) ([]Item, error) { return nil, errNotYet() },
+	PhaseSpoond:  func(ctx context.Context, env *Env) ([]Item, error) { return nil, errNotYet() },
+	PhaseImages:  func(ctx context.Context, env *Env) ([]Item, error) { return nil, errNotYet() },
+	PhaseDoctor:  func(ctx context.Context, env *Env) ([]Item, error) { return nil, errNotYet() },
 }
 
 // RunAll runs the named phases in table order and stops at the first
