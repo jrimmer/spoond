@@ -552,6 +552,18 @@ func TestSetGrubHugepagesTable(t *testing.T) {
 			out:     "GRUB_TIMEOUT=5\nGRUB_CMDLINE_LINUX_DEFAULT=\"quiet hugepages=5120\"\nGRUB_CMDLINE_LINUX=\"\"",
 			changed: true,
 		},
+		{
+			name:    "unquoted value",
+			in:      "GRUB_CMDLINE_LINUX_DEFAULT=quiet\n",
+			out:     `GRUB_CMDLINE_LINUX_DEFAULT="quiet hugepages=5120"` + "\n",
+			changed: true,
+		},
+		{
+			name:    "no line: one is added",
+			in:      "GRUB_TIMEOUT=5\n",
+			out:     "GRUB_TIMEOUT=5\n" + `GRUB_CMDLINE_LINUX_DEFAULT="hugepages=5120"` + "\n",
+			changed: true,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

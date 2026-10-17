@@ -98,8 +98,6 @@ func aptNoCandidate(out []byte) bool {
 	return true
 }
 
-func init() { hostSteps["modules"] = hostModules }
-
 // modulesConf loads nbd, tun and kvm at boot; nbdConf carries nbd's
 // sizes (the module parameter only applies at load time, so it must
 // not rely on the boot-time load order).
@@ -108,12 +106,8 @@ const (
 	nbdConf     = "options nbd nbds_max=256 max_part=16\n"
 )
 
-// wantNbdsMax is the device count the leases need; wantNbdMaxPart is
-// the partitions per device.
-const (
-	wantNbdsMax    = 256
-	wantNbdMaxPart = 16
-)
+// wantNbdsMax is the device count the leases need.
+const wantNbdsMax = 256
 
 // nbdParamPath is the running module's parameter; tunModulePath is
 // the loaded-module marker. The checks decide whether a modprobe is
@@ -206,8 +200,6 @@ func nbdLoaded(env *Env) (int, error) {
 	return got, nil
 }
 
-func init() { hostSteps["udev"] = hostUdev }
-
 // nbdUdevRule gives every nbd device to group disk, mode 0660, so the
 // leases' users can open them; host-setup.sh ships the same rule.
 const nbdUdevRule = `KERNEL=="nbd*", GROUP="disk", MODE="0660"
@@ -221,8 +213,6 @@ func hostUdev(ctx context.Context, env *Env, r *Reporter, st *hostState) error {
 	return env.writeFile(r, "/etc/udev/rules.d/97-nbd-device.rules", []byte(nbdUdevRule), 0o644)
 }
 
-func init() { hostSteps["hugepages"] = hostHugepages }
-
 // Hugepage sizing: 2 MiB pages, and the host keeps max(6 GiB, 17% of
 // MemTotal); pages = what is left over 2 MiB, rounded down. 6 GiB in
 // 2 MiB pages is 3072, the floor below which leases do not fit.
@@ -235,8 +225,8 @@ const (
 // rounded down; the error carries the total when the host is too small.
 func hugepagesFor(memTotalBytes int64) (int, error) {
 	keep := memTotalBytes * 17 / 100
-	if min := int64(6) << 30; keep < min {
-		keep = min
+	if floor := int64(6) << 30; keep < floor {
+		keep = floor
 	}
 	left := memTotalBytes - keep
 	if left < int64(hugepagesFloor)*hugepageSize {
@@ -376,44 +366,53 @@ func hugepagesTotal(env *Env) (int, error) {
 // (or appended, or dropped at 0), every other token and every other
 // line stays. changed reports whether the body differs.
 func setGrubHugepages(body string, pages int) (out string, changed bool) {
-	token := hugepagesToken + strconv.Itoa(pages)
+	const key = "GRUB_CMDLINE_LINUX_DEFAULT="
 	lines := strings.Split(body, "\n")
+	found := false
 	for i, line := range lines {
 		trimmed := strings.TrimLeft(line, " \t")
-		if !strings.HasPrefix(trimmed, "GRUB_CMDLINE_LINUX_DEFAULT=") {
+		if !strings.HasPrefix(trimmed, key) {
 			continue
 		}
-		// The value is one quoted shell word; the tokens are its
-		// space-separated fields.
-		open := strings.Index(line, "\"")
-		close := strings.LastIndex(line, "\"")
-		if open < 0 || close <= open {
-			continue // unquoted or malformed: leave the line alone
+		found = true
+		// The value is normally one quoted shell word; an unquoted
+		// value is taken as it is and written back quoted.
+		indent := line[:len(line)-len(trimmed)]
+		inner := strings.TrimPrefix(trimmed, key)
+		if q1, q2 := strings.Index(inner, "\""), strings.LastIndex(inner, "\""); q1 >= 0 && q2 > q1 {
+			inner = inner[q1+1 : q2]
 		}
-		prefix, suffix := line[:open+1], line[close:]
-		inner := line[open+1 : close]
-		var toks []string
-		for _, f := range strings.Fields(inner) {
-			if strings.HasPrefix(f, hugepagesToken) {
-				continue
-			}
-			toks = append(toks, f)
-		}
-		if pages > 0 {
-			toks = append(toks, token)
-		}
-		newline := prefix + strings.Join(toks, " ") + suffix
-		if newline != line {
-			lines[i] = newline
-		}
+		lines[i] = indent + key + "\"" + grubTokens(inner, pages) + "\""
 		// Grub files carry one such line.
 		break
+	}
+	if !found && pages > 0 {
+		// No line at all: add one, before a trailing empty line.
+		add := key + "\"" + grubTokens("", pages) + "\""
+		if n := len(lines); n > 0 && lines[n-1] == "" {
+			lines = append(lines[:n-1], add, "")
+		} else {
+			lines = append(lines, add)
+		}
 	}
 	out = strings.Join(lines, "\n")
 	return out, out != body
 }
 
-func init() { hostSteps["iptables"] = hostIptables }
+// grubTokens drops every hugepages= token from a kernel command line
+// and appends the one for pages (none at 0).
+func grubTokens(cmdline string, pages int) string {
+	var toks []string
+	for _, f := range strings.Fields(cmdline) {
+		if !strings.HasPrefix(f, hugepagesToken) {
+			toks = append(toks, f)
+		}
+	}
+	if pages > 0 {
+		toks = append(toks, hugepagesToken+strconv.Itoa(pages))
+	}
+	return strings.Join(toks, " ")
+}
 
 // iptablesLegacyPath is the alternative the leases' NAT and MSS rules
 // run under: the nft backend still translates them, but the E2B
