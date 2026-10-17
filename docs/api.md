@@ -2,11 +2,9 @@
 
 Base URL: `https://<backend>:8890` (HTTPS when `TLS_CERT`/`TLS_KEY` are
 set, plain HTTP otherwise). The resource is the **lease**; every route
-lives under `/api/leases/…`. `/api/sandboxes/…` is a permanent alias for
-the same routes — identical behavior, auth and responses — kept for
-every client written before 2.0; new code should use `/api/leases/…`.
-See [Deprecated in 3.x, removed in 4.0](#deprecated-in-3x-removed-in-40)
-below for the alias's deprecation headers.
+lives under `/api/leases/…`. The pre-2.0 `/api/sandboxes/…` spelling was
+removed in 4.0: a request to it answers `410 Gone` naming
+`/api/leases` — see [Removed in 4.0](#removed-in-40).
 All endpoints except `/healthz`, `/readyz`, the
 `/api/admin/*` routes (which carry their own `ADMIN_TOKEN`, or an admin
 user's token — see [Admin API](#admin-api)) and the
@@ -121,8 +119,8 @@ learn everything this deployment offers. Stable field names; the answer
 never carries a secret value or another user's data:
 
 - `version` — the binary's version string (`spoond version`).
-- `api` — `base` (`"/api"`), `primary`/`alias` (the lease paths
-  `/api/leases` and its pre-2.0 twin `/api/sandboxes`), and `auth`: the
+- `api` — `base` (`"/api"`), `primary` (the lease path prefix
+  `/api/leases`), and `auth`: the
   auth model — a bearer user token on the lease, images, snapshots,
   users, usage and sizes routes; admin users and `ADMIN_TOKEN` reach
   `/api/admin/*` and the admin user routes; `/healthz` and `/readyz`
@@ -202,7 +200,6 @@ Request:
 | `holder` | string | `""` | a plain label naming what holds the lease (a CI job, an orchestrator's flight, a person's scratch work), at most 128 printable characters. **No lifecycle effect since v3.0:** it never pins, never keeps the lease past its TTL and never protects it from take-back. Use `pinned` for that |
 | `holder_url` | string | `""` | link to the holder; empty or an absolute `http(s)` URL of at most 512 characters |
 | `comment` | string | `""` | the lease's free-text annotation set at create time rather than through the comment route after the answer (#132): the CI runner sends its job label `forgejo job <id> <job URL>`, so the lease and its `created` event name the job from the first moment. Same validity as the comment route (at most 512 bytes; no control characters — anything below `0x20`, a newline included, and `0x7F` is `400 comment must not contain control characters`; longer is `400`) |
-| `hold_ttl` | int | *(removed)* | **removed in v3.0** (pins replace holds): accepted and ignored for one release, with a `Deprecation` header |
 | `pinned` | bool | `false` | pin the new lease: spoond never pauses or deletes it before its own expiry. The TTL still applies; a pinned persistent lease stays until the owner releases it. `holder`/`holder_url` never pin. See [Pins and the paused-release clock](#pins-and-the-paused-release-clock) |
 | `checkpoint_interval` | int | host default | the lease's own periodic checkpoint interval in seconds: `0` = never checkpointed by the loop; `60`–`604800` = seconds between periodic checkpoints. Omitted = the host default (`CHECKPOINT_INTERVAL_MINS`, itself `0` = never — see [Checkpoints](#checkpoints)). Anything else is `400` |
 | `idle_suspend` | int | host default | the lease's own idle reclamation threshold in seconds: `0` = never; `60`–`604800` = suspend the lease after that long without activity (exec, stream, proxy, keepalive, guest heartbeat, files, guest port dial), resuming it on the next call. Omitted = the host default (`IDLE_SUSPEND_DEFAULT_SECS`, itself `0` = never — see [Idle reclamation](#idle-reclamation)). Anything else is `400`, and a non-zero value needs a persistent lease (`400`) — a non-persistent lease has nothing to suspend into |
@@ -376,9 +373,9 @@ field `preempted` stays for old clients and is always `false`.
 ### Queued admission
 
 A create refused only because the node is full can wait for room instead
-of failing: send `"wait": N` (seconds) on `POST /api/leases` (and its
-`/api/sandboxes` alias). `wait` defaults to `0`, which keeps today's
-immediate refusal exactly; a negative value is `400`.
+of failing: send `"wait": N` (seconds) on `POST /api/leases`. `wait`
+defaults to `0`, which keeps today's immediate refusal exactly; a
+negative value is `400`.
 
 Only these refusals are **waitable** (the request is held open and
 retried):
@@ -832,8 +829,7 @@ it let the lease go: `?reason=<text>` on the query string, or a JSON
 body `{"reason": "<text>"}`. The text is at most 120 printable
 characters, sanitised like a lease comment (control and format
 characters become spaces), and `400` otherwise. Without a reason the
-event keeps its `deleted through the API` detail. The same reason works
-through the `/api/sandboxes` alias. Every create, release, lost and
+event keeps its `deleted through the API` detail. Every create, release, lost and
 suspend also writes one durable journal line (see
 [operations.md](operations.md#the-lease-journal)) that outlives the
 event ring and the lease row.
@@ -1559,8 +1555,7 @@ Request `{"count":1..20,"persistent":false,"ttl":300,"holder":"ci-job"}`
 (`ttl` 0 = the default TTL, capped at the maximum and the user's
 `max_ttl`). The optional `holder` and `holder_url` fields stamp every
 created lease as plain labels (same validation as create); they never
-pin. `hold_ttl` is removed (accepted and ignored for one release, with
-a `Deprecation` header).
+pin.
 
 Response `201 Created`:
 `{"source":"<id>","build_id":"<uuid>","ids":["…","…"]}`.
@@ -1620,10 +1615,8 @@ holder is a plain label, so there is nothing to conflict with).
 **Since v3.0 the labels have no lifecycle effect:** setting a holder
 never pins, never keeps the lease past its TTL and never protects it
 from take-back — and it is not activity for the idle sweep either: only
-work-call and keepalive activity moves `LastActive`. `hold_ttl` is
-removed (accepted and ignored for one
-release, with a `Deprecation` header). To keep a lease, use the pin
-routes below. The label is shown on the dashboard (a pinned lease's
+work-call and keepalive activity moves `LastActive`. To keep a lease,
+use the pin routes below. The label is shown on the dashboard (a pinned lease's
 state cell carries the ◆ pin mark), and a lease with a holder that has its own
 `checkpoint_interval` follows it.
 
@@ -1684,8 +1677,8 @@ stream to one lease (a lease you cannot see answers the same `404` as
 the other lease routes). Requires a bearer token: a consumer token (or
 an admin user), or the events-only `EVENTS_TOKEN` — which sees every
 owner's events and works on this route only. Everywhere else — the
-one-lease streams, the `/api/sandboxes` spellings included — refuses
-it, and any method but GET gets `405` here.
+one-lease streams included — refuses it, and any method but GET gets
+`405` here.
 
 ### `GET /api/leases/{id}/events` — stream one lease's events
 
@@ -2374,41 +2367,47 @@ WARN). There is no in-sandbox fallback.
 
 Per-user key auth: when the lease owner has an LLM key configured,
 requests must present it as `Authorization: Bearer <user-key>`.
-Missing/wrong/foreign keys → `401`. Owners without a key keep the open
-behavior — **unless** `LLM_OPEN_LEGACY` is unset (the default): with an
-identity store present, keyless identity users are then denied outright
-(`401`) and only legacy consumer-owned leases stay open. Set
-`LLM_OPEN_LEGACY=1` to restore the pre-2.0 open behavior. The user key is
-replaced by the server-side upstream key before forwarding, so it never
-reaches the provider.
+Missing/wrong/foreign keys → `401`. With an identity store present a
+keyless identity-user owner is denied outright (`401`, 4.0: the
+`LLM_OPEN_LEGACY` opt-out is gone) — configure every LLM-using identity
+user a key (`POST /api/users/{id}/llm-key`). Legacy consumer-owned
+leases (owner not in the store) keep the open capability model. The user
+key is replaced by the server-side upstream key before forwarding, so it
+never reaches the provider.
 
-## Deprecated in 3.x, removed in 4.0
+## Removed in 4.0
 
-Two long-lived conveniences go away with the next major release
-(4.0); nothing changes behavior today, but every use is measured so the
-removal is decided on data (#139 groundwork). Move off both now:
+Two 3.x conveniences are gone in 4.0; every use was measured across 3.x
+(#139 groundwork) before removal. What each client changes:
 
-- **The `/api/sandboxes/…` path alias of the lease API.** Every
-  request still sent to a `/api/sandboxes/…` route — one not rewritten
-  from `/api/leases` — answers with the response headers
-  `Deprecation: true` and `Link: </api/leases…>; rel="successor-version"`
-  naming the same route on the primary path (RFC 8594), bumps
-  `spoond_deprecated_requests_total{kind="sandboxes_alias"}` and logs
-  at most once per caller per hour (the user/consumer id and the path,
-  never a token). The headers ride even a refused request, so a broken
-  client can find its way too.
-- **Keyless LLM-gateway access under `LLM_OPEN_LEGACY=1`.** A request
-  the gateway serves only because `LLM_OPEN_LEGACY=1` kept a keyless
-  identity-user owner open bumps
-  `spoond_deprecated_requests_total{kind="llm_keyless"}`, with the
-  same once-per-owner-per-hour log line. In 4.0 a lease owner without
-  an LLM key will always answer `401`: configure every LLM-using
-  identity user a key (`POST /api/users/{id}/llm-key`). Legacy
+- **The `/api/sandboxes/…` path alias of the lease API.** Every route
+  now registers under `/api/leases` and the rewrite onto the old
+  registrations is gone. A request to `/api/sandboxes` or
+  `/api/sandboxes/…` answers `410 Gone` with the API's JSON error shape
+  (`{"error":"/api/sandboxes is removed in 4.0; use /api/leases",
+  "code":"path_removed"}`) and a `Link:
+  </api/leases…>; rel="successor-version"` header naming the same
+  route on the primary path (RFC 8594). The answer — 410 and the Link
+  included — rides before auth, so a broken client learns the move
+  whatever it sends. **A client changes:** spell every lease path
+  `/api/leases/…`.
+- **Keyless LLM-gateway access (the `LLM_OPEN_LEGACY` opt-out).** A
+  lease owned by an identity-store user without an LLM key now always
+  answers `401` on `/llm/…`; the setting is unknown and a leftover
+  `LLM_OPEN_LEGACY=…` in an env file is reported as such by
+  `spoond doctor` (and `spoond config show`). **A client changes:**
+  give every LLM-using identity user a key
+  (`POST /api/users/{id}/llm-key`) and present it on `/llm/…`. Legacy
   consumer-owned leases (no identity store) keep the capability model
-  and are not deprecated.
+  — nothing changes for them.
+- **The `hold_ttl` request field.** It was accepted and ignored (with a
+  `Deprecation` header) since 3.0; 4.0 stops reading it, so it is an
+  ordinary unknown field again. **A client changes:** stop sending it
+  (a pin, `PUT /api/leases/{id}/pin`, is what replaced holds).
 
-Both counters sit in the metrics table in
-[operations.md](operations.md#metrics).
+No code answers these surfaces any more; the
+`spoond_deprecated_requests_total` counter that measured them is gone
+from [/metrics](operations.md#metrics) too.
 
 ## Guest-service endpoints (port `HOST_GUEST_SERVICE_PORT`)
 

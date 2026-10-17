@@ -38,7 +38,7 @@ no `"wait"`, so the backend admission queue (#129) was skipped, and a
    cut and reported cancelled, matching GitHub); known users named (hrmny
    `e2e-live.yml` 75, `ci.yml` 45/45/20).
 8. **L2 orphan lease on a gone client.** After `waitForAdmission`
-   returns a granted lease, `POST /api/sandboxes` releases it with reason
+   returns a granted lease, `POST /api/leases` releases it with reason
    `client_gone` and writes nothing when `r.Context().Err() != nil`. The
    race happens when `finishTicket` loses to the client's context: the
    lease would otherwise have no runner owner and no spoond-job label and

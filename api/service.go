@@ -5082,7 +5082,7 @@ func (s *Service) leaseSuspendReason(id string) string {
 // holdState is gone with the held-lease rules (FS5). The holder and
 // holder_url labels are returned as-is and have no lifecycle effect.
 
-// leaseMap renders a lease as one GET /api/sandboxes row. The
+// leaseMap renders a lease as one GET /api/leases row. The
 // checkpointInterval and idleSuspend arguments are the lease's
 // effective values in seconds (the host default already resolved;
 // 0 = never). ms is the measured-memory sampler and s the Service —
@@ -5184,7 +5184,7 @@ func (s *Service) leaseMap(l *Lease, ms *memSampler, checkpointInterval, idleSus
 }
 
 // leaseDetailMap is a list row plus the lifecycle fields served by
-// GET /api/sandboxes/{id}. The lease's kept checkpoints (#126) ride
+// GET /api/leases/{id}. The lease's kept checkpoints (#126) ride
 // along: build_id, size_bytes and kept_at each, oldest keep first —
 // what the caller may restore, and what unpins would free. The owner's
 // memory charge rides along too (#128): charged_mib, the same number as

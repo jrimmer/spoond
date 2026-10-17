@@ -225,11 +225,10 @@ curl -s https://sandbox.example.com/llm/<id>/openai/chat/completions \
 
 The user key only authorizes the caller (missing/wrong/foreign keys get
 `401`); it is replaced by the server-side upstream key before the
-request is forwarded, so it never reaches the provider. Owners **without**
-a key keep the legacy open behavior (backward compatible), including
-deployments with no identity store at all — unless `LLM_OPEN_LEGACY` is
-unset, which is the default: keyless identity users are then denied
-(set `LLM_OPEN_LEGACY=1` to keep them open).
+request is forwarded, so it never reaches the provider. A lease owner
+without a key is denied: an identity-store user always (4.0 — give
+every LLM-using user a key), while deployments with no identity store
+at all keep the open capability model.
 
 An admin sets/rotates/revokes a key (stored hashed, never returned by
 the API):

@@ -34,8 +34,8 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
 ## What it gives you
 
 - **Lease API**: `POST /api/leases` (image, size, TTL, persistent,
-  network policy, exposed ports, holder, secrets; `/api/sandboxes` is kept as an
-  alias), then exec, stream (WebSocket PTY), keepalive, suspend/resume,
+  network policy, exposed ports, holder, secrets), then exec, stream
+  (WebSocket PTY), keepalive, suspend/resume,
   restart (warm or cold), checkpoint, restore, fork, clone, tag, comment,
   delete. Auth via bearer
   tokens (`CONSUMER_TOKENS=token=owner,...`) or per-user identity tokens.

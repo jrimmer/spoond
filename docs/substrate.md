@@ -5,7 +5,7 @@
 | Term | Meaning |
 |---|---|
 | host | the machine running spoond and the E2B orchestrator |
-| lease | a granted sandbox — the API resource (`POST /api/leases`; `/api/sandboxes` is its permanent alias) |
+| lease | a granted sandbox — the API resource (`POST /api/leases`) |
 
 spoond is a **control plane**: identity, quotas, leases, sharing, the SSH
 gateway, the HTTP proxy, the LLM gateway, policy, the image catalog and

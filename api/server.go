@@ -892,10 +892,9 @@ func clientIP(remoteAddr string) string {
 
 // eventsPath reports whether p is exactly the events-only EVENTS_
 // TOKEN's one route: /api/leases/events (GET is allowEventsToken's
-// business). The admission runs before the /api/leases rewrite — the
-// mux itself only knows the /api/sandboxes spellings — so the route is
-// matched literally, on the spelling it is documented under; every
-// other path, spelling or depth is refused.
+// business). The admission runs before auth — its one route, matched
+// literally, on the spelling it is documented under; every other path,
+// spelling or depth is refused.
 func eventsPath(p string) bool {
 	return p == "/api/leases/events"
 }
@@ -2745,7 +2744,7 @@ func (s *Server) handleFork(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleGetSandbox returns one lease: the same object as an element of
-// GET /api/sandboxes plus the lifecycle fields. The owner or an http
+// GET /api/leases plus the lifecycle fields. The owner or an http
 // share is required.
 func (s *Server) handleGetSandbox(w http.ResponseWriter, r *http.Request) {
 	owner := ownerFrom(r.Context())

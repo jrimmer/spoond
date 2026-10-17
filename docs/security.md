@@ -211,10 +211,8 @@ Known/accepted residuals:
   could claim admin on a fresh store.
 - **LLM gateway**: when the identity store is present, leases owned by an
   identity user are denied on `/llm/` unless that user has an LLM key
-  (`POST /api/users/{id}/llm-key`) — that is the default. Setting
-  `LLM_OPEN_LEGACY` to any non-empty value restores the open behavior
-  for keyless identity users. Legacy consumer-owned leases keep the
-  capability model either way.
+  (`POST /api/users/{id}/llm-key`). Legacy consumer-owned leases keep
+  the capability model.
 - **Forward-auth proxy** (`PROXY_AUTH_MODE=forward-auth`): requires
   `X-Proxy-Auth` shared secret (constant-time) + `Remote-User`; set
   `PROXY_AUTH_TRUSTED_PEERS` (e.g. `10.0.0.203/32`) so only Caddy can

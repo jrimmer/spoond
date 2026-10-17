@@ -16,7 +16,7 @@ import (
 // Periodic and manual checkpoints (U10): persistent leases are
 // checkpointed on a timer so a crash loses at most the work since the
 // last snapshot, and the owner can checkpoint on demand via
-// POST /api/sandboxes/{id}/checkpoint.
+// POST /api/leases/{id}/checkpoint.
 
 // checkpointLoopTick is how often the periodic pass looks for due
 // leases (2.3, #122): every minute; a lease's effective interval (a

@@ -178,7 +178,6 @@ with provisioning instructions. The pre-2.0 `FORKD_*` names still work
 | `LLM_DEFAULT_MODEL` | *(empty)* | default model id for LLM gateway requests |
 | `LLM_MODEL_MAP` | *(empty)* | optional `pattern=model` comma-separated map |
 | `LLM_MAX_CONCURRENT_PER_USER` | `0` | in-flight `/llm/` requests per user before `429` (`0` = unlimited) |
-| `LLM_OPEN_LEGACY` | *(empty)* | set to **any non-empty value** to keep keyless identity owners open on `/llm/` (the code tests for non-empty, so `1` is the conventional value); unset (the default) denies them |
 | `OTEL_PROM_URL` | *(empty)* | fetch the orchestrator's Prometheus output here and append it to `/metrics` |
 | `SPOOND_DB_PATH` | `/var/lib/spoond/spoond.db` | SQLite state: leases, shares, pool, image catalog |
 | `SPOOND_BACKUP_DIR` | `/var/lib/spoond/backups` | daily `VACUUM INTO` backups, keep 7 |

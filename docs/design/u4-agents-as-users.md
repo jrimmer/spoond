@@ -26,9 +26,9 @@
 - `cmd/spoond-dev-mcp/main.go` `Main()` (lines 40–48): reads `FORKD_BACKEND_URL` (default `https://127.0.0.1:8890`) and `FORKD_TOKEN` (required — `log.Fatal` if empty). Line 48: `sandbox := runner.NewHTTPLeaseClient(backendURL, token)` → line 50: `mcp.New(mcp.Config{Sandbox: sandbox, ...})`.
 - `cmd/spoond-acp/main.go` `Main()` (lines 43–57): identical env reads; line 51 `runner.NewHTTPLeaseClient(backendURL, token)` → line 57 `acp.NewAgent(sandbox, llm, image, 1800, 12)` → line 59 `acp.New(acp.Config{Agent: agent, ...})`.
 - `runner/lease_adapter.go` `HTTPLeaseClient` (lines 14–27) holds `BaseURL` + `Token`. Every call attaches `Authorization: Bearer <Token>`:
-  - `Create()` (lines 30–53): `POST {BaseURL}/api/sandboxes` body `{image, ttl}`; expects 201, returns `id`.
-  - `Exec()` (lines 56–77): `POST /api/sandboxes/{id}/exec` body `{cmd, cwd, env, timeout}`; expects 200.
-  - `Delete()` (lines 80–95): `DELETE /api/sandboxes/{id}`; expects 204.
+  - `Create()` (lines 30–53): `POST {BaseURL}/api/leases` body `{image, ttl}`; expects 201, returns `id`.
+  - `Exec()` (lines 56–77): `POST /api/leases/{id}/exec` body `{cmd, cwd, env, timeout}`; expects 200.
+  - `Delete()` (lines 80–95): `DELETE /api/leases/{id}`; expects 204.
 
 **Backend side:**
 
@@ -41,7 +41,7 @@
 
 | Server | Calls (all via `runner.SandboxProvider` unless noted) |
 |---|---|
-| **MCP** (`mcp/server.go`) | Per tool call (`withSandbox`, lines 285–296): `Create` → `Exec` → `Delete` (deferred). Stateless v1: `POST /api/sandboxes`, `POST /api/sandboxes/{id}/exec`, `DELETE /api/sandboxes/{id}` — all bearer-token. |
+| **MCP** (`mcp/server.go`) | Per tool call (`withSandbox`, lines 285–296): `Create` → `Exec` → `Delete` (deferred). Stateless v1: `POST /api/leases`, `POST /api/leases/{id}/exec`, `DELETE /api/leases/{id}` — all bearer-token. |
 | **ACP** (`acp/server.go` + `acp/agent.go`) | `session/new` → `SandboxAgent.NewSession` (`acp/agent.go` lines 249–251) → `Create` (one lease per session, held for session lifetime; `Close`/`Release` → `Delete`). Tools (`shell`/`read_file`/`write_file`, lines 124–194) → `Exec`. Plus **LLM calls**: `LLMClient.ChatCompletion` (`acp/agent.go` lines 81–103) → `POST {BaseURL}/llm/{leaseID}/openai/chat/completions` with **no auth header** — the lease id in the path is the capability, and the gateway is auth-exempt by design (`api/server.go` line 109, `llmGatewayPrefix` mounted in `NewServerWithLLM` lines 67–71). |
 
 No server makes any identity/account API call today — there is no such endpoint yet (no `identity/` package exists; U1 is unimplemented).
@@ -94,7 +94,7 @@ No server makes any identity/account API call today — there is no such endpoin
 
 - **What I did:** Read all six target files plus `runner/lease_adapter.go`, `runner/ports.go`, `api/service.go`, `cmd/spoond-backend/main.go`, the tenancy plan, the SSH gateway auth path, `llmgateway.go`, and the MCP integration test. No files modified.
 - **Key findings:**
-  - Token flow: `cmd/*/main.go` reads `FORKD_TOKEN` → `runner.NewHTTPLeaseClient` → `Authorization: Bearer` on `POST /api/sandboxes`, `POST .../exec`, `DELETE ...` → `authMiddleware` maps token→consumer-name string via `Service.tokens` → `grant()` line 354 stamps `Lease.Owner`.
+  - Token flow: `cmd/*/main.go` reads `FORKD_TOKEN` → `runner.NewHTTPLeaseClient` → `Authorization: Bearer` on `POST /api/leases`, `POST .../exec`, `DELETE ...` → `authMiddleware` maps token→consumer-name string via `Service.tokens` → `grant()` line 354 stamps `Lease.Owner`.
   - ACP additionally calls the auth-exempt `/llm/{leaseID}/openai/chat/completions` gateway with no credential (capability = lease id in path).
   - Neither `mcp/server.go`, `acp/server.go`, nor `acp/agent.go` touches credentials — they're port-based (`runner.SandboxProvider`), so per-agent identity is an adapter + main.go env change on the client side and a users-store resolution change on the backend (U1).
   - **Recommended:** Phase 1 per-agent bearer tokens (`FORKD_AGENT_TOKEN` with `FORKD_TOKEN` legacy fallback) resolving to `kind=agent` user ids; Phase 2 per-agent Ed25519 keypairs (Buzz-style/KTD-1) via a signer-aware `HTTPLeaseClient` variant and backend key verification, reusing U1's `ssh-key` verb and `GET /api/users/by-key`.

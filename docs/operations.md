@@ -1391,10 +1391,10 @@ code TTL-sweeps by expiry and applies no held rules.
 **Removed in v3.0:** `HELD_IDLE_TIMEOUT_SECS`,
 `HELD_SUSPENDED_RELEASE_SECS`, `HOLD_TTL_SECS`, `HOLD_TTL_MAX_SECS`,
 `PRESSURE_HELD_IDLE_SECS` and `IDLE_TIMEOUT_SECS`, along with the
-automatic held/idle/pressure/critical rules and the `hold_ttl` request
-field. A set variable is logged as removed and ignored at startup;
-`hold_ttl` is accepted and ignored for one release, with a `Deprecation`
-header. `holder`/`holder_url` stay.
+automatic held/idle/pressure/critical rules. A set variable is logged
+as removed and ignored at startup. `holder`/`holder_url` stay. The
+`hold_ttl` request field, accepted and ignored since 3.0, is removed
+in 4.0 (an unknown field again).
 
 ## Background exec jobs
 

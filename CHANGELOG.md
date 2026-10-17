@@ -10,6 +10,36 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Removed
+
+- **The `/api/sandboxes` path alias (4.0, spoond-4-0-s10).** Every
+  lease route now registers under `/api/leases` and the rewrite that
+  served the old registrations under the alias is gone. A request to
+  `/api/sandboxes` or any `/api/sandboxes/…` path answers `410 Gone`
+  with `{"error":"/api/sandboxes is removed in 4.0; use
+  /api/leases","code":"path_removed"}` and a `Link:
+  </api/leases…>; rel="successor-version"` successor header (RFC 8594)
+  naming the same route on the primary path; the answer rides before
+  auth, so even a misconfigured client learns where the API moved.
+  `GET /api/capabilities` no longer advertises a sandboxes route or an
+  `alias` field. Every spoond client (the conformance suite, the SSH
+  gateway, the dashboard, `spoond capabilities`) and the integration
+  scripts call `/api/leases` only.
+- **Keyless LLM-gateway access (the `LLM_OPEN_LEGACY` opt-out, 4.0).**
+  A lease owned by an identity-store user without an LLM key always
+  answers `401` on `/llm/…`; `LLM_OPEN_LEGACY` is removed as a setting
+  (`spoond doctor` reports a leftover one as an unknown key) and `401`
+  is unconditional. Legacy consumer-owned leases (no identity store)
+  keep the capability model. Give every LLM-using identity user a key
+  (`POST /api/users/{id}/llm-key`).
+- **The `hold_ttl` request field (4.0).** Accepted and ignored (with a
+  `Deprecation` header) since 3.0; 4.0 stops reading it, so it is an
+  ordinary unknown field again. Pins replaced holds in 3.0.
+- **`spoond_deprecated_requests_total{kind}`** — the 4.0 groundwork
+  counter that measured the alias and keyless LLM traffic is gone with
+  the surfaces it measured, as is the gateway's
+  `spoond_llm_keyless_denied_total` companion.
+
 ### Changed
 
 - **README: a dashboard screenshot, and a shorter dashboard section**
