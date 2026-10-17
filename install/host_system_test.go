@@ -786,6 +786,38 @@ func TestHostIptablesQueryFails(t *testing.T) {
 	}
 }
 
+// TestHostModulesUdevContainerUnchanged: with --container the modules
+// and udev steps behave exactly as natively: the configs and the rule
+// land under Root (the host's /etc through the bind mount) and the
+// modprobes run against the shared host kernel.
+func TestHostModulesUdevContainerUnchanged(t *testing.T) {
+	env, _, runner := testEnv(t)
+	env.Opt.Container = true
+	modprobeReplies(t, env, runner, false, "")
+	env.Run = &kernelSim{t: t, env: env, inner: runner}
+
+	if err := hostModules(context.Background(), env, &Reporter{Phase: PhaseHost}, &hostState{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := hostUdev(context.Background(), env, &Reporter{Phase: PhaseHost}, &hostState{}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"modprobe nbd nbds_max=256 max_part=16", "modprobe tun"}
+	if len(runner.calls) != len(want) {
+		t.Fatalf("calls = %v, want %v", runner.calls, want)
+	}
+	for i := range want {
+		if runner.calls[i] != want[i] {
+			t.Errorf("call %d = %q, want %q", i, runner.calls[i], want[i])
+		}
+	}
+	for _, p := range []string{"/etc/modules-load.d/e2b.conf", "/etc/modprobe.d/e2b-nbd.conf", "/etc/udev/rules.d/97-nbd-device.rules"} {
+		if _, err := os.Stat(env.Resolve(p)); err != nil {
+			t.Errorf("%s did not land under Root: %v", p, err)
+		}
+	}
+}
+
 // TestHostSystemStepsSecondRunQuiet runs every system step twice over
 // the same root: the second pass reports kept only and runs no
 // changing command — the read-only queries aside.
