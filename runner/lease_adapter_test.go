@@ -504,3 +504,53 @@ func TestHTTPLeaseClientCreateNon503NotRetried(t *testing.T) {
 		srv.Close()
 	}
 }
+
+// TestHTTPLeaseClientCreateRetriesBoxFull: a 429 box_full (every CI job
+// shares the runner's identity, so it can be the biggest borrower) is
+// waited out like a full node; a quota 429 is still final.
+func TestHTTPLeaseClientCreateRetriesBoxFull(t *testing.T) {
+	var attempts int
+	var waits []time.Duration
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.Write([]byte(`{"error":"box full","code":"box_full"}`))
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte(`{"id":"sb-2"}`))
+	}))
+	defer srv.Close()
+
+	c := NewHTTPLeaseClient(srv.URL, "tok")
+	c.sleepFn = func(ctx context.Context, d time.Duration) error {
+		waits = append(waits, d)
+		return nil
+	}
+	id, err := c.Create(context.Background(), "rust-gpui-base", 600)
+	if err != nil || id != "sb-2" {
+		t.Fatalf("Create = %q, %v; want sb-2", id, err)
+	}
+	if attempts != 2 || len(waits) != 1 || waits[0] != defaultCapacityRetryAfter {
+		t.Fatalf("attempts %d, waits %v; want 2 attempts and one default wait", attempts, waits)
+	}
+}
+
+func TestHTTPLeaseClientCreateQuota429NotRetried(t *testing.T) {
+	var attempts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.Write([]byte(`{"error":"over budget","code":"kept_budget"}`))
+	}))
+	defer srv.Close()
+	c := NewHTTPLeaseClient(srv.URL, "tok")
+	c.sleepFn = func(ctx context.Context, d time.Duration) error {
+		t.Fatal("slept on a quota 429")
+		return nil
+	}
+	if _, err := c.Create(context.Background(), "py-base", 600); err == nil || attempts != 1 {
+		t.Fatalf("Create err %v after %d attempts; want one failed attempt", err, attempts)
+	}
+}
