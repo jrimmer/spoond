@@ -638,6 +638,52 @@ func TestHostIptablesAlreadyLegacy(t *testing.T) {
 	}
 }
 
+// TestHostPackagesContainerSkipsApt: with --container the step is one
+// skipped row and runs no dpkg-query or apt-get at all.
+func TestHostPackagesContainerSkipsApt(t *testing.T) {
+	env, _, runner := testEnv(t)
+	env.Opt.Container = true
+	runner.reply = map[string]fakeReply{} // every command would error
+
+	r := &Reporter{Phase: PhaseHost}
+	if err := hostPackages(context.Background(), env, r, &hostState{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 0 {
+		t.Errorf("calls = %v, want none", runner.calls)
+	}
+	if len(r.Items()) != 1 || r.Items()[0].Result != Skipped {
+		t.Fatalf("rows = %+v, want one skipped row", r.Items())
+	}
+	for _, want := range []string{"--container", "the image carries its own tools", "Docker", "kernel modules"} {
+		if !strings.Contains(r.Items()[0].Note, want) {
+			t.Errorf("note %q does not mention %q", r.Items()[0].Note, want)
+		}
+	}
+}
+
+// TestHostIptablesContainerSkipsAlternatives: with --container the
+// step is one skipped row and touches no alternative.
+func TestHostIptablesContainerSkipsAlternatives(t *testing.T) {
+	env, _, runner := testEnv(t)
+	env.Opt.Container = true
+	runner.reply = map[string]fakeReply{} // every command would error
+
+	r := &Reporter{Phase: PhaseHost}
+	if err := hostIptables(context.Background(), env, r, &hostState{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 0 {
+		t.Errorf("calls = %v, want none", runner.calls)
+	}
+	if len(r.Items()) != 1 || r.Items()[0].Result != Skipped {
+		t.Fatalf("rows = %+v, want one skipped row", r.Items())
+	}
+	if !strings.Contains(r.Items()[0].Note, "the orchestrator image uses the legacy backend itself") {
+		t.Errorf("note %q does not carry the reason", r.Items()[0].Note)
+	}
+}
+
 // TestHostIptablesQueryFails: without the alternatives database the
 // error names the package that provides it.
 func TestHostIptablesQueryFails(t *testing.T) {

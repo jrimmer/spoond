@@ -40,8 +40,14 @@ var zfsPackages = []string{"linux-headers-amd64", "zfs-dkms", "zfsutils-linux", 
 // apt-get update only when something is missing. With --store-disk the
 // ZFS set joins the list, and zfs-dkms's apt candidate is checked
 // first: it lives in contrib, which a default Debian mirror list
-// leaves out.
+// leaves out. With --container the whole step is skipped: the image
+// carries its own tools, and the host needs only Docker and the kernel
+// modules.
 func hostPackages(ctx context.Context, env *Env, r *Reporter, st *hostState) error {
+	if env.Opt.Container {
+		r.Add(Skipped, "packages", "--container: the image carries its own tools; the host needs only Docker and the kernel modules")
+		return nil
+	}
 	pkgs := basePackages
 	if env.Opt.StoreDisk != "" {
 		pkgs = append(pkgs, zfsPackages...)
@@ -430,7 +436,13 @@ func legacyPath(name string) string {
 // hostIptables points the iptables alternatives at the legacy backend
 // (iptables and ip6tables both). The query decides; the set runs only
 // when the value differs, so a rerun is two queries and a kept row.
+// With --container the step is skipped: the orchestrator image uses
+// the legacy backend itself, so the host's choice does not matter.
 func hostIptables(ctx context.Context, env *Env, r *Reporter, st *hostState) error {
+	if env.Opt.Container {
+		r.Add(Skipped, "iptables", "--container: the orchestrator image uses the legacy backend itself")
+		return nil
+	}
 	for _, name := range []string{"iptables", "ip6tables"} {
 		out, err := env.query(ctx, "update-alternatives", "--query", name)
 		if err != nil {
