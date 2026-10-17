@@ -73,10 +73,9 @@ func (f *fakeHealth) Check(ctx context.Context, url string) error {
 // runtimeEnv is an Env shaped for the runtime phase: a temp root, the
 // recording runner, and the phase's own surfaces stubbed with a fake
 // fetcher and health check and fast poll bounds, so a failing-health
-// run stays under a second. The real pinned artifacts are satisfied on
-// disk (right content for the table's pins), so a plain run fetches
-// nothing; a test that wants the fetch path rewrites the pins with
-// usePins and serves or seeds its own.
+// run stays under a second. The test decides the pin table with
+// usePins and installs the pinned artifacts with seedPins or the fake
+// fetcher; serveRuntime serves the matching release.
 func runtimeEnv(t *testing.T) (*Env, *bytes.Buffer, *recordRunner, *fakeFetcher, *fakeHealth) {
 	t.Helper()
 	env, out, _ := testEnv(t)
@@ -86,31 +85,7 @@ func runtimeEnv(t *testing.T) (*Env, *bytes.Buffer, *recordRunner, *fakeFetcher,
 	health := &fakeHealth{}
 	stubRuntime(t, fetcher, health)
 	env.Version = "v4.0.0"
-	seedRealPins(t, env)
 	return env, out, runner, fetcher, health
-}
-
-// seedRealPins writes the real pin table's rows satisfied: content
-// whose sha256 is the pin, at the row's path and mode. The bytes are
-// the sha256 pre-image the table was built from is not known, so the
-// table rows are replaced with rows whose sha256 is of the test's
-// bytes — same URLs, paths and modes, real-sha256 for the test's
-// content — and restored at the test's end.
-func seedRealPins(t *testing.T, env *Env) {
-	t.Helper()
-	pins := fakePins(len(pinned))
-	// fakePins invents URLs; the tests that assert no fetch match on
-	// artifactBucket, which the test URLs share.
-	usePins(t, pins)
-	for i, p := range pins {
-		if err := os.MkdirAll(env.Resolve(filepath.Dir(p.row.path)), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(env.Resolve(p.row.path), p.content, p.row.mode); err != nil {
-			t.Fatal(err)
-		}
-		_ = i
-	}
 }
 
 // stubRuntime stubs the phase's network surfaces with fakes and fast
@@ -170,17 +145,20 @@ func writeRuntimeTarball(t *testing.T, tgz []byte) string {
 	return file
 }
 
-// serveRuntime fills a fake fetcher with a release for ver: the
-// tarball under its release URL and a SHA256SUMS naming it.
+// serveRuntime fills a fake fetcher with a release for ver (the tag:
+// the test reuses the phase's downloadName, so its URL shape can only
+// drift together with the phase's): the tarball under its release URL
+// and a SHA256SUMS naming it.
 func serveRuntime(t *testing.T, f *fakeFetcher, ver string, tgz []byte) {
 	t.Helper()
 	sum := sha256sum(tgz)
 	url := "https://github.com/jrimmer/spoond/releases/download/" + ver
-	f.served[url+"/spoond-runtime_"+ver+"_linux_amd64.tar.gz"] = tgz
-	f.served[url+"/SHA256SUMS"] = []byte(sum + "  spoond-runtime_" + ver + "_linux_amd64.tar.gz\n")
+	f.served[url+"/"+downloadName(ver)] = tgz
+	f.served[url+"/SHA256SUMS"] = []byte(sum + "  " + downloadName(ver) + "\n")
 }
 
-// rowsByName indexes the report rows by name.
+// rowsByName indexes the report rows by name. It fails when two rows
+// share a name, so a lost or doubled row cannot hide.
 func rowsByName(t *testing.T, items []Item) map[string]Item {
 	t.Helper()
 	rows := map[string]Item{}
@@ -191,6 +169,32 @@ func rowsByName(t *testing.T, items []Item) map[string]Item {
 		rows[it.Name] = it
 	}
 	return rows
+}
+
+// rowOf returns one row and fails when it is missing: the health rows
+// (kept or failed) and the restart row only exist when the phase's
+// returned items carry them.
+func rowOf(t *testing.T, items []Item, name string) Item {
+	t.Helper()
+	row, ok := rowsByName(t, items)[name]
+	if !ok {
+		t.Fatalf("no row for %s in:\n%s", name, reportText(items))
+	}
+	return row
+}
+
+// reportText renders items as the Reporter would print them, for
+// failure messages.
+func reportText(items []Item) string {
+	var b strings.Builder
+	for _, it := range items {
+		fmt.Fprintf(&b, "  %-8s %s", it.Result, it.Name)
+		if it.Note != "" {
+			b.WriteString(" — " + it.Note)
+		}
+		b.WriteString("\n")
+	}
+	return b.String()
 }
 
 // isHex says whether every rune of s is a lowercase hex digit.
@@ -306,6 +310,17 @@ func seedPins(t *testing.T, env *Env, pins []testPin) {
 	}
 }
 
+// satisfyPins puts the test's pin table (fakePins) in place and writes
+// its content to disk: the "pinned artifacts already installed" state,
+// so a run through a test that does not care about pins fetches
+// nothing and keeps them.
+func satisfyPins(t *testing.T, env *Env) {
+	t.Helper()
+	pins := fakePins(len(pinned))
+	usePins(t, pins)
+	seedPins(t, env, pins)
+}
+
 // runRuntime runs the phase against env and returns the rows, the
 // report text and the error.
 func runRuntime(t *testing.T, env *Env) ([]Item, string, error) {
@@ -324,12 +339,20 @@ func fileMode(t *testing.T, env *Env, path string) os.FileMode {
 	return fi.Mode().Perm()
 }
 
+// withTarball fills env.Opt.Runtime with a tarball of the fixture.
+func withTarball(t *testing.T, env *Env) {
+	t.Helper()
+	_, _, _, tgz := runtimeFixture(t)
+	env.Opt.Runtime = writeRuntimeTarball(t, tgz)
+}
+
 // TestRuntimeTarballHappyPath: --runtime installs the three files with
 // the right modes, /fc-vm is made, the configs and unit land with the
 // store dir substituted, the token seed is created once, and a second
 // run is all kept and runs no changing command.
 func TestRuntimeTarballHappyPath(t *testing.T) {
 	env, _, runner, _, health := runtimeEnv(t)
+	satisfyPins(t, env)
 	orch, envd, stamp, tgz := runtimeFixture(t)
 	env.Opt.Runtime = writeRuntimeTarball(t, tgz)
 	health.answers = []error{errFailed("warming up"), nil} // one failed poll, then healthy
@@ -379,6 +402,12 @@ func TestRuntimeTarballHappyPath(t *testing.T) {
 	if len(health.urls) == 0 || health.urls[0] != runtimeHealthURL {
 		t.Errorf("health polled %v, want %s", health.urls, runtimeHealthURL)
 	}
+	if row := rows["restart "+orchestratorUnit]; row.Result != Kept {
+		t.Errorf("restart row = %+v, want kept (enable --now starts it)", row)
+	}
+	if row := rows["orchestrator /health"]; row.Result != Kept {
+		t.Errorf("health row = %+v, want kept", row)
+	}
 	if got := runnerCommands(runner, "restart"); len(got) != 0 {
 		t.Errorf("a first install restarted the orchestrator: %v", got)
 	}
@@ -425,8 +454,6 @@ func TestRuntimeTarballHappyPath(t *testing.T) {
 	if string(seed2) != string(seed) {
 		t.Error("the second run replaced the token seed")
 	}
-	_ = text
-	_ = rows
 }
 
 // errFailed is a fake poll failure.
@@ -459,10 +486,12 @@ func TestRuntimeDevBuildFailsWithoutRuntime(t *testing.T) {
 }
 
 // TestRuntimeDownloadPathHappy: with a Version and no --runtime both
-// release files are fetched, the tarball's line in SHA256SUMS checked,
-// and the members installed.
+// release files are fetched — under the download name for the version,
+// its tag with the leading v stripped — the tarball's line in
+// SHA256SUMS checked, and the members installed.
 func TestRuntimeDownloadPathHappy(t *testing.T) {
 	env, _, _, fetcher, _ := runtimeEnv(t)
+	satisfyPins(t, env)
 	orch, envd, stamp, tgz := runtimeFixture(t)
 	serveRuntime(t, fetcher, "v4.0.0", tgz)
 	if _, _, err := runRuntime(t, env); err != nil {
@@ -491,11 +520,12 @@ func TestRuntimeDownloadPathHappy(t *testing.T) {
 // sha256 is not in SHA256SUMS fails the phase and installs nothing.
 func TestRuntimeDownloadSHA256MismatchFailsWritingNothing(t *testing.T) {
 	env, _, runner, fetcher, _ := runtimeEnv(t)
+	satisfyPins(t, env)
 	_, _, _, tgz := runtimeFixture(t)
 	other := sha256sum([]byte("not the tarball"))
 	url := "https://github.com/jrimmer/spoond/releases/download/v4.0.0"
-	fetcher.served[url+"/spoond-runtime_4.0.0_linux_amd64.tar.gz"] = tgz
-	fetcher.served[url+"/SHA256SUMS"] = []byte(other + "  spoond-runtime_4.0.0_linux_amd64.tar.gz\n")
+	fetcher.served[url+"/"+downloadName("v4.0.0")] = tgz
+	fetcher.served[url+"/SHA256SUMS"] = []byte(other + "  " + downloadName("v4.0.0") + "\n")
 
 	items, text, err := runRuntime(t, env)
 	if err == nil || !strings.Contains(err.Error(), "SHA256SUMS") {
@@ -517,9 +547,10 @@ func TestRuntimeDownloadSHA256MismatchFailsWritingNothing(t *testing.T) {
 // SHA256SUMS fails with the fetch error, and nothing installed.
 func TestRuntimeDownloadMissingSHA256SUMSFails(t *testing.T) {
 	env, _, _, fetcher, _ := runtimeEnv(t)
+	satisfyPins(t, env)
 	_, _, _, tgz := runtimeFixture(t)
 	url := "https://github.com/jrimmer/spoond/releases/download/v4.0.0"
-	fetcher.served[url+"/spoond-runtime_4.0.0_linux_amd64.tar.gz"] = tgz
+	fetcher.served[url+"/"+downloadName("v4.0.0")] = tgz
 	_, _, err := runRuntime(t, env)
 	if err == nil || !strings.Contains(err.Error(), url+"/SHA256SUMS") {
 		t.Fatalf("err = %v, want the SHA256SUMS fetch failure naming its URL", err)
@@ -542,6 +573,7 @@ func TestRuntimeSidecarSHA256(t *testing.T) {
 		t.Fatal(err)
 	}
 	env, _, _, _, _ := runtimeEnv(t)
+	satisfyPins(t, env)
 	env.Opt.Runtime = mismatched
 	_, _, err := runRuntime(t, env)
 	if err == nil || !strings.Contains(err.Error(), "--runtime "+mismatched+".sha256: sha256 mismatch") {
@@ -557,6 +589,7 @@ func TestRuntimeSidecarSHA256(t *testing.T) {
 		t.Fatal(err)
 	}
 	env2, _, _, _, _ := runtimeEnv(t)
+	satisfyPins(t, env2)
 	env2.Opt.Runtime = matching
 	if _, _, err := runRuntime(t, env2); err != nil {
 		t.Fatalf("run with a matching sidecar: %v", err)
@@ -566,12 +599,12 @@ func TestRuntimeSidecarSHA256(t *testing.T) {
 	}
 }
 
-// TestRuntimeNoSidecarInstalls: a tarball without a .sha256 beside it
+// TestRuntimeSidecarOptional: a tarball without a .sha256 beside it
 // installs (the sidecar is checked only when it exists).
 func TestRuntimeSidecarOptional(t *testing.T) {
 	env, _, _, _, _ := runtimeEnv(t)
-	_, _, _, tgz := runtimeFixture(t)
-	env.Opt.Runtime = writeRuntimeTarball(t, tgz)
+	satisfyPins(t, env)
+	withTarball(t, env)
 	if _, _, err := runRuntime(t, env); err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -581,12 +614,12 @@ func TestRuntimeSidecarOptional(t *testing.T) {
 // tarball are kept — the compare is by content, not by file time.
 func TestRuntimeKeptIdenticalBinaries(t *testing.T) {
 	env, _, _, _, _ := runtimeEnv(t)
-	_, _, _, tgz := runtimeFixture(t)
-	env.Opt.Runtime = writeRuntimeTarball(t, tgz)
+	satisfyPins(t, env)
+	withTarball(t, env)
 	if _, _, err := runRuntime(t, env); err != nil {
 		t.Fatalf("first: %v", err)
 	}
-	env.Opt.Runtime = writeRuntimeTarball(t, tgz) // a fresh path, same bytes
+	env.Opt.Runtime = writeRuntimeTarball(t, mustTarball(t)) // a fresh path, same bytes
 	items, _, err := runRuntime(t, env)
 	if err != nil {
 		t.Fatalf("second: %v", err)
@@ -599,20 +632,30 @@ func TestRuntimeKeptIdenticalBinaries(t *testing.T) {
 	}
 }
 
+// mustTarball builds the fixture tarball, dropping the unused members.
+func mustTarball(t *testing.T) []byte {
+	t.Helper()
+	_, _, _, tgz := runtimeFixture(t)
+	return tgz
+}
+
 // TestRuntimeChangedOrchestratorGivesChangedAndRestart: different
 // orchestrator bytes are installed (changed) and the running
 // orchestrator is restarted.
 func TestRuntimeChangedOrchestratorGivesChangedAndRestart(t *testing.T) {
-	env, _, runner, _, health := runtimeEnv(t)
-	env.Run = activeRunner()
-	_, _, stamp, tgz := runtimeFixture(t)
-	env.Opt.Runtime = writeRuntimeTarball(t, tgz)
+	env, _, _, _, health := runtimeEnv(t)
+	satisfyPins(t, env)
+	runner := activeRunner() // the runner the phase records against
+	env.Run = runner
 	health.answers = nil // every poll healthy
+	withTarball(t, env)
 	if _, _, err := runRuntime(t, env); err != nil {
-		t.Fatalf("first: %v", err)
+		t.Fatalf("setup: %v", err)
 	}
+	runner.calls = nil // the tally starts at the second run
 
 	orch2 := "orchestrator-bin-v5"
+	_, _, stamp, _ := runtimeFixture(t)
 	tgz2 := runtimeTarball(t, orch2, "envd-bin-v4", stamp)
 	env.Opt.Runtime = writeRuntimeTarball(t, tgz2)
 	items, _, err := runRuntime(t, env)
@@ -623,6 +666,9 @@ func TestRuntimeChangedOrchestratorGivesChangedAndRestart(t *testing.T) {
 	if rows[orchestratorBinPath].Result != Changed {
 		t.Errorf("row %s = %s, want changed", orchestratorBinPath, rows[orchestratorBinPath].Result)
 	}
+	if row := rowOf(t, items, "restart "+orchestratorUnit); row.Result != Changed {
+		t.Errorf("restart row = %+v, want changed", row)
+	}
 	if got := runnerCommands(runner, "systemctl restart e2b-orchestrator"); len(got) != 1 {
 		t.Errorf("restarts %v, want exactly one after the binary changed", got)
 	}
@@ -631,14 +677,18 @@ func TestRuntimeChangedOrchestratorGivesChangedAndRestart(t *testing.T) {
 // TestPinnedPresentRightSHAKeptNotFetched: a present file with the
 // right sha256 is kept, and nothing is fetched.
 func TestPinnedPresentRightSHAKeptNotFetched(t *testing.T) {
-	env, _, runner, fetcher, _ := runtimeEnv(t)
-	env.Run = activeRunner() // a running orchestrator: no enable on a kept run
+	env, _, _, fetcher, _ := runtimeEnv(t)
+	runner := activeRunner() // a running orchestrator: no enable on a kept run
+	env.Run = runner
 	pins := fakePins(len(pinned))
 	usePins(t, pins)
 	seedPins(t, env, pins)
-	_, _, _, tgz := runtimeFixture(t)
-	env.Opt.Runtime = writeRuntimeTarball(t, tgz)
+	withTarball(t, env)
 
+	if _, _, err := runRuntime(t, env); err != nil { // a setup first: binaries and config land
+		t.Fatalf("setup run: %v", err)
+	}
+	runner.calls = nil
 	items, _, err := runRuntime(t, env)
 	if err != nil {
 		t.Fatalf("run: %v", err)
@@ -673,8 +723,7 @@ func TestPinnedAbsentFetchedAndVerified(t *testing.T) {
 	pins := fakePins(len(pinned))
 	usePins(t, pins)
 	servePins(t, fetcher, pins)
-	_, _, _, tgz := runtimeFixture(t)
-	env.Opt.Runtime = writeRuntimeTarball(t, tgz)
+	withTarball(t, env)
 
 	items, _, err := runRuntime(t, env)
 	if err != nil {
@@ -714,8 +763,7 @@ func TestPinnedInPlaceWrongSHAFetchedNotBlindlyKept(t *testing.T) {
 	if err := os.WriteFile(env.Resolve(p.row.path), []byte("wrong bytes"), p.row.mode); err != nil {
 		t.Fatal(err)
 	}
-	_, _, _, tgz := runtimeFixture(t)
-	env.Opt.Runtime = writeRuntimeTarball(t, tgz)
+	withTarball(t, env)
 
 	items, _, err := runRuntime(t, env)
 	if err != nil {
@@ -734,9 +782,10 @@ func TestPinnedInPlaceWrongSHAFetchedNotBlindlyKept(t *testing.T) {
 // the pin fails the phase and leaves no file.
 func TestPinnedFetchedWrongBytesFails(t *testing.T) {
 	env, _, _, fetcher, _ := runtimeEnv(t)
+	withTarball(t, env)
+	// The first pin's content under its URL does not match the pin's
+	// sha256: the fetch succeeds, the verify fails.
 	fetcher.served[pinned[0].url] = []byte("not firecracker")
-	_, _, _, tgz := runtimeFixture(t)
-	env.Opt.Runtime = writeRuntimeTarball(t, tgz)
 
 	items, text, err := runRuntime(t, env)
 	if err == nil || !strings.Contains(err.Error(), "the pin wants "+pinned[0].sha256) {
@@ -759,8 +808,7 @@ func TestPinnedFetchFailureKeepsOldFile(t *testing.T) {
 	if err := os.WriteFile(env.Resolve(pinned[0].path), []byte("stale bytes"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	_, _, _, tgz := runtimeFixture(t)
-	env.Opt.Runtime = writeRuntimeTarball(t, tgz)
+	withTarball(t, env)
 
 	items, _, err := runRuntime(t, env)
 	if err == nil {
@@ -779,8 +827,8 @@ func TestPinnedFetchFailureKeepsOldFile(t *testing.T) {
 // the unit becomes the operator's --store-dir.
 func TestStoreDirSubstituted(t *testing.T) {
 	env, _, _, _, _ := runtimeEnv(t)
-	_, _, _, tgz := runtimeFixture(t)
-	env.Opt.Runtime = writeRuntimeTarball(t, tgz)
+	satisfyPins(t, env)
+	withTarball(t, env)
 	env.Opt.StoreDir = "/data/e2b-store"
 
 	if _, _, err := runRuntime(t, env); err != nil {
@@ -816,8 +864,8 @@ func TestShippedConfigsMatchDeployFiles(t *testing.T) {
 // other content is kept with the compare note, not overwritten.
 func TestOperatorEditedConfigKept(t *testing.T) {
 	env, _, _, _, _ := runtimeEnv(t)
-	_, _, _, tgz := runtimeFixture(t)
-	env.Opt.Runtime = writeRuntimeTarball(t, tgz)
+	satisfyPins(t, env)
+	withTarball(t, env)
 	if err := os.MkdirAll(env.Resolve("/etc/e2b"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -846,8 +894,8 @@ func TestOperatorEditedConfigKept(t *testing.T) {
 // store dir substituted) already in place is a plain kept, no note.
 func TestIdenticalOperatorConfigKeptPlain(t *testing.T) {
 	env, _, _, _, _ := runtimeEnv(t)
-	_, _, _, tgz := runtimeFixture(t)
-	env.Opt.Runtime = writeRuntimeTarball(t, tgz)
+	satisfyPins(t, env)
+	withTarball(t, env)
 	env.Opt.StoreDir = "/data/store"
 	want, err := shippedWithStore(orchestratorEnvShipped, "/data/store")
 	if err != nil {
@@ -869,14 +917,35 @@ func TestIdenticalOperatorConfigKeptPlain(t *testing.T) {
 	}
 }
 
+// TestDefaultStoreDirWrittenVerbatim: without --store-dir the shipped
+// bytes are installed as they are, every /forkdcache/e2b kept.
+func TestDefaultStoreDirWrittenVerbatim(t *testing.T) {
+	env, _, _, _, _ := runtimeEnv(t)
+	satisfyPins(t, env)
+	withTarball(t, env)
+	want, err := shipped(orchestratorEnvShipped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(want, []byte(DefaultStoreDir)) {
+		t.Fatalf("the shipped env does not name %s; this test would be empty", DefaultStoreDir)
+	}
+	if _, _, err := runRuntime(t, env); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if b, _ := os.ReadFile(env.Resolve(orchestratorEnvPath)); !bytes.Equal(b, want) {
+		t.Errorf("the default store dir was rewritten:\n%s", b)
+	}
+}
+
 // TestTokenSeedCreated0600AndNeverOverwritten: the seed is created with
 // 64 hex chars at 0600; a run over an existing seed keeps it — the
 // seed's value is never read back, so an operator's hand-set seed
 // stays.
 func TestTokenSeedCreated0600AndNeverOverwritten(t *testing.T) {
 	env, out, _, _, _ := runtimeEnv(t)
-	_, _, _, tgz := runtimeFixture(t)
-	env.Opt.Runtime = writeRuntimeTarball(t, tgz)
+	satisfyPins(t, env)
+	withTarball(t, env)
 
 	if _, _, err := runRuntime(t, env); err != nil {
 		t.Fatalf("first run: %v", err)
@@ -898,8 +967,8 @@ func TestTokenSeedCreated0600AndNeverOverwritten(t *testing.T) {
 
 	// A pre-existing seed is kept whatever its content looks like.
 	env2, out2, _, _, _ := runtimeEnv(t)
-	_, _, _, tgz2 := runtimeFixture(t)
-	env2.Opt.Runtime = writeRuntimeTarball(t, tgz2)
+	satisfyPins(t, env2)
+	withTarball(t, env2)
 	if err := os.MkdirAll(env2.Resolve(spoondDirPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -924,10 +993,16 @@ func TestTokenSeedCreated0600AndNeverOverwritten(t *testing.T) {
 }
 
 // TestSeedIsFreshRandom: two runs write different seeds (they are
-// random, not a constant).
+// random, not a constant), shaped as 64 hex chars plus a newline.
 func TestSeedIsFreshRandom(t *testing.T) {
-	a := seedValue()
-	b := seedValue()
+	a, err := seedValue()
+	if err != nil {
+		t.Fatalf("seedValue: %v", err)
+	}
+	b, err := seedValue()
+	if err != nil {
+		t.Fatalf("seedValue: %v", err)
+	}
 	if bytes.Equal(a, b) {
 		t.Error("two seeds are equal")
 	}
@@ -943,8 +1018,8 @@ func TestSeedIsFreshRandom(t *testing.T) {
 // no "drain" line, and keeps every other line.
 func TestUnitHasNoDrainLine(t *testing.T) {
 	env, _, _, _, _ := runtimeEnv(t)
-	_, _, _, tgz := runtimeFixture(t)
-	env.Opt.Runtime = writeRuntimeTarball(t, tgz)
+	satisfyPins(t, env)
+	withTarball(t, env)
 
 	if _, _, err := runRuntime(t, env); err != nil {
 		t.Fatalf("run: %v", err)
@@ -970,12 +1045,32 @@ func TestUnitHasNoDrainLine(t *testing.T) {
 	}
 }
 
+// TestUnitKeepsShapeAfterDrop: dropping the drain lines leaves one
+// blank line between sections, no doubled blanks, one trailing
+// newline.
+func TestUnitKeepsShapeAfterDrop(t *testing.T) {
+	full, err := shipped(orchestratorShipped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	light := dropDrainLines(full)
+	if bytes.Contains(bytes.ToLower(light), []byte("drain")) {
+		t.Errorf("the de-drained unit still carries a drain line:\n%s", light)
+	}
+	if !bytes.HasSuffix(light, []byte("\n")) {
+		t.Error("the de-drained unit lost its trailing newline")
+	}
+	if bytes.Contains(light, []byte("\n\n\n")) {
+		t.Errorf("the de-drained unit has doubled blank lines:\n%s", light)
+	}
+}
+
 // TestFullShippedUnitKept: a unit holding the shipped drain hooks (the
 // spoond phase's install) is kept, not downgraded.
 func TestFullShippedUnitKept(t *testing.T) {
 	env, _, _, _, _ := runtimeEnv(t)
-	_, _, _, tgz := runtimeFixture(t)
-	env.Opt.Runtime = writeRuntimeTarball(t, tgz)
+	satisfyPins(t, env)
+	withTarball(t, env)
 	fullUnit, err := shippedWithStore(orchestratorShipped, "")
 	if err != nil {
 		t.Fatal(err)
@@ -1007,14 +1102,10 @@ func TestFullShippedUnitKept(t *testing.T) {
 func TestDryRunRuntime(t *testing.T) {
 	env, _, runner, fetcher, _ := runtimeEnv(t)
 	env.DryRun = true
-	env.Run = idleRunner()
-	// Present pinned artifacts whose sha256 matches the (test's) pin
-	// table: kept without a fetch.
 	pins := fakePins(len(pinned))
 	usePins(t, pins)
 	seedPins(t, env, pins)
-	_, _, _, tgz := runtimeFixture(t)
-	env.Opt.Runtime = writeRuntimeTarball(t, tgz)
+	withTarball(t, env)
 
 	items, text, err := runRuntime(t, env)
 	if err != nil {
@@ -1054,8 +1145,8 @@ func TestDryRunRuntime(t *testing.T) {
 // --runtime plans the release install without fetching anything.
 func TestDryRunRuntimeReleaseNotFetched(t *testing.T) {
 	env, _, runner, fetcher, _ := runtimeEnv(t)
+	satisfyPins(t, env)
 	env.DryRun = true
-	env.Run = idleRunner()
 	items, text, err := runRuntime(t, env)
 	if err != nil {
 		t.Fatalf("dry run: %v\n%s", err, text)
@@ -1070,8 +1161,10 @@ func TestDryRunRuntimeReleaseNotFetched(t *testing.T) {
 	if len(fetcher.urls) != 0 {
 		t.Errorf("the dry run fetched %v", fetcher.urls)
 	}
-	if len(runner.calls) != 0 {
-		t.Errorf("the dry run ran %v", runner.calls)
+	for _, call := range runner.calls {
+		if !strings.Contains(call, "is-active") {
+			t.Errorf("the dry run ran %v", runner.calls)
+		}
 	}
 }
 
@@ -1081,15 +1174,13 @@ func TestDryRunRuntimeReleaseNotFetched(t *testing.T) {
 func TestDryRunRuntimeStalePinnedNotFetched(t *testing.T) {
 	env, _, _, fetcher, _ := runtimeEnv(t)
 	env.DryRun = true
-	env.Run = idleRunner()
 	if err := os.MkdirAll(env.Resolve(filepath.Dir(pinned[0].path)), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(env.Resolve(pinned[0].path), []byte("stale bytes"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	_, _, _, tgz := runtimeFixture(t)
-	env.Opt.Runtime = writeRuntimeTarball(t, tgz)
+	withTarball(t, env)
 	items, _, err := runRuntime(t, env)
 	if err != nil {
 		t.Fatalf("dry run: %v", err)
@@ -1103,21 +1194,19 @@ func TestDryRunRuntimeStalePinnedNotFetched(t *testing.T) {
 }
 
 // TestRestartConditions: the orchestrator is restarted only when its
-// unit, env, flags or binary changed and it was already active — the
-// guard unit changing alone does not restart it.
+// unit, env, flags or binary changed and it was already active.
 func TestRestartConditions(t *testing.T) {
-	// The env, flags, unit and binaries changing with the orchestrator
-	// up: one restart.
-	env, _, runner, _, health := runtimeEnv(t)
-	env.Run = activeRunner()
+	// A first install over a running orchestrator: binaries, config
+	// and units were all created this run, so one restart.
+	env, _, _, _, health := runtimeEnv(t)
+	satisfyPins(t, env)
+	runner := activeRunner() // a running orchestrator
+	env.Run = runner
 	health.answers = nil
-	_, _, _, tgz := runtimeFixture(t)
-	env.Opt.Runtime = writeRuntimeTarball(t, tgz)
+	withTarball(t, env)
 	if _, _, err := runRuntime(t, env); err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	// All targets were created this run, the orchestrator is running:
-	// exactly one restart.
 	if got := runnerCommands(runner, "systemctl restart e2b-orchestrator"); len(got) != 1 {
 		t.Errorf("restarts %v, want one (files changed, it was active)", got)
 	}
@@ -1137,11 +1226,12 @@ func TestRestartConditions(t *testing.T) {
 // the phase restart it.
 func TestGuardUnitChangedAloneDoesNotRestartOrchestrator(t *testing.T) {
 	// Set up a fully installed host, then edit the guard unit only.
-	env, _, runner, _, health := runtimeEnv(t)
-	env.Run = activeRunner()
+	env, _, _, _, health := runtimeEnv(t)
+	satisfyPins(t, env)
+	runner := activeRunner() // a running orchestrator
+	env.Run = runner
 	health.answers = nil
-	_, _, _, tgz := runtimeFixture(t)
-	env.Opt.Runtime = writeRuntimeTarball(t, tgz)
+	withTarball(t, env)
 	if _, _, err := runRuntime(t, env); err != nil {
 		t.Fatalf("setup run: %v", err)
 	}
@@ -1176,10 +1266,10 @@ func TestGuardUnitChangedAloneDoesNotRestartOrchestrator(t *testing.T) {
 // command, and the poll hit /health repeatedly.
 func TestHealthTimeoutMessage(t *testing.T) {
 	env, _, _, _, health := runtimeEnv(t)
+	satisfyPins(t, env)
 	env.Run = idleRunner()
 	health.answers = []error{errFailed("connection refused")}
-	_, _, _, tgz := runtimeFixture(t)
-	env.Opt.Runtime = writeRuntimeTarball(t, tgz)
+	withTarball(t, env)
 
 	items, _, err := runRuntime(t, env)
 	if err == nil || !strings.Contains(err.Error(), "the orchestrator is not healthy: journalctl -u e2b-orchestrator -n 50") {
@@ -1188,7 +1278,7 @@ func TestHealthTimeoutMessage(t *testing.T) {
 	if !strings.Contains(err.Error(), "connection refused") {
 		t.Errorf("err %q does not name the last check", err)
 	}
-	row := rowsByName(t, items)["orchestrator /health"]
+	row := rowOf(t, items, "orchestrator /health")
 	if row.Result != Failed {
 		t.Errorf("row = %+v, want failed", row)
 	}
@@ -1201,20 +1291,54 @@ func TestHealthTimeoutMessage(t *testing.T) {
 // answers healthy passes the phase.
 func TestHealthWaitsThroughStartup(t *testing.T) {
 	env, _, _, _, health := runtimeEnv(t)
+	satisfyPins(t, env)
 	env.Run = idleRunner()
 	health.answers = []error{errFailed("starting"), errFailed("still starting"), nil}
-	_, _, _, tgz := runtimeFixture(t)
-	env.Opt.Runtime = writeRuntimeTarball(t, tgz)
+	withTarball(t, env)
 
 	items, _, err := runRuntime(t, env)
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if row := rowsByName(t, items)["orchestrator /health"]; row.Result != Kept {
+	row := rowOf(t, items, "orchestrator /health")
+	if row.Result != Kept {
 		t.Errorf("row = %+v, want kept", row)
 	}
 	if len(health.urls) != 3 {
 		t.Errorf("polled %d times (%v), want 3 (two failed polls then healthy)", len(health.urls), health.urls)
+	}
+}
+
+// TestHealthCancelledContextStopsWaiting: a cancelled context ends the
+// health wait quickly (Ctrl-C during the wait must not poll on), and
+// the phase fails with the journalctl hint.
+func TestHealthCancelledContextStopsWaiting(t *testing.T) {
+	env, _, _, _, health := runtimeEnv(t)
+	satisfyPins(t, env)
+	// The stub is the phase's fast-poll value; a real Ctrl-C would hit
+	// the production 2 s gap, which this check pins through pollEvery.
+	state := stubRuntime(t, nil, health)
+	state.pollEvery = 10 * time.Second
+	state.deadline = time.Minute
+	health.answers = []error{errFailed("refused")}
+	withTarball(t, env)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	start := time.Now()
+	items, err := RunPhase(ctx, env, PhaseRuntime, Phases[PhaseRuntime])
+	if err == nil || !strings.Contains(err.Error(), "the orchestrator is not healthy") {
+		t.Fatalf("err = %v, want the journalctl hint", err)
+	}
+	row := rowOf(t, items, "orchestrator /health")
+	if row.Result != Failed {
+		t.Errorf("row = %+v, want failed", row)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("the cancelled wait ran %s, want a quick return", elapsed)
+	}
+	if n := len(health.urls); n > 2 {
+		t.Errorf("polled %d times on a cancelled context, want at most an initial check", n)
 	}
 }
 
@@ -1295,7 +1419,7 @@ func TestPinnedTableMatchesHostSetup(t *testing.T) {
 		t.Fatalf("host-setup.sh's base is not %s (the table's URLs name it); read the script and align both", artifactBucket)
 	}
 	var fetches int
-	for _, line := range strings.Split(string(b), "\n") {
+	for _, line := range strings.Split(script, "\n") {
 		f := strings.Fields(line)
 		if len(f) != 5 || f[0] != "fetch" {
 			continue
@@ -1330,7 +1454,7 @@ func TestPinnedTableMatchesHostSetup(t *testing.T) {
 	}
 	// The two artifacts the script installs from the fork checkout are
 	// NOT in the pin table (they come from the runtime tarball now).
-	if strings.Contains(string(b), "/root/src/e2b-runtime") {
+	if strings.Contains(script, "/root/src/e2b-runtime") {
 		for _, art := range pinned {
 			if art.path == envdBinPath || art.path == orchestratorBinPath {
 				t.Errorf("the pin table pins %s; binaries come from the runtime tarball", art.path)
@@ -1366,35 +1490,6 @@ func TestSumsList(t *testing.T) {
 	}
 }
 
-// TestDropDrainLinesShape: the de-drained unit keeps its shape (no
-// doubled newlines, one trailing newline) and loses only the drain
-// lines.
-func TestDropDrainLinesShape(t *testing.T) {
-	full, err := shipped(orchestratorShipped)
-	if err != nil {
-		t.Fatal(err)
-	}
-	light := dropDrainLines(full)
-	if bytes.Contains(bytes.ToLower(light), []byte("drain")) {
-		t.Errorf("the de-drained unit still carries a drain line:\n%s", light)
-	}
-	if !bytes.HasSuffix(light, []byte("\n")) {
-		t.Error("the de-drained unit lost its trailing newline")
-	}
-	if bytes.Contains(light, []byte("\n\n\n")) {
-		t.Errorf("the de-drained unit has doubled blank lines:\n%s", light)
-	}
-	var wanted int
-	for _, line := range strings.Split(string(full), "\n") {
-		if line != "" && !strings.Contains(strings.ToLower(line), "drain") {
-			if !bytes.Contains(light, []byte(line+"\n")) {
-				t.Errorf("lost %q", line)
-			}
-		}
-	}
-	_ = wanted
-}
-
 // TestRuntimeTarballMembersMatchBuildScript: the tarball the build
 // script stages (spoond-runtime/{orchestrator,envd,RUNTIME}) is exactly
 // what unpackRuntime reads; a member name change breaks the installer.
@@ -1423,7 +1518,7 @@ func TestSeedFromCryptoRandIs64Hex(t *testing.T) {
 		t.Errorf("encodeToString(32 bytes) = %q, want 64 hex chars", hexed)
 	}
 	var raw2 [32]byte
-	mrand := mrand.New(mrand.NewSource(1))
-	mrand.Read(raw2[:]) // never used as a seed; only shape-checking the size
+	mr := mrand.New(mrand.NewSource(1))
+	mr.Read(raw2[:]) // never used as a seed; only shape-checking the size
 	_ = raw2
 }

@@ -222,7 +222,10 @@ func init() {
 
 // run is the phase body, in the plan's order: the runtime binaries,
 // the pinned artifacts, /fc-vm, the e2b config, the token seed, the
-// firewall, the orchestrator unit, systemd, and the health wait.
+// firewall, the orchestrator unit, systemd (daemon-reload, enable,
+// restart) and the health wait. Every added row, the systemd step's
+// included, is in the returned items (r.Items() is read after the
+// last step ran, so no row is lost).
 func (p *runtimeState) run(ctx context.Context, env *Env) ([]Item, error) {
 	r := &Reporter{Phase: PhaseRuntime, Out: env.Out}
 
@@ -251,7 +254,10 @@ func (p *runtimeState) run(ctx context.Context, env *Env) ([]Item, error) {
 	if err := installOrchestratorUnit(r, env); err != nil {
 		return r.Items(), err
 	}
-	return r.Items(), p.orchestration(r, ctx, env)
+	// Last: the changed set above decides restart and the health wait.
+	// The rows land in r before Items() is read, so none is lost.
+	err := p.orchestration(r, ctx, env)
+	return r.Items(), err
 }
 
 // fetch runs the phase's fetcher (production or test fake).
@@ -260,6 +266,13 @@ func (p *runtimeState) fetch(ctx context.Context, url string) ([]byte, error) {
 		return p.Fetch.Fetch(ctx, url)
 	}
 	return httpFetcher{}.Fetch(ctx, url)
+}
+
+// downloadName is the release tarball's file name for a version: the
+// tag with its leading v ("spoond-runtime_4.0.0_linux_amd64.tar.gz"
+// for v4.0.0).
+func downloadName(version string) string {
+	return "spoond-runtime_" + strings.TrimPrefix(version, "v") + "_linux_amd64.tar.gz"
 }
 
 // installBinaries puts the orchestrator, envd and the RUNTIME stamp on
@@ -291,12 +304,11 @@ func (p *runtimeState) installBinaries(r *Reporter, ctx context.Context, env *En
 // dry run, without fetching: one row per target, decided by what is
 // already on disk.
 func planRelease(r *Reporter, env *Env) {
-	ver := strings.TrimPrefix(env.Version, "v")
-	name := "spoond-runtime_" + ver + "_linux_amd64.tar.gz"
+	name := downloadName(env.Version)
 	note := "would download " + name + ", check its line in SHA256SUMS and install (dry-run fetches nothing)"
 	for _, path := range []string{orchestratorBinPath, envdBinPath, runtimeStampPath} {
 		if _, err := os.Stat(env.Resolve(path)); err == nil {
-			r.Add(Skipped, path, note+" — but it is here and would be compared first")
+			r.Add(Kept, path, note+" — but it is here and would be compared first")
 			continue
 		}
 		r.Add(Created, path, note)
@@ -320,9 +332,9 @@ func writeRuntime(r *Reporter, env *Env, orchestrator, envd, stamp []byte) error
 // members. Both downloads land in memory first, so a wrong release
 // writes nothing.
 func (p *runtimeState) releaseRuntime(ctx context.Context, env *Env) (orchestrator, envd, stamp []byte, err error) {
-	ver := strings.TrimPrefix(env.Version, "v")
+	name := downloadName(env.Version)
 	base := "https://github.com/jrimmer/spoond/releases/download/" + env.Version
-	tgz, err := p.fetch(ctx, base+"/spoond-runtime_"+ver+"_linux_amd64.tar.gz")
+	tgz, err := p.fetch(ctx, base+"/"+name)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -331,14 +343,15 @@ func (p *runtimeState) releaseRuntime(ctx context.Context, env *Env) (orchestrat
 		return nil, nil, nil, err
 	}
 	if !sumsList(sums, sha256sum(tgz)) {
-		return nil, nil, nil, fmt.Errorf("SHA256SUMS: the %s tarball's sha256 is not in it — the release is broken or mid-publish; retry, or pin a --runtime tarball", ver)
+		return nil, nil, nil, fmt.Errorf("SHA256SUMS: the %s tarball's sha256 is not in it — the release is broken or mid-publish; retry, or pin a --runtime tarball", name)
 	}
 	return unpackRuntime(tgz, "the release tarball")
 }
 
 // localRuntime reads the --runtime tarball, checks the .sha256 beside
 // it when it exists (build-runtime.sh writes one), and untars the
-// members.
+// members. The tarball is read into memory first, so a wrong checksum
+// writes nothing.
 func localRuntime(file string) (orchestrator, envd, stamp []byte, err error) {
 	tgz, err := os.ReadFile(file)
 	if err != nil {
@@ -545,20 +558,24 @@ func installSeed(r *Reporter, env *Env) error {
 	if err := mkdirMode(r, env, spoondDirPath, 0o700); err != nil {
 		return err
 	}
-	return env.writeFileKeep(r, tokenSeedPath, seedValue())
+	seed, err := seedValue()
+	if err != nil {
+		return err
+	}
+	return env.writeFileKeep(r, tokenSeedPath, seed)
 }
 
-// seedValue is a fresh seed: 32 random bytes as 64 hex chars, a
-// trailing newline (openssl rand -hex 32's shape; the readers trim
-// it off).
-func seedValue() []byte {
+// seedValue is a fresh seed: 32 random bytes hex-encoded to 64 chars,
+// with a trailing newline (openssl rand -hex 32's shape in
+// docs/install.md; the readers TrimSpace it off).
+func seedValue() ([]byte, error) {
 	var raw [32]byte
 	if _, err := rand.Read(raw[:]); err != nil {
 		// crypto/rand reads the kernel's randomness; a failure leaves
-		// no safe seed, so the phase cannot continue.
-		panic("install: crypto/rand: " + err.Error())
+		// no seed a safe install could continue with.
+		return nil, fmt.Errorf("crypto/rand for the token seed: %w", err)
 	}
-	return []byte(hex.EncodeToString(raw[:]) + "\n")
+	return []byte(hex.EncodeToString(raw[:]) + "\n"), nil
 }
 
 // installGuard writes the host firewall: the nftables table and its
@@ -606,27 +623,42 @@ func installOrchestratorUnit(r *Reporter, env *Env) error {
 	}
 }
 
-// dropDrainLines returns the unit without every line containing
-// "drain" (case-insensitively, hooks and their comments alike). It is
-// docs/install.md section 2's `grep -v drain`, read more strictly so
-// no dangling comment is left behind.
+// dropDrainLines returns the unit without every line mentioning drain —
+// the hooks and the whole comment block that documents them — and
+// collapses the run of blank lines their removal leaves. It is
+// docs/install.md section 2's `grep -v drain`, so the installed unit
+// keeps the shipped shape.
 func dropDrainLines(unit []byte) []byte {
-	var kept []string
+	var kept [][]byte
 	for _, line := range bytes.Split(unit, []byte("\n")) {
 		if bytes.Contains(bytes.ToLower(line), []byte("drain")) {
 			continue
 		}
-		kept = append(kept, string(line))
+		kept = append(kept, line)
 	}
-	return []byte(strings.Join(kept, "\n"))
+	// Collapse the blanks the dropped lines left between lines that
+	// survived.
+	var out []string
+	blanks := 0
+	for _, line := range kept {
+		if len(bytes.TrimSpace(line)) == 0 {
+			blanks++
+			continue
+		}
+		if blanks > 0 && len(out) > 0 {
+			out = append(out, "")
+		}
+		blanks = 0
+		out = append(out, string(line))
+	}
+	return []byte(strings.Join(out, "\n") + "\n")
 }
 
 // orchestration is the systemd step: daemon-reload when a unit file
-// changed; enable --now when a unit changed or the orchestrator is not
-// running; a restart only when the orchestrator's own surface (its
-// unit, env, flags or binary) changed this run and it was already
-// active. Every real run then waits for /health (a dry run never
-// does).
+// changed; enable --now when a unit changed; a restart only when the
+// orchestrator's own surface (its unit, env, flags or binary) changed
+// this run and it was already active; then the health wait. A dry run
+// plans the restart and runs nothing.
 func (p *runtimeState) orchestration(r *Reporter, ctx context.Context, env *Env) error {
 	changed := changedSet(r.Items())
 	anyUnitChanged := changed[guardUnitPath] || changed[orchestratorUnitPath]
@@ -646,8 +678,8 @@ func (p *runtimeState) orchestration(r *Reporter, ctx context.Context, env *Env)
 		if err := env.exec(ctx, "systemctl", "daemon-reload"); err != nil {
 			return fmt.Errorf("systemctl daemon-reload: %w", err)
 		}
-	}
-	if anyUnitChanged || !active {
+		// The units' contents just changed, or a first install puts
+		// them in place.
 		if err := env.exec(ctx, "systemctl", "enable", "--now", guardUnit, orchestratorUnit); err != nil {
 			return fmt.Errorf("systemctl enable --now %s %s: %w", guardUnit, orchestratorUnit, err)
 		}
@@ -680,23 +712,33 @@ func (p *runtimeState) planOrchestratorRestart(r *Reporter, orchChanged, active 
 
 // waitHealth polls the orchestrator's /health until it answers healthy
 // or the deadline passes; the failure hands the operator the journal
-// command.
+// command. A cancelled context stops the wait instead of polling on.
 func (p *runtimeState) waitHealth(r *Reporter, ctx context.Context, env *Env) error {
 	deadline := time.Now().Add(p.pollDeadline())
 	var last error
 	for {
+		if err := ctx.Err(); err != nil {
+			// Stopped between polls.
+			last = err
+			break
+		}
 		last = p.health().Check(ctx, runtimeHealthURL)
 		if last == nil {
 			r.Add(Kept, "orchestrator /health", runtimeHealthURL+" answers healthy")
 			return nil
 		}
+		if time.Now().After(deadline) {
+			break
+		}
+		if err := ctx.Err(); err != nil {
+			// Stopped while the poll was in flight.
+			last = err
+			break
+		}
 		select {
 		case <-ctx.Done():
 			last = ctx.Err()
 		case <-time.After(p.pollGap()):
-		}
-		if time.Now().After(deadline) {
-			break
 		}
 	}
 	msg := fmt.Errorf("the orchestrator is not healthy: journalctl -u %s -n 50 (last check: %v)", orchestratorUnit, last)
