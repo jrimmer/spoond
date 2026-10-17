@@ -666,6 +666,7 @@ func (p *runtimeState) orchestration(r *Reporter, ctx context.Context, env *Env)
 	// its answer. Queried before enable --now, so "not running" means
 	// enable --now starts it (with whatever files are on disk).
 	active := orchestratorActive(ctx, env)
+	guardActive := unitActive(ctx, env, guardUnit)
 
 	if env.DryRun {
 		p.planOrchestratorRestart(r, orchChanged, active)
@@ -685,8 +686,9 @@ func (p *runtimeState) orchestration(r *Reporter, ctx context.Context, env *Env)
 		}
 	}
 	// The guard is a oneshot that loads the table at start: new rules
-	// take effect only when it runs again.
-	if changed[guardNftPath] || changed[guardUnitPath] {
+	// take effect only when it runs again. One that was not running was
+	// just started by enable --now.
+	if guardActive && (changed[guardNftPath] || changed[guardUnitPath]) {
 		if err := env.exec(ctx, "systemctl", "restart", guardUnit); err != nil {
 			return fmt.Errorf("systemctl restart %s: %w", guardUnit, err)
 		}
@@ -782,7 +784,12 @@ func (p *runtimeState) pollDeadline() time.Duration {
 // "active" is the only yes; a missing unit, "inactive" or any error is
 // no.
 func orchestratorActive(ctx context.Context, env *Env) bool {
-	out, err := env.query(ctx, "systemctl", "is-active", orchestratorUnit)
+	return unitActive(ctx, env, orchestratorUnit)
+}
+
+// unitActive asks systemd whether a unit is running.
+func unitActive(ctx context.Context, env *Env, unit string) bool {
+	out, err := env.query(ctx, "systemctl", "is-active", unit)
 	return err == nil && strings.TrimSpace(string(out)) == "active"
 }
 

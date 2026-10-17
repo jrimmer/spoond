@@ -212,6 +212,7 @@ func rtIsHex(s string) bool {
 func activeRunner() *recordRunner {
 	return &recordRunner{reply: map[string]fakeReply{
 		"systemctl is-active e2b-orchestrator":              {out: []byte("active\n")},
+		"systemctl is-active e2b-guard":                     {out: []byte("active\n")},
 		"systemctl daemon-reload":                           {},
 		"systemctl enable --now e2b-guard e2b-orchestrator": {},
 		"systemctl restart e2b-orchestrator":                {},
@@ -431,9 +432,11 @@ func TestRuntimeTarballHappyPath(t *testing.T) {
 		t.Error("the report printed the token seed")
 	}
 
-	// Second run: everything kept, no command but the is-active query.
+	// Second run: everything kept, no command but the is-active query
+	// (the first run started the orchestrator, so it is active now).
 	health.answers = nil
-	runner.calls = nil
+	runner = activeRunner()
+	env.Run = runner
 	items2, text2, err := runRuntime(t, env)
 	if err != nil {
 		t.Fatalf("second run: %v\n%s", err, text2)
