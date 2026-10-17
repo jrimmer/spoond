@@ -22,11 +22,10 @@ spoond (this repo, one Go binary)          e2b-orchestrator (our fork of
 images/*.dockerfile → docker → local registry → E2B templates (spoond images)
 ```
 
-spoond 2.0 runs on E2B's orchestrator; forkd, the 1.x substrate, is
-removed. spoond is a generic microVM utility: it takes no position on
-how agents work, and agent workflow lives in the separate Honey project,
-which drives spoond through the lease API. The design, decisions and
-per-unit specs are in
+spoond is a generic microVM utility: it takes no position on how agents
+work, and its clients drive it through the lease API. Since 2.0 it runs
+on E2B's orchestrator; forkd, the 1.x substrate, is gone. The design,
+decisions and per-unit specs are in
 [docs/plans/2026-09-30-e2b-substrate/](docs/plans/2026-09-30-e2b-substrate/00-README.md),
 and every change is in [CHANGELOG.md](CHANGELOG.md).
 
@@ -191,62 +190,25 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
 
 ## Dashboard
 
-`spoond dash` is a read-only, live view of spoond's present operation,
-for watching rather than triage. It draws one character grid at a fixed
-width (DASH_WIDTH, default 104): framed panels for capacity (a
-running/limit meter, leases by state, queued, granted, swept, running
-leases per image), host meters (CPU, memory, hugepages, snapshot and
-root disk, with the warn/danger levels), a full-width throughput panel
-(running leases, requests per second, creates per minute, egress
-connections — each with its current value and a sparkline over the
-history), live leases (id, image, size as memory/vCPUs, owner, the
-two-cell state glyphs (▶ ‖ ■ ⭘, with ◆ on a pinned lease; a suspended
-lease's glyph is coloured by its suspend reason), policy, age, time
-left, holder — on the page the holder is a link), the image catalog
-(default size as mem/vcpu, sorted by use, eight rows then `+N more`
-linking to a full `/images` page, and a total row) beside the systemd
-units, a **records** panel of all-time stats from the lease history
-(busiest moment, longest and shortest run, top owner, lifetime totals
-and more; test owners left out via `DASH_RECORDS_EXCLUDE`), a refusals-and-failures row with the mean create and resume
-times, and the newest lease events (from the lease event stream,
-through a read-only `EVENTS_TOKEN`). The header draws `SPOOND ·
-<host>` at the left margin and right-aligns spoond's uptime and the
-frame's clock as `up <dur>, <time>`; the footer is one dim, centred
-line — `Spoond v3.9.0 (2026-10-14) · GitHub` — with the
-dashboard binary's version and its release date, and the GitHub mark
-linking to the project URL (`DASH_PROJECT_URL`), dropping the date on a
-narrow frame. `DASH_SERVICES` includes `spoond-netwatch` by default.
-Its layout puts capacity and host side by side at 104 columns and
-stacks them below that. The palette gives each state a colour role on
-the black background — cyan for titles and lease ids, blue for run
-state, green ok, amber warn, red bad, violet owner — never alone: every
-coloured state keeps its glyph or word. Above the panels sits a
-**Notifications** panel, drawn only when spoond has a system message to
-show: a systemd unit not active, snapshot disk past the danger level,
-or kept checkpoints past `KEPT_DISK_WARN_PCT` of the
-snapshot disk. Each message carries a stable id from its trigger and a
-severity, and each row has a `×` the viewer can click to dismiss it for
-their own browser (`localStorage`, no server state); the dismissal stays
-while the trigger stays active and returns if the trigger clears and
-fires again. Per-lease trouble is not a dashboard message — the
-dashboard viewer cannot act on a lease, so spoond tells the lease's
-initiator itself (the lease event stream and the API's `409
-lease_lost`/`lost_reason`). It refreshes every 2 seconds over
-one server-sent-event stream shared by all viewers; the page is the
-current grid in a `<pre>` with [WebTUI](https://webtui.ironclad.sh) for
-the chrome, and Datastar patches the rows that changed.
+![The spoond dashboard: capacity, host, throughput, leases, images, services, records, refusals and events panels](docs/images/dashboard.png)
 
-`spoond top` draws the same grid with ANSI styles in the terminal, at
-the terminal's width (COLUMNS, else 104), redrawn every 2 seconds until
-interrupted — the same collector, the same notifications panel without
-the dismiss control, no browser. Both it and `spoond dash` are excluded
-from the binary by the `nodash` build tag.
+`spoond dash` is a read-only, live view of one spoond host in the
+browser; `spoond top` draws the same view in a terminal. It shows
+capacity and host health (CPU, memory, hugepages, disks), throughput,
+the live leases, the image catalog, the systemd units, all-time records
+from the lease history, refusals and failures, and the newest lease
+events. A notifications panel appears above the rest only when the host
+needs a person, such as a unit that is down or a snapshot disk past its
+danger level. The view refreshes every 2 seconds. Problems with a single
+lease are not shown there: spoond tells the lease's owner through the
+lease event stream and the API.
 
-On host it runs as the `spoond-dash` unit on **:8893** (HTTPS, basic
-auth). Its data access is read-only: `/metrics` through the scrape-only
-`METRICS_TOKEN` (which the lease API refuses), the lease event stream
-through the events-only `EVENTS_TOKEN`, the SQLite catalog opened
-read-only, user names from the identity store, `/proc` and systemd.
+On a host it runs as the `spoond-dash` unit on **:8893** (HTTPS, with
+basic auth unless `DASH_AUTH=off`). Its data access is read-only:
+`/metrics` through the scrape-only `METRICS_TOKEN` (which the lease API
+refuses), the lease event stream through the events-only `EVENTS_TOKEN`,
+the SQLite catalog opened read-only, user names from the identity store,
+`/proc` and systemd.
 
 Setting it up is manual today; generating the credentials as part of
 installation is planned:
@@ -427,8 +389,8 @@ suspended lease's `409` says `lease_suspended`.
 **v2.7.1: a utility that tidies up after itself.** A lost lease says
 why (`410` with `code: lease_lost`) and is released after its grace period, every
 orchestrator call has a deadline, and the dashboard shows spoond system
-messages in a dismissable Notifications panel, i/o stall and disk-busy
-meters, and the version and a GitHub link in its footer.
+messages in a dismissable notifications panel, with i/o stall and
+disk-busy meters.
 
 **v2.7: named snapshots.** A lease can be saved as a named, versioned
 snapshot, and a new lease can start from it (`"snapshot": "name@v"`,
@@ -448,8 +410,7 @@ restart. Exec env no longer shows in the guest's command line.
 tracked background job in its lease, with its exit, output and a
 `job_exited` event spoond keeps even across backend restarts. A host
 running crash suites can let lease owners send a lease through crash
-recovery on demand (`CRASH_TEST=1`). The dashboard takes the mockup's
-colour roles on its black background.
+recovery on demand (`CRASH_TEST=1`).
 
 **v2.5: waiting and idle reclamation.** A create can wait for room
 (`"wait"`, fair-share order, with its queue position on the event
@@ -468,8 +429,8 @@ state. A preempted lease comes back on its holder's next work call
 by default and set per lease (`checkpoint_interval`); a checkpoint can be
 kept and a lease restored to it in place; `restart?mode=cold` gives a
 lease a fresh guest without changing its id. Guest images no longer
-leave root-run binaries writable by other users. The dashboard is laid
-out to its mockup, with a lease events panel.
+leave root-run binaries writable by other users. The dashboard gains a
+lease events panel.
 
 **v2.2: driving work inside a lease.** Lease files, guest port dial,
 secrets as files, the lease event stream and generations on the lease
@@ -477,8 +438,8 @@ API; `/readyz` for uptime monitors and webhook notifications for
 operators.
 
 **v2.1: a plain microVM utility.** Agent workflow (the hive, the worker
-layer, `spoond acp`, the cfos adapter) moved to the separate Honey
-project. The dashboard is drawn on a character grid, the same in the
+layer, `spoond acp`, the cfos adapter) moved out of spoond into a
+separate project. The dashboard is drawn on a character grid, the same in the
 browser and in the terminal (`spoond top`), on the public `grid`
 package. Leases can name their holder.
 

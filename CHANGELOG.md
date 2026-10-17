@@ -10,6 +10,13 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Changed
+
+- **README: a dashboard screenshot, and a shorter dashboard section**
+  that says what the dashboard shows rather than how each panel is drawn.
+
+## [3.9.1] - 2026-10-14
+
 ### Fixed
 
 - **Warm-pool sandboxes count toward the overcommit cap, and the
