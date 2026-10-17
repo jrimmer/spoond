@@ -926,6 +926,60 @@ func TestSpoondContainerSkipsBinary(t *testing.T) {
 	}
 }
 
+// TestSpoondTLSCertWithoutKey: the self-signed keep rule is a pair
+// rule — a leftover cert.pem without privkey.pem fails with the fix
+// (the mirror case, a key without a cert, fails the same way).
+func TestSpoondTLSCertWithoutKeyFails(t *testing.T) {
+	env, _, _, _ := spoondTestEnv(t)
+	full := env.Resolve(tlsCertPath)
+	if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(full, []byte("leftover cert"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	items, _, err := runSpoond(t, env)
+	if err == nil {
+		t.Fatal("want a failure for a cert without its key")
+	}
+	if !strings.Contains(err.Error(), tlsKeyPath) {
+		t.Errorf("the failure should name the missing key: %v", err)
+	}
+	if _, err := os.Stat(env.Resolve(tlsKeyPath)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a key was made beside the leftover certificate: %v", err)
+	}
+	if _, err := os.Stat(env.Resolve(tlsKeyPath)); err == nil {
+		t.Errorf("privkey.pem exists")
+	}
+	row := firstFailedRow(t, items)
+	if row.Name != tlsCertPath {
+		t.Errorf("failed row = %q, want the existing cert's name", row.Name)
+	}
+}
+
+// TestSpoondTLSKeyWithoutCertFails: the mirror half pair fails too.
+func TestSpoondTLSKeyWithoutCertFails(t *testing.T) {
+	env, _, _, _ := spoondTestEnv(t)
+	full := env.Resolve(tlsKeyPath)
+	if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(full, []byte("leftover key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	items, _, err := runSpoond(t, env)
+	if err == nil {
+		t.Fatal("want a failure for a key without its certificate")
+	}
+	if !strings.Contains(err.Error(), tlsCertPath) {
+		t.Errorf("the failure should name the missing certificate: %v", err)
+	}
+	row := firstFailedRow(t, items)
+	if row.Name != tlsKeyPath {
+		t.Errorf("failed row = %q, want the existing key's name", row.Name)
+	}
+}
+
 // TestSpoondStoreDir: --store-dir lands in backend.env and every unit.
 func TestSpoondStoreDir(t *testing.T) {
 	env, _, _, _ := spoondTestEnv(t)

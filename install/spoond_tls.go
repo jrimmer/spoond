@@ -19,6 +19,12 @@ import (
 	"time"
 )
 
+// fileExists answers whether path stats OK.
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
 // selfSignedYears is how long the self-signed pair is valid: ten
 // years (docs/install.md section 4's -days 3650 shape).
 const selfSignedYears = 10
@@ -51,14 +57,20 @@ func spoondTLS(env *Env, r *Reporter, dd hostDefaults) (tlsPair, error) {
 	}
 
 	// Self-signed. An existing pair is kept (it may be a Let's
-	// Encrypt renewal the operator placed there).
+	// Encrypt renewal the operator placed there); either half alone
+	// would leave the backend a broken pair, so both orders fail
+	// with the fix instead of silently keeping one.
 	certFull, keyFull := env.Resolve(tlsCertPath), env.Resolve(tlsKeyPath)
-	if _, err := os.Stat(certFull); err == nil {
-		r.Add(Kept, tlsCertPath, "exists, left untouched")
+	certOK, keyOK := fileExists(certFull), fileExists(keyFull)
+	switch {
+	case certOK && keyOK:
+		r.Add(Kept, tlsCertPath, "the existing pair is kept ("+tlsKeyPath+" with it)")
 		return tlsPair{cert: certFull, key: keyFull}, nil
-	} else if _, err := os.Stat(keyFull); err == nil {
-		// A key without a certificate would leave the backend with
-		// a half pair; refuse rather than render.
+	case certOK:
+		r.Add(Failed, tlsCertPath, "exists but "+tlsKeyPath+" does not; remove the certificate (or install both) and rerun")
+		return tlsPair{}, fmt.Errorf("%s exists but %s does not; remove the certificate (or install both) and rerun", tlsCertPath, tlsKeyPath)
+	case keyOK:
+		r.Add(Failed, tlsKeyPath, "exists but "+tlsCertPath+" does not; remove the key (or install both) and rerun")
 		return tlsPair{}, fmt.Errorf("%s exists but %s does not; remove the key (or install both) and rerun", tlsKeyPath, tlsCertPath)
 	}
 
@@ -77,8 +89,7 @@ func spoondTLS(env *Env, r *Reporter, dd hostDefaults) (tlsPair, error) {
 // makeSelfSigned generates the ECDSA P-256 pair and writes cert.pem
 // (0644) and privkey.pem (0600) through the file helpers; the rows go
 // to the phase's reporter.
-func makeSelfSigned(env *Env, r *Reporter, dd hostDefaults) error {
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+func makeSelfSigned(env *Env, r *Reporter, dd hostDefaults) error {	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return fmt.Errorf("generating the TLS key: %w", err)
 	}
