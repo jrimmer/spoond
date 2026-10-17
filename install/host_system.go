@@ -10,10 +10,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
 )
 
-func init() { hostSteps["packages"] = hostPackages }
+func init() {
+	hostSteps["packages"] = hostPackages
+	hostSteps["modules"] = hostModules
+}
 
 // basePackages are the host packages every install needs: the firewall
 // tools, the snapshot store's filesystem tools, Docker and its runtime.
@@ -87,4 +92,62 @@ func aptNoCandidate(out []byte) bool {
 	}
 	// No policy output at all: apt knows no package by that name.
 	return true
+}
+
+func init() { hostSteps["modules"] = hostModules }
+
+// modulesConf loads nbd, tun and kvm at boot; nbdConf carries nbd's
+// sizes (the module parameter only applies at load time, so it must
+// not rely on the boot-time load order).
+const (
+	modulesConf = "nbd\ntun\nkvm\n"
+	nbdConf     = "options nbd nbds_max=256 max_part=16\n"
+)
+
+// wantNbdsMax is the device count the leases need; wantNbdMaxPart is
+// the partitions per device.
+const (
+	wantNbdsMax    = 256
+	wantNbdMaxPart = 16
+)
+
+// nbdParamPath is the running module's parameter, read back after the
+// modprobe; a smaller value means nbd loaded before the option did.
+const nbdParamPath = "/sys/module/nbd/parameters/nbds_max"
+
+// hostModules loads the kernel modules the leases run on: nbd (256
+// devices, 16 partitions each), tun and kvm. The configs land first so
+// the next boot matches, then the modules load now. The running
+// nbds_max is read back: nbd is often already loaded from an earlier
+// life with a smaller count, and only a reboot (or rmmod without
+// leases) fixes that.
+func hostModules(ctx context.Context, env *Env, r *Reporter, st *hostState) error {
+	if err := env.writeFile(r, "/etc/modules-load.d/e2b.conf", []byte(modulesConf), 0o644); err != nil {
+		return err
+	}
+	if err := env.writeFile(r, "/etc/modprobe.d/e2b-nbd.conf", []byte(nbdConf), 0o644); err != nil {
+		return err
+	}
+	if err := env.exec(ctx, "modprobe", "nbd", "nbds_max=256", "max_part=16"); err != nil {
+		return fmt.Errorf("%w — modprobe could not load nbd; fix the kernel output above, then rerun", err)
+	}
+	r.Add(Kept, "modprobe nbd", "")
+	if err := env.exec(ctx, "modprobe", "tun"); err != nil {
+		return fmt.Errorf("%w — modprobe could not load tun; fix the kernel output above, then rerun", err)
+	}
+	r.Add(Kept, "modprobe tun", "")
+
+	b, err := os.ReadFile(env.Resolve(nbdParamPath))
+	if err != nil {
+		return fmt.Errorf("read %s: %w", nbdParamPath, err)
+	}
+	got, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil {
+		return fmt.Errorf("%s: %q is not a number", nbdParamPath, strings.TrimSpace(string(b)))
+	}
+	if got < wantNbdsMax {
+		return fmt.Errorf("nbd is loaded with nbds_max=%d; run `rmmod nbd` (no leases running) or reboot, then rerun", got)
+	}
+	r.Add(Kept, nbdParamPath, fmt.Sprintf("nbds_max=%d", got))
+	return nil
 }

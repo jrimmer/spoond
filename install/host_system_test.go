@@ -7,6 +7,8 @@ package install
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -127,6 +129,111 @@ func aptCalls(runner *recordRunner) []string {
 		}
 	}
 	return out
+}
+
+// writeRootFile writes content to a path under the env root, creating
+// the directories; the fakes for /proc, /sys and /etc files go through
+// it.
+func writeRootFile(t *testing.T, env *Env, path, content string) {
+	t.Helper()
+	full := env.Resolve(path)
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestHostModulesWritesConfigsAndLoads: both configs land with the
+// wanted content, both modprobes run, and the running nbds_max is read
+// back and reported.
+func TestHostModulesWritesConfigsAndLoads(t *testing.T) {
+	env, _, runner := testEnv(t)
+	runner.reply = map[string]fakeReply{}
+	addReply(runner, "modprobe nbd nbds_max=256 max_part=16", "")
+	addReply(runner, "modprobe tun", "")
+	writeRootFile(t, env, nbdParamPath, "256\n")
+
+	r := &Reporter{Phase: PhaseHost}
+	if err := hostModules(context.Background(), env, r, &hostState{}); err != nil {
+		t.Fatal(err)
+	}
+	if b, mode := read(t, env, "/etc/modules-load.d/e2b.conf"); string(b) != "nbd\ntun\nkvm\n" || mode != 0o644 {
+		t.Errorf("e2b.conf = %q, mode %#o; want the module list at 0644", b, mode)
+	}
+	if b, _ := read(t, env, "/etc/modprobe.d/e2b-nbd.conf"); string(b) != "options nbd nbds_max=256 max_part=16\n" {
+		t.Errorf("e2b-nbd.conf = %q, want the nbd option line", b)
+	}
+	want := []string{"modprobe nbd nbds_max=256 max_part=16", "modprobe tun"}
+	if len(runner.calls) != len(want) {
+		t.Fatalf("calls = %v, want %v", runner.calls, want)
+	}
+	for i := range want {
+		if runner.calls[i] != want[i] {
+			t.Errorf("call %d = %q, want %q", i, runner.calls[i], want[i])
+		}
+	}
+	var nbds bool
+	for _, it := range r.Items() {
+		if it.Name == nbdParamPath && it.Result == Kept {
+			nbds = true
+		}
+	}
+	if !nbds {
+		t.Errorf("rows = %+v, want a kept row for the running nbds_max", r.Items())
+	}
+}
+
+// TestHostModulesLowNbdsMaxFails: nbd already loaded with 16 devices;
+// the error carries the rmmod/reboot fix.
+func TestHostModulesLowNbdsMaxFails(t *testing.T) {
+	env, _, runner := testEnv(t)
+	runner.reply = map[string]fakeReply{}
+	addReply(runner, "modprobe nbd nbds_max=256 max_part=16", "")
+	addReply(runner, "modprobe tun", "")
+	writeRootFile(t, env, nbdParamPath, "16\n")
+
+	err := hostModules(context.Background(), env, &Reporter{Phase: PhaseHost}, &hostState{})
+	if err == nil {
+		t.Fatal("want the nbds_max failure")
+	}
+	for _, want := range []string{"nbds_max=16", "rmmod nbd", "reboot"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+}
+
+// TestHostModulesSecondRunKeeps: the configs match, so the rerun
+// reports kept rows and still runs the modprobes (the runner answers
+// them either way), and the nbds_max row is kept again.
+func TestHostModulesSecondRunKeeps(t *testing.T) {
+	env, _, runner := testEnv(t)
+	runner.reply = map[string]fakeReply{}
+	addReply(runner, "modprobe nbd nbds_max=256 max_part=16", "")
+	addReply(runner, "modprobe tun", "")
+	writeRootFile(t, env, nbdParamPath, "256\n")
+
+	st := &hostState{}
+	if err := hostModules(context.Background(), env, &Reporter{Phase: PhaseHost}, st); err != nil {
+		t.Fatal(err)
+	}
+	runner.calls = nil
+	r := &Reporter{Phase: PhaseHost}
+	if err := hostModules(context.Background(), env, r, st); err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range r.Items() {
+		if it.Result == Changed || it.Result == Created {
+			t.Errorf("rerun row %+v, want kept only", it)
+		}
+	}
+	// The modprobes still ran: loading an already-loaded module is
+	// how the step guarantees the running state, not a write.
+	if len(runner.calls) != 2 {
+		t.Errorf("rerun calls = %v, want the two modprobes", runner.calls)
+	}
 }
 
 // TestHostPackagesContribCheckedBeforeInstall pins the order: the
