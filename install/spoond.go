@@ -96,8 +96,7 @@ var spoondUnits = []struct {
 	embed string
 	path  string
 }{
-	{"spoond-backend.service", "/etc/systemd/system/spoond-backend.service"},
-	{"spoond-sshd-gateway.service", "/etc/systemd/system/spoond-sshd-gateway.service"},
+
 	{"spoond-dash.service", "/etc/systemd/system/spoond-dash.service"},
 	{"e2b/spoond-drain.service", "/etc/systemd/system/spoond-drain.service"},
 	{"e2b/e2b-orchestrator.service", orchestratorUnitPath},
@@ -125,14 +124,19 @@ func spoondPhase(ctx context.Context, env *Env) ([]Item, error) {
 		}
 	}
 
-	// ---- secrets and backend.env (items 3, 5) ----------------------
-	tk, envChanged, err := backendEnvWrite(env, r, dd)
+	// ---- TLS (item 4): --tls-cert (it must exist; the phase fails
+	// otherwise) or a self-signed pair kept once written. Before any
+	// env file, so the rendered TLS_CERT/TLS_KEY are the resolved
+	// pair's paths.
+	pair, err := spoondTLS(env, r, dd)
 	if err != nil {
 		return r.Items(), err
 	}
 
-	// ---- TLS (item 4) ----------------------------------------------
-	pair, err := spoondTLS(env, r, dd)
+	// ---- secrets (item 3) and backend.env (item 5): generate, or
+	// read the existing backend.env's — its five token keys fill the
+	// token set; the derived files take them, so all files agree.
+	tk, envChanged, err := backendEnvWrite(env, r, dd, pair)
 	if err != nil {
 		return r.Items(), err
 	}
@@ -231,7 +235,7 @@ func restartBackendIfActive(ctx context.Context, env *Env) error {
 func spoondUnitsWrite(env *Env, r *Reporter) (bool, error) {
 	changed := false
 	for _, u := range spoondUnits {
-		raw, err := deploy.Files.ReadFile("deploy/" + u.embed)
+		raw, err := deploy.Files.ReadFile(u.embed)
 		if err != nil {
 			return false, fmt.Errorf("shipped unit %s: %w", u.embed, err)
 		}

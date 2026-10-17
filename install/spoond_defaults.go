@@ -27,12 +27,10 @@ type hostDefaults struct {
 	guestDNSNote string
 	// seedFile is the HMAC seed's path (backend.env points at it).
 	seedFile string
-	// seedPresent reports whether the seed file exists.
+	// seedPresent reports whether the seed file exists. The phase
+	// does not generate it (the runtime phase owns the file); its
+	// row only says what the operator will run first.
 	seedPresent bool
-	// seedSource says the seed came from the runtime phase
-	// (kept) or is missing (the healthz wait still works: the
-	// backend refuses leases without it, not health).
-	seedSource string
 }
 
 // spoondDefaults resolves the defaults and adds their rows. Every
@@ -58,7 +56,10 @@ func spoondDefaults(ctx context.Context, env *Env, r *Reporter) (hostDefaults, e
 		r.Add(Created, "host name", "from hostname -f; pass --host-name to pin it to "+fqdn)
 	}
 
-	// host IP: the src of the IPv4 default route.
+	// host IP: the src of the IPv4 default route. A failed query
+	// (no route: `ip route get` answers "Network is unreachable")
+	// is the same outcome as a route with no src: no address to
+	// tell the guests.
 	ip, err := hostIP(ctx, env)
 	switch {
 	case err != nil:
@@ -67,11 +68,7 @@ func spoondDefaults(ctx context.Context, env *Env, r *Reporter) (hostDefaults, e
 		dd.hostIP = ip
 		r.Add(Created, "host IP", "default route's source address; pass --host-name only names the host, HOST_GUEST_SERVICE_ADDR in "+backendEnvPath+" overrides the IP")
 	default:
-		// No route: the fix names the env file to set, there is no
-		// flag yet (docs/install.md section 4's HOST_GUEST_SERVICE_ADDR).
-		note := errNoIPv4.Error() + " (" + backendEnvPath + ", then rerun)"
-		r.Add(Failed, "host IP", note)
-		return dd, fmt.Errorf("%s", errNoIPv4)
+		return dd, noRouteFailure(r)
 	}
 
 	// guest DNS: the first usable nameserver.
@@ -95,30 +92,46 @@ func spoondDefaults(ctx context.Context, env *Env, r *Reporter) (hostDefaults, e
 }
 
 // hostIP is the src address of `ip -4 -o route get 1.1.1.1`, the classic
-// "which address leaves by the default route" query. "" when the route
-// exists but names no source, an error when the query itself fails.
+// "which address leaves by the default route" query. "(ip route get) fails
+// on the real host only when no route (or source) answers; both shapes
+// come back as ("", nil) — noRouteFailure's — and the route-without-src
+// case (a route line without a src field) likewise.
 func hostIP(ctx context.Context, env *Env) (string, error) {
 	out, err := env.query(ctx, "ip", "-4", "-o", "route", "get", "1.1.1.1")
 	if err != nil {
-		return "", fmt.Errorf("finding the host IP: %w", err)
+		// `ip route get` fails exactly when it cannot answer the
+		// route (no default route, network unreachable): the "no
+		// IPv4 default route" failure.
+		return "", nil
 	}
-	for _, field := range strings.Fields(string(out)) {
-		if a, ok := strings.CutPrefix(field, "src"); ok {
-			return a, nil
+	fields := strings.Fields(string(out))
+	for i, field := range fields {
+		if field == "src" && i+1 < len(fields) {
+			return fields[i+1], nil
 		}
 	}
 	return "", nil
 }
 
+// noRouteFailure adds the failed host-IP row and returns the phase's
+// error: the fix names the env file to set (there is no flag yet, so
+// the operator edits /etc/spoond/backend.env and reruns).
+func noRouteFailure(r *Reporter) error {
+	note := errNoIPv4.Error() + " (" + backendEnvPath + ", then rerun)"
+	r.Add(Failed, "host IP", note)
+	return fmt.Errorf("%s", errNoIPv4)
+}
+
 // guestResolver scans resolv.conf for the first nameserver address that
-// is not 127.* or ::1: the guest's DNS target (HOST_GUEST_SERVICE... no:
-// the guests' resolver address the backend grants on port 53). A
-// loopback-only file yields ("", note).
+// is not 127.* or ::1: the guests' resolver address, granted on port 53
+// and baked into the guest image (docs/install.md section 4). A
+// loopback-only or missing file yields ("", note): no resolver
+// allowance, the note says so.
 func guestResolver(env *Env) (string, string) {
 	full := env.Resolve(resolvConfPath)
 	fh, err := os.Open(full)
 	if err != nil {
-		return "", "@/etc/resolv.conf is unreadable; guests get no DNS resolver allowance"
+		return "", "resolver file unreadable; guests get no DNS resolver allowance"
 	}
 	defer fh.Close()
 	sc := bufio.NewScanner(fh)

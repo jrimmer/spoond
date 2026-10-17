@@ -9,6 +9,8 @@ package install
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -38,8 +40,10 @@ func firstAdminUser(ctx context.Context, env *Env, r *Reporter, tk *tokens, dd h
 		return nil
 	}
 
-	// Fingerprint the operator's public key.
-	fp, err := sshFingerprintFile(env.Resolve(env.Opt.AdminKey))
+	// Fingerprint the operator's public key: an absolute path is
+	// used as it is (the file lives on the host, like /etc/passwd);
+	// a relative one is host-relative anyway.
+	fp, err := sshFingerprintFile(env.Opt.AdminKey)
 	if err != nil {
 		r.Add(Failed, env.Opt.AdminKey, "read the public key: "+err.Error())
 		return err
@@ -126,6 +130,21 @@ func sshFingerprintFile(path string) (string, error) {
 		return "", fmt.Errorf("%s: %w (want an authorized_keys line)", path, err)
 	}
 	return ssh.FingerprintSHA256(pub), nil
+}
+
+// adminKeyGenerate mints an ed25519 key pair and renders the public
+// half as an authorized_keys line: what `ssh-keygen` leaves in
+// ~/.ssh/id_ed25519.pub, for the tests' key file.
+func adminKeyGenerate() (string, error) {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return "", err
+	}
+	pub, err := ssh.NewPublicKey(priv.Public())
+	if err != nil {
+		return "", err
+	}
+	return string(ssh.MarshalAuthorizedKey(pub)), nil
 }
 
 // normalizeKeyLine keeps a public key's first line only: some editors

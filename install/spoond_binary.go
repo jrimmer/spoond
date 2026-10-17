@@ -11,25 +11,27 @@ import (
 	"os"
 )
 
-// copies is the binary-copy hook (item 9): it copies src (the running
-// executable's path) to dst and reports whether the copy changed dst —
-// true when dst was missing or held other bytes. os.Executable() is the
-// real source; execPath is a package var so a test passes a fake
-// executable path.
+// execPath and copyExec are the binary-copy hooks (item 9): the source
+// is the running executable (os.Executable) and the copy goes at 0755.
+// Both are package vars so a test passes a fake executable path and
+// asserts on the copy without a real one.
 var (
 	// execPath is the running executable's path.
 	execPath = os.Executable
 
 	// copyExec copies the running binary to dst at mode 0755 and
-	// answers "this run changed the target".
+	// answers "this copy changed the target".
 	copyExec = func(dst string) (bool, error) {
 		src, err := execPath()
 		if err != nil {
 			return false, fmt.Errorf("finding the running binary: %w", err)
 		}
-		return spoondCopyFile(src, dst, 0o755)
+		return spoondCopyFile(src, dst, modeBin)
 	}
 )
+
+// modeBin is the installed binary's mode (item 9: 0755).
+const modeBin = 0o755
 
 // copyBinary installs the running binary at /opt/spoond/spoond (item 9)
 // unless it is already byte-identical (sha256), and adds the row. A dry
@@ -76,7 +78,7 @@ func spoondCopyFile(src, dst string, mode os.FileMode) (bool, error) {
 	changed := true
 	switch {
 	case err == nil:
-		changed = !bytes.Equal(old, srcBytes)
+		changed = !bytes.Equal(old, srcBytes) // same-byte rerun
 	case !os.IsNotExist(err):
 		return false, fmt.Errorf("read %s: %w", dst, err)
 	}

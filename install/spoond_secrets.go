@@ -97,20 +97,20 @@ func renderEnvFile(m map[string]string) []byte {
 	return []byte(buf.String())
 }
 
-// backendEnvWrite writes the phase's backend.env row: the minimum
-// contents of docs/install.md section 4 with the rendered values
-// substituted, never overwriting an existing file. It answers the
-// backend.env file state (changed?) and the token set the derived files
-// must carry.
+// backendEnvWrite reads the phase's token set (item 3): when
+// backend.env already exists it parses (KEY=VALUE lines) and uses its
+// GATEWAY_TOKEN, ADMIN_TOKEN, EVENTS_TOKEN, BOOTSTRAP_TOKEN and
+// CONSUMER_TOKENS for the derived files below, so all files agree;
+// the row says kept. Without it, the six secrets are generated
+// (crypto/rand, lowercase hex) and the file written fresh (item 5's
+// minimum contents, docs/install.md section 4), never overwriting
+// anything. It answers the token set the derived files must carry and
+// whether this run wrote (or would write) backend.env.
 //
-// When backend.env already exists:
-//   - the file is kept;
-//   - its GATEWAY_TOKEN, ADMIN_TOKEN, EVENTS_TOKEN, BOOTSTRAP_TOKEN and
-//     CONSUMER_TOKENS drive the derived files, so all files agree;
-//   - the metrics token is generated for dash.env, which does not
-//     appear in backend.env (docs/install.md: DASH... the dashboard's
-//     scrape token; a fresh dash.env then carries a fresh one).
-func backendEnvWrite(env *Env, r *Reporter, dd hostDefaults) (*tokens, map[string]bool, error) {
+// The TLS_CERT/TLS_KEY paths rendered are the resolved pair's (the
+// caller spoondTLS ran first: an operator --tls-cert failure stops the
+// phase before an env file carries the pair).
+func backendEnvWrite(env *Env, r *Reporter, dd hostDefaults, pair tlsPair) (*tokens, map[string]bool, error) {
 	states := map[string]bool{}
 	envPath := env.Resolve(backendEnvPath)
 	if _, err := os.Stat(envPath); err == nil {
@@ -137,8 +137,8 @@ func backendEnvWrite(env *Env, r *Reporter, dd hostDefaults) (*tokens, map[strin
 		if _, _, ok := strings.Cut(consumer, "="); !ok {
 			return nil, nil, fmt.Errorf("%s: CONSUMER_TOKENS=%q is not token=consumer pairs", backendEnvPath, consumer)
 		}
-		// The metrics token never appears in backend.env; generate
-		// one for dash.env (written only if dash.env is fresh).
+		// The metrics token never appears in backend.env; a fresh
+		// one rides dash.env's fresh write.
 		metrics, err := randHex(metricsTokenLen)
 		if err != nil {
 			return nil, nil, err
@@ -156,7 +156,7 @@ func backendEnvWrite(env *Env, r *Reporter, dd hostDefaults) (*tokens, map[strin
 		return nil, nil, fmt.Errorf("stat %s: %w", envPath, err)
 	}
 
-	// Fresh deployment: generate the six secrets and render the file.
+	// Fresh deployment: generate the six secrets.
 	consumer, err := randHex(consumerTokenLen)
 	if err != nil {
 		return nil, nil, err
@@ -187,7 +187,7 @@ func backendEnvWrite(env *Env, r *Reporter, dd hostDefaults) (*tokens, map[strin
 		"SPOOND_DB_PATH":            "/var/lib/spoond/spoond.db",
 		"E2B_GRPC_ADDR":             "127.0.0.1:5008",
 		"E2B_PROXY_URL":             "http://127.0.0.1:5007",
-		"E2B_TOKEN_SEED_FILE":       dd.seedFile,
+		"E2B_TOKEN_SEED_FILE":       e2bTokenSeedPath,
 		"IMAGE_REGISTRY":            "localhost:5000",
 		"HOST_GUEST_SERVICE_ADDR":   dd.hostIP,
 		"HOST_GUEST_SERVICE_PORT":   "8891",
@@ -195,14 +195,14 @@ func backendEnvWrite(env *Env, r *Reporter, dd hostDefaults) (*tokens, map[strin
 		"SPOOND_PROXY_HOST_SUFFIX":  "." + dd.hostName,
 		"E2B_TEMPLATE_STORAGE_PATH": env.Opt.storeDir() + "/storage/templates",
 		"SPOOND_BACKUP_DIR":         "/var/lib/spoond/backups",
-		"USERS_FILE":                "/var/lib/spoond/users.json",
+		"USERS_FILE":                usersPath,
 		"BOOTSTRAP_TOKEN":           bootstrap,
 		"GATEWAY_TOKEN":             gateway,
 		"ADMIN_TOKEN":               admin,
 		"METRICS_TOKEN":             metrics,
 		"EVENTS_TOKEN":              events,
-		"TLS_CERT":                  tlsCertPath,
-		"TLS_KEY":                   tlsKeyPath,
+		"TLS_CERT":                  pair.cert,
+		"TLS_KEY":                   pair.key,
 		"BIND_ADDR":                 "0.0.0.0:8890",
 		"PROXY_ADDR":                "0.0.0.0:8891",
 	}

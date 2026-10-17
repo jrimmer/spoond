@@ -490,12 +490,12 @@ func TestRunAllUnknownPhase(t *testing.T) {
 	}
 }
 
-// TestRunAllNotImplementedPhase: a later-slice phase errors, the
-// message says so plainly, and RunAll stops (a later phase in the
-// table never runs behind it).
+// TestRunAllNotImplementedPhase: a not-yet-written phase errors with
+// ErrNotImplemented and RunAll stops. The doctor phase is the last one
+// still on its placeholder (spoond landed in S5, spoond-735v).
 func TestRunAllNotImplementedPhase(t *testing.T) {
 	env, _, _ := testEnv(t)
-	_, err := RunAll(context.Background(), env, PhaseSpoond)
+	_, err := RunAll(context.Background(), env, PhaseDoctor)
 	if !errors.Is(err, ErrNotImplemented) {
 		t.Fatalf("err = %v, want ErrNotImplemented", err)
 	}

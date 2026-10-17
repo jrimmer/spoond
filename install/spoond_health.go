@@ -86,12 +86,24 @@ func (f failingFetcher) Post(r *http.Request) (int, error) { return 0, f.err }
 // healthPoll is the pause between two /healthz tries.
 const healthPoll = time.Second
 
+// healthWaitFor is the health wait, overridable in tests (the phase
+// reads it through healthWaitDuration()); production stays the const.
+var waitOverride time.Duration
+
+// healthWaitDuration answers the wait: the const, or the test's.
+func healthWaitDuration() time.Duration {
+	if waitOverride > 0 {
+		return waitOverride
+	}
+	return healthWait
+}
+
 // waitBackendHealthy gets /healthz for up to healthWait and adds the
 // row: kept when healthy, failed with the journalctl hint when not. The
 // hint names where the unit's log is (item 11), never a token.
 func waitBackendHealthy(ctx context.Context, env *Env, r *Reporter, dd hostDefaults) error {
 	fetch := env.healthFetcher(dd)
-	deadline := time.Now().Add(healthWait)
+	deadline := time.Now().Add(healthWaitDuration())
 	var lastErr error
 	for {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, healthzURL(), nil)
