@@ -148,7 +148,9 @@ func backendEnvWrite(env *Env, r *Reporter, dd hostDefaults, pair tlsPair) (*tok
 		}
 		consumer := firstConsumerToken(vals["CONSUMER_TOKENS"])
 		if consumer == "" {
-			return nil, nil, fmt.Errorf("%s: CONSUMER_TOKENS=%q is not token=consumer pairs", backendEnvPath, vals["CONSUMER_TOKENS"])
+			// CONSUMER_TOKENS is a bearer-token list: the failure names
+			// the key, never its value.
+			return nil, nil, fmt.Errorf("%s: CONSUMER_TOKENS does not parse as token=consumer pairs (token=consumer,key=consumer,...); repair it and rerun", backendEnvPath)
 		}
 		// The metrics token never appears in a pre-existing backend.env
 		// parsed as five keys, but this phase's own writes carry it
