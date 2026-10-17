@@ -211,7 +211,7 @@ func TestRefreshPeersOnlyOnChange(t *testing.T) {
 func TestNetworkRoute(t *testing.T) {
 	ts, _, db, sub := newTestServerWithService(t)
 
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a",
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases", "token-a",
 		map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
 	if resp.StatusCode != 201 {
 		t.Fatalf("create status %d: %v", resp.StatusCode, body)
@@ -219,7 +219,7 @@ func TestNetworkRoute(t *testing.T) {
 	id := body["id"].(string)
 
 	t.Run("invalid policy", func(t *testing.T) {
-		resp, _ := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/network", "token-a",
+		resp, _ := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/network", "token-a",
 			map[string]any{"network_policy": "full"})
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Fatalf("status %d, want 400", resp.StatusCode)
@@ -227,7 +227,7 @@ func TestNetworkRoute(t *testing.T) {
 	})
 
 	t.Run("unknown lease", func(t *testing.T) {
-		resp, _ := doReq(t, "POST", ts.URL+"/api/sandboxes/deadbeef/network", "token-a",
+		resp, _ := doReq(t, "POST", ts.URL+"/api/leases/deadbeef/network", "token-a",
 			map[string]any{"network_policy": "lan"})
 		if resp.StatusCode != http.StatusNotFound {
 			t.Fatalf("status %d, want 404", resp.StatusCode)
@@ -235,7 +235,7 @@ func TestNetworkRoute(t *testing.T) {
 	})
 
 	t.Run("another owner", func(t *testing.T) {
-		resp, _ := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/network", "token-b",
+		resp, _ := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/network", "token-b",
 			map[string]any{"network_policy": "lan"})
 		if resp.StatusCode != http.StatusNotFound {
 			t.Fatalf("status %d, want 404 for a non-owner", resp.StatusCode)
@@ -243,17 +243,17 @@ func TestNetworkRoute(t *testing.T) {
 	})
 
 	t.Run("suspended", func(t *testing.T) {
-		resp, _ := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/suspend", "token-a", nil)
+		resp, _ := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/suspend", "token-a", nil)
 		if resp.StatusCode != 200 {
 			t.Fatalf("suspend status %d", resp.StatusCode)
 		}
-		resp, _ = doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/network", "token-a",
+		resp, _ = doReq(t, "POST", ts.URL+"/api/leases/"+id+"/network", "token-a",
 			map[string]any{"network_policy": "lan"})
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("status %d, want 200 (a network change resumes on use)", resp.StatusCode)
 		}
 		// Resume via the API to leave the lease live again.
-		resp, _ = doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/resume", "token-a", nil)
+		resp, _ = doReq(t, "POST", ts.URL+"/api/leases/"+id+"/resume", "token-a", nil)
 		if resp.StatusCode != 200 {
 			t.Fatalf("resume status %d", resp.StatusCode)
 		}
@@ -261,7 +261,7 @@ func TestNetworkRoute(t *testing.T) {
 
 	t.Run("policy change applies", func(t *testing.T) {
 		before := calls(sub.Fake, "UpdateEgress")
-		resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/network", "token-a",
+		resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/network", "token-a",
 			map[string]any{"network_policy": "restricted", "egress_allowlist": []string{"pg.example.com"}})
 		if resp.StatusCode != 200 {
 			t.Fatalf("status %d: %v", resp.StatusCode, body)

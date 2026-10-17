@@ -63,10 +63,10 @@ echo
 echo "== gateway: cleanup =="
 # destroy the auto-created sandboxes (new@ + pty new@)
 if [ -n "$NEWID" ]; then
-  api DELETE "/api/sandboxes/$NEWID" >/dev/null && ok "deleted auto-created sandbox $NEWID" || bad "delete auto-created sandbox"
+  api DELETE "/api/leases/$NEWID" >/dev/null && ok "deleted auto-created sandbox $NEWID" || bad "delete auto-created sandbox"
 fi
 if [ -n "${PTYID:-}" ]; then
-  api DELETE "/api/sandboxes/$PTYID" >/dev/null && ok "deleted pty sandbox $PTYID" || bad "delete pty sandbox"
+  api DELETE "/api/leases/$PTYID" >/dev/null && ok "deleted pty sandbox $PTYID" || bad "delete pty sandbox"
 fi
 # restore unit without test key
 cp /tmp/gateway-unit.bak "$UNIT"

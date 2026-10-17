@@ -59,7 +59,7 @@ func TestBackgroundExecRealWrapper(t *testing.T) {
 	}
 
 	// The record view reads the output from the guest files.
-	_, body := doReq(t, "GET", ts.URL+"/api/sandboxes/"+id+"/jobs/"+jobID, "token-a", nil)
+	_, body := doReq(t, "GET", ts.URL+"/api/leases/"+id+"/jobs/"+jobID, "token-a", nil)
 	if body["stdout"] != "out\n" || body["stderr"] != "err\n" {
 		t.Fatalf("record view = stdout %q stderr %q", body["stdout"], body["stderr"])
 	}
@@ -130,7 +130,7 @@ func TestBackgroundExecRealWrapperSignal(t *testing.T) {
 
 	jobID, _ := startBackgroundJob(t, ts, id, map[string]any{"cmd": "sleep 600"})
 	// The 202 may beat the wrapper's pid write; signalJob waits briefly.
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/jobs/"+jobID+"/signal", "token-a", map[string]any{"signal": "TERM"})
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/jobs/"+jobID+"/signal", "token-a", map[string]any{"signal": "TERM"})
 	if resp.StatusCode != 200 {
 		t.Fatalf("signal status %d: %v", resp.StatusCode, body)
 	}

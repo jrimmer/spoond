@@ -409,7 +409,7 @@ func doReq(t *testing.T, method, url, token string, body any) (*http.Response, m
 
 func TestCreateAndList(t *testing.T) {
 	ts, _ := newTestServer(t)
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "ttl": 300})
 	if resp.StatusCode != 201 {
 		t.Fatalf("create status %d: %v", resp.StatusCode, body)
 	}
@@ -418,13 +418,13 @@ func TestCreateAndList(t *testing.T) {
 		t.Fatal("expected non-empty id")
 	}
 	// list mine
-	resp, list := doReq(t, "GET", ts.URL+"/api/sandboxes", "token-a", nil)
+	resp, list := doReq(t, "GET", ts.URL+"/api/leases", "token-a", nil)
 	if resp.StatusCode != 200 {
 		t.Fatalf("list status %d", resp.StatusCode)
 	}
 	_ = list
 	// The list endpoint returns {sandboxes: [...]}; decode it directly.
-	req, _ := http.NewRequest("GET", ts.URL+"/api/sandboxes", nil)
+	req, _ := http.NewRequest("GET", ts.URL+"/api/leases", nil)
 	req.Header.Set("Authorization", "Bearer token-a")
 	lresp, _ := http.DefaultClient.Do(req)
 	var listResp struct {
@@ -439,7 +439,7 @@ func TestCreateAndList(t *testing.T) {
 
 func TestCreateUnknownImage(t *testing.T) {
 	ts, _ := newTestServer(t)
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "nope", "ttl": 300})
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "nope", "ttl": 300})
 	if resp.StatusCode != 404 {
 		t.Fatalf("expected 404, got %d: %v", resp.StatusCode, body)
 	}
@@ -447,7 +447,7 @@ func TestCreateUnknownImage(t *testing.T) {
 
 func TestCreateNoAuth(t *testing.T) {
 	ts, _ := newTestServer(t)
-	resp, _ := doReq(t, "POST", ts.URL+"/api/sandboxes", "", map[string]any{"image": "py-base"})
+	resp, _ := doReq(t, "POST", ts.URL+"/api/leases", "", map[string]any{"image": "py-base"})
 	if resp.StatusCode != 401 {
 		t.Fatalf("expected 401, got %d", resp.StatusCode)
 	}
@@ -455,7 +455,7 @@ func TestCreateNoAuth(t *testing.T) {
 
 func TestCreateBadToken(t *testing.T) {
 	ts, _ := newTestServer(t)
-	resp, _ := doReq(t, "POST", ts.URL+"/api/sandboxes", "wrong", map[string]any{"image": "py-base"})
+	resp, _ := doReq(t, "POST", ts.URL+"/api/leases", "wrong", map[string]any{"image": "py-base"})
 	if resp.StatusCode != 401 {
 		t.Fatalf("expected 401, got %d", resp.StatusCode)
 	}
@@ -497,9 +497,9 @@ func TestMetricsWithAuth(t *testing.T) {
 
 func TestExec(t *testing.T) {
 	ts, _ := newTestServer(t)
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "ttl": 300})
 	id := create["id"].(string)
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/exec", "token-a", map[string]any{"cmd": "echo hi", "cwd": "/tmp", "env": map[string]string{"FOO": "bar"}})
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/exec", "token-a", map[string]any{"cmd": "echo hi", "cwd": "/tmp", "env": map[string]string{"FOO": "bar"}})
 	if resp.StatusCode != 200 {
 		t.Fatalf("exec status %d: %v", resp.StatusCode, body)
 	}
@@ -512,7 +512,7 @@ func TestExec(t *testing.T) {
 // can distinguish a permanently dead sandbox from a transient failure.
 func TestExecSandboxGone(t *testing.T) {
 	ts, svc, _, sub := newTestServerWithService(t)
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "ttl": 300})
 	id := create["id"].(string)
 	// The sandbox disappears beneath the lease (e.g. the node forgot it):
 	// the substrate answers execs with not-found.
@@ -521,7 +521,7 @@ func TestExecSandboxGone(t *testing.T) {
 	svc.store.mu.Unlock()
 	sub.Kill(sandboxID)
 	sub.FailCall("Exec", 0, substrate.ErrNotFound)
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/exec", "token-a", map[string]any{"cmd": "echo hi"})
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/exec", "token-a", map[string]any{"cmd": "echo hi"})
 	if resp.StatusCode != 410 {
 		t.Fatalf("expected 410, got %d: %v", resp.StatusCode, body)
 	}
@@ -536,13 +536,13 @@ func TestExecSandboxGone(t *testing.T) {
 // a client must not abandon a lease that is only checkpointing.
 func TestExecBusyIsNotGone(t *testing.T) {
 	ts, svc, _, sub := newTestServerWithService(t)
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "ttl": 300})
 	id := create["id"].(string)
 	svc.store.mu.Lock()
 	svc.store.leases[id].busy = true
 	svc.store.mu.Unlock()
 	sub.FailCall("Exec", 0, substrate.ErrNotFound)
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/exec", "token-a", map[string]any{"cmd": "echo hi"})
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/exec", "token-a", map[string]any{"cmd": "echo hi"})
 	if resp.StatusCode != 409 || resp.Header.Get("Retry-After") == "" {
 		t.Fatalf("busy lease: got %d (Retry-After %q): %v, want 409 with Retry-After", resp.StatusCode, resp.Header.Get("Retry-After"), body)
 	}
@@ -550,10 +550,10 @@ func TestExecBusyIsNotGone(t *testing.T) {
 
 func TestExecCrossConsumerDenied(t *testing.T) {
 	ts, _ := newTestServer(t)
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "ttl": 300})
 	id := create["id"].(string)
 	// consumer-b tries to exec into consumer-a's sandbox
-	resp, _ := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/exec", "token-b", map[string]any{"cmd": "echo hi"})
+	resp, _ := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/exec", "token-b", map[string]any{"cmd": "echo hi"})
 	if resp.StatusCode != 404 {
 		t.Fatalf("expected 404 for cross-consumer exec, got %d", resp.StatusCode)
 	}
@@ -561,9 +561,9 @@ func TestExecCrossConsumerDenied(t *testing.T) {
 
 func TestDelete(t *testing.T) {
 	ts, sub := newTestServer(t)
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "ttl": 300})
 	id := create["id"].(string)
-	resp, _ := doReq(t, "DELETE", ts.URL+"/api/sandboxes/"+id, "token-a", nil)
+	resp, _ := doReq(t, "DELETE", ts.URL+"/api/leases/"+id, "token-a", nil)
 	if resp.StatusCode != 204 {
 		t.Fatalf("delete status %d", resp.StatusCode)
 	}
@@ -575,7 +575,7 @@ func TestDelete(t *testing.T) {
 		t.Fatalf("expected no sandboxes left, got %v (%v)", sbs, err)
 	}
 	// exec after delete -> 404
-	resp, _ = doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/exec", "token-a", map[string]any{"cmd": "echo"})
+	resp, _ = doReq(t, "POST", ts.URL+"/api/leases/"+id+"/exec", "token-a", map[string]any{"cmd": "echo"})
 	if resp.StatusCode != 404 {
 		t.Fatalf("expected 404 after delete, got %d", resp.StatusCode)
 	}
@@ -583,11 +583,11 @@ func TestDelete(t *testing.T) {
 
 func TestComment(t *testing.T) {
 	ts, _ := newTestServer(t)
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "ttl": 300})
 	id := create["id"].(string)
 
 	// set a comment
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/comment", "token-a", map[string]any{"comment": "integration demo box"})
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/comment", "token-a", map[string]any{"comment": "integration demo box"})
 	if resp.StatusCode != 200 {
 		t.Fatalf("comment set status %d", resp.StatusCode)
 	}
@@ -596,7 +596,7 @@ func TestComment(t *testing.T) {
 	}
 
 	// list includes it
-	_, list := doReq(t, "GET", ts.URL+"/api/sandboxes", "token-a", nil)
+	_, list := doReq(t, "GET", ts.URL+"/api/leases", "token-a", nil)
 	sbs, _ := list["sandboxes"].([]any)
 	if len(sbs) != 1 {
 		t.Fatalf("expected 1 sandbox, got %d", len(sbs))
@@ -607,13 +607,13 @@ func TestComment(t *testing.T) {
 	}
 
 	// clear it
-	resp, body = doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/comment", "token-a", map[string]any{"comment": ""})
+	resp, body = doReq(t, "POST", ts.URL+"/api/leases/"+id+"/comment", "token-a", map[string]any{"comment": ""})
 	if resp.StatusCode != 200 || body["comment"] != "" {
 		t.Fatalf("comment clear failed: %d %v", resp.StatusCode, body["comment"])
 	}
 
 	// cross-consumer denied
-	resp, _ = doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/comment", "token-b", map[string]any{"comment": "nope"})
+	resp, _ = doReq(t, "POST", ts.URL+"/api/leases/"+id+"/comment", "token-b", map[string]any{"comment": "nope"})
 	if resp.StatusCode != 404 {
 		t.Fatalf("cross-consumer comment expected 404, got %d", resp.StatusCode)
 	}
@@ -668,7 +668,7 @@ func TestTTLSweeper(t *testing.T) {
 	ts, svc, _, sub := newTestServerWithService(t)
 
 	// Create a lease with a 1-second TTL.
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 1})
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "ttl": 1})
 	id := create["id"].(string)
 
 	// Run the sweeper once with a short tick.
@@ -682,7 +682,7 @@ func TestTTLSweeper(t *testing.T) {
 	if got := calls(sub.Fake, "Delete"); got != 1 {
 		t.Fatalf("expected 1 delete, got %d", got)
 	}
-	resp, _ := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/exec", "token-a", map[string]any{"cmd": "echo"})
+	resp, _ := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/exec", "token-a", map[string]any{"cmd": "echo"})
 	if resp.StatusCode != 404 {
 		t.Fatalf("expected 404 after TTL expiry, got %d", resp.StatusCode)
 	}
@@ -701,7 +701,7 @@ func TestIdleSuspendSweeper(t *testing.T) {
 
 	// Persistent lease with an idle_suspend of 1 s (the smallest accepted
 	// value is 60 s, so set it on the lease directly after create).
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "persistent": true})
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "persistent": true})
 	id := create["id"].(string)
 	svc.store.mu.Lock()
 	svc.store.leases[id].IdleSuspend = 1
@@ -738,7 +738,7 @@ func TestIdleSuspendSweeper(t *testing.T) {
 		t.Fatalf("expected 0 deletes on idle, got %d (suspended lease should stay)", got)
 	}
 	// The lease is still listable (suspended, not released).
-	resp, _ := doReq(t, "GET", ts.URL+"/api/sandboxes", "token-a", nil)
+	resp, _ := doReq(t, "GET", ts.URL+"/api/leases", "token-a", nil)
 	if resp.StatusCode != 200 {
 		t.Fatalf("expected 200 listing after suspend, got %d", resp.StatusCode)
 	}
@@ -750,12 +750,12 @@ func TestIdleSuspendSweeper(t *testing.T) {
 func TestSuspendResume(t *testing.T) {
 	ts, svc, _, sub := newTestServerWithService(t)
 
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "persistent": true})
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "persistent": true})
 	id := create["id"].(string)
 	createsBefore := calls(sub.Fake, "Create")
 
 	// Suspend.
-	resp, _ := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/suspend", "token-a", nil)
+	resp, _ := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/suspend", "token-a", nil)
 	if resp.StatusCode != 200 {
 		t.Fatalf("expected 200 suspend, got %d", resp.StatusCode)
 	}
@@ -772,7 +772,7 @@ func TestSuspendResume(t *testing.T) {
 	}
 
 	// Resume.
-	resp2, _ := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/resume", "token-a", nil)
+	resp2, _ := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/resume", "token-a", nil)
 	if resp2.StatusCode != 200 {
 		t.Fatalf("expected 200 resume, got %d", resp2.StatusCode)
 	}
@@ -789,7 +789,7 @@ func TestSuspendResume(t *testing.T) {
 	}
 
 	// Delete releases the sandbox.
-	doReq(t, "DELETE", ts.URL+"/api/sandboxes/"+id, "token-a", nil)
+	doReq(t, "DELETE", ts.URL+"/api/leases/"+id, "token-a", nil)
 	if got := calls(sub.Fake, "Delete"); got != 1 {
 		t.Fatalf("expected 1 delete, got %d", got)
 	}
@@ -822,7 +822,7 @@ func TestWarmPoolGrant(t *testing.T) {
 	}
 
 	// Grant should consume from the pool without creating.
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "ttl": 300})
 	id, _ := create["id"].(string)
 	if id == "" {
 		t.Fatal("expected a lease id")
@@ -894,7 +894,7 @@ func TestBuildShellArgsNoEnvInArgv(t *testing.T) {
 // the key nor the value.
 func TestExecEnvNotInArgvAndVisibleToCommand(t *testing.T) {
 	ts, _, _, sub := newTestServerWithService(t)
-	_, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
+	_, body := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "ttl": 300})
 	id, _ := body["id"].(string)
 	if id == "" {
 		t.Fatalf("create lease: no id in %v", body)
@@ -905,7 +905,7 @@ func TestExecEnvNotInArgvAndVisibleToCommand(t *testing.T) {
 	})
 	t.Cleanup(func() { sub.SetExecHandler(nil) })
 
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/exec", "token-a",
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/exec", "token-a",
 		map[string]any{"cmd": "echo hi", "env": map[string]string{"FOO": "env-secret-value"}})
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("exec status %d: %v", resp.StatusCode, body)
@@ -1180,7 +1180,7 @@ func TestLLMGateway(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	// Create a persistent lease so lookupAny finds it.
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "persistent": true})
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "persistent": true})
 	id := create["id"].(string)
 
 	// 1. No bearer token: /llm/ must be auth-exempt (lease id is the cap).
@@ -1277,7 +1277,7 @@ func TestLLMGateway(t *testing.T) {
 
 	// 4. Suspended lease resumes on use (#145 D2): the gateway resumes it
 	// and forwards the request instead of the old 409.
-	respS, _ := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/suspend", "token-a", nil)
+	respS, _ := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/suspend", "token-a", nil)
 	if respS.StatusCode != 200 {
 		t.Fatalf("suspend status %d", respS.StatusCode)
 	}
@@ -1398,7 +1398,7 @@ func TestTagAndRestart(t *testing.T) {
 	defer ts.Close()
 
 	create := func() string {
-		_, m := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "persistent": true})
+		_, m := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "persistent": true})
 		id, _ := m["id"].(string)
 		if id == "" {
 			t.Fatalf("create: no id in %v", m)
@@ -1408,13 +1408,13 @@ func TestTagAndRestart(t *testing.T) {
 	id := create()
 
 	// tag: assign a friendly name, then resolve it back.
-	_, m := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/tag", "token-a", map[string]any{"name": "webby"})
+	_, m := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/tag", "token-a", map[string]any{"name": "webby"})
 	if m["ok"] != true || m["name"] != "webby" {
 		t.Fatalf("tag response: %v", m)
 	}
 	// duplicate name on a second lease must fail.
 	id2 := create()
-	resp, _ := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id2+"/tag", "token-a", map[string]any{"name": "webby"})
+	resp, _ := doReq(t, "POST", ts.URL+"/api/leases/"+id2+"/tag", "token-a", map[string]any{"name": "webby"})
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("duplicate name: status %d, want 400", resp.StatusCode)
 	}
@@ -1424,14 +1424,14 @@ func TestTagAndRestart(t *testing.T) {
 		t.Fatalf("names response: %v", m)
 	}
 	// invalid name rejected.
-	resp, _ = doReq(t, "POST", ts.URL+"/api/sandboxes/"+id2+"/tag", "token-a", map[string]any{"name": "Bad Name!"})
+	resp, _ = doReq(t, "POST", ts.URL+"/api/leases/"+id2+"/tag", "token-a", map[string]any{"name": "Bad Name!"})
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("invalid name: status %d, want 400", resp.StatusCode)
 	}
 
 	// restart: a running persistent lease suspends then resumes.
 	createsBefore := calls(sub.Fake, "Create")
-	_, m = doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/restart", "token-a", map[string]any{})
+	_, m = doReq(t, "POST", ts.URL+"/api/leases/"+id+"/restart", "token-a", map[string]any{})
 	if m["status"] != "running" {
 		t.Fatalf("restart response: %v", m)
 	}
@@ -1445,7 +1445,7 @@ func TestTagAndRestart(t *testing.T) {
 		t.Fatalf("restarted lease not running: %+v", l)
 	}
 	// list still contains both, with names.
-	_, m = doReq(t, "GET", ts.URL+"/api/sandboxes", "token-a", nil)
+	_, m = doReq(t, "GET", ts.URL+"/api/leases", "token-a", nil)
 	sbs, _ := m["sandboxes"].([]any)
 	if len(sbs) != 2 {
 		t.Fatalf("want 2 sandboxes, got %d", len(sbs))
@@ -1453,7 +1453,7 @@ func TestTagAndRestart(t *testing.T) {
 	// prompt endpoint exists and answers (fake exec returns "ok";
 	// the SHELLEY_NOT_RUNNING 409 path needs a live agent, covered by the
 	// integration suite).
-	resp, m = doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/prompt", "token-a", map[string]any{"message": "hi"})
+	resp, m = doReq(t, "POST", ts.URL+"/api/leases/"+id+"/prompt", "token-a", map[string]any{"message": "hi"})
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("prompt: status %d, want 200 (fake exec canned)", resp.StatusCode)
 	}
@@ -1464,7 +1464,7 @@ func TestTagAndRestart(t *testing.T) {
 
 func TestStat(t *testing.T) {
 	ts, _, _, sub := newTestServerWithService(t)
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "ttl": 300})
 	id := create["id"].(string)
 
 	// fake exec returns canned stat probe output.
@@ -1480,7 +1480,7 @@ lo: 999 0 0 0 0 0 0 0 888 0 0 0 0 0 0 0
 Filesystem     1K-blocks    Used Available Use% Mounted on
 /dev/root        4194304   1048576   3145728  25% /
 `
-	resp, body := doReq(t, "GET", ts.URL+"/api/sandboxes/"+id+"/stat", "token-a", nil)
+	resp, body := doReq(t, "GET", ts.URL+"/api/leases/"+id+"/stat", "token-a", nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("stat status %d: %v", resp.StatusCode, body)
 	}
@@ -1505,9 +1505,9 @@ Filesystem     1K-blocks    Used Available Use% Mounted on
 
 func TestStatCrossConsumerDenied(t *testing.T) {
 	ts, _ := newTestServer(t)
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "ttl": 300})
 	id := create["id"].(string)
-	resp, _ := doReq(t, "GET", ts.URL+"/api/sandboxes/"+id+"/stat", "token-b", nil)
+	resp, _ := doReq(t, "GET", ts.URL+"/api/leases/"+id+"/stat", "token-b", nil)
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("cross-consumer stat: status %d, want 404", resp.StatusCode)
 	}

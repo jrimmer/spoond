@@ -110,7 +110,7 @@ func TestUsersDeleteRepeatIsIdempotent(t *testing.T) {
 func TestRestoreRefusesDeletedOwner(t *testing.T) {
 	ts, svc, _, _, _, victimID := newUserDeleteServer(t)
 
-	resp, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "victim-tok",
+	resp, create := doReq(t, "POST", ts.URL+"/api/leases", "victim-tok",
 		map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("create: %d %v", resp.StatusCode, create)
@@ -121,7 +121,7 @@ func TestRestoreRefusesDeletedOwner(t *testing.T) {
 		t.Fatalf("checkpoint: %d %v", resp.StatusCode, cp)
 	}
 	b := cp["build_id"].(string)
-	resp, _ = doReq(t, "POST", ts.URL+"/api/sandboxes/"+leaseID+"/suspend", "victim-tok", nil)
+	resp, _ = doReq(t, "POST", ts.URL+"/api/leases/"+leaseID+"/suspend", "victim-tok", nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("suspend: %d", resp.StatusCode)
 	}

@@ -69,11 +69,11 @@ func TestLostLeaseEveryCallAnswers410(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			ts, svc, _, _ := newTestServerWithService(t)
-			_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
+			_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
 			id := create["id"].(string)
 			setLost(t, svc, id, "substrate crash: test reason")
 
-			resp, body := doReq(t, tc.method, ts.URL+"/api/sandboxes/"+id+tc.path, "token-a", tc.body)
+			resp, body := doReq(t, tc.method, ts.URL+"/api/leases/"+id+tc.path, "token-a", tc.body)
 			lostBody(t, resp, body, "substrate crash: test reason")
 		})
 	}
@@ -83,25 +83,25 @@ func TestLostLeaseEveryCallAnswers410(t *testing.T) {
 // answer 410 lease_lost too.
 func TestLostLeaseFilesAndDialAnswer410(t *testing.T) {
 	ts, svc, _, _ := newTestServerWithService(t)
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "ttl": 300})
 	id := create["id"].(string)
 	setLost(t, svc, id, "rootfs dead")
 
-	resp, body := doReq(t, "GET", ts.URL+"/api/sandboxes/"+id+"/files/motd", "token-a", nil)
+	resp, body := doReq(t, "GET", ts.URL+"/api/leases/"+id+"/files/motd", "token-a", nil)
 	lostBody(t, resp, body, "rootfs dead")
 
-	resp, body = doReq(t, "GET", ts.URL+"/api/sandboxes/"+id+"/ports/8080/dial", "token-a", nil)
+	resp, body = doReq(t, "GET", ts.URL+"/api/leases/"+id+"/ports/8080/dial", "token-a", nil)
 	lostBody(t, resp, body, "rootfs dead")
 }
 
 // TestLostLeaseGetNamesReason: GET returns state lost and lost_reason.
 func TestLostLeaseGetNamesReason(t *testing.T) {
 	ts, svc, _, _ := newTestServerWithService(t)
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "ttl": 300})
 	id := create["id"].(string)
 	setLost(t, svc, id, "resume failed after orchestrator restart: boom")
 
-	_, detail := doReq(t, "GET", ts.URL+"/api/sandboxes/"+id, "token-a", nil)
+	_, detail := doReq(t, "GET", ts.URL+"/api/leases/"+id, "token-a", nil)
 	if detail["state"] != "lost" {
 		t.Fatalf("state = %v, want lost", detail["state"])
 	}
@@ -114,11 +114,11 @@ func TestLostLeaseGetNamesReason(t *testing.T) {
 // the reason for a lost lease.
 func TestLostLeaseResume410(t *testing.T) {
 	ts, svc, _, _ := newTestServerWithService(t)
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
 	id := create["id"].(string)
 	setLost(t, svc, id, "resume failed after orchestrator restart: boom")
 
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/resume", "token-a", nil)
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/resume", "token-a", nil)
 	lostBody(t, resp, body, "resume failed after orchestrator restart: boom")
 }
 
@@ -127,7 +127,7 @@ func TestLostLeaseResume410(t *testing.T) {
 // next exec auto-resumes and must answer 410 lease_lost, not 500.
 func TestLostIdleSuspendedExec410(t *testing.T) {
 	ts, svc, _, _ := newTestServerWithService(t)
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
 	id := create["id"].(string)
 	svc.store.mu.Lock()
 	l := svc.store.leases[id]
@@ -139,7 +139,7 @@ func TestLostIdleSuspendedExec410(t *testing.T) {
 	svc.saveLeaseLocked(l)
 	svc.store.mu.Unlock()
 
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/exec", "token-a", map[string]any{"cmd": "echo hi"})
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/exec", "token-a", map[string]any{"cmd": "echo hi"})
 	lostBody(t, resp, body, "recovered: no checkpoint, running state gone")
 }
 

@@ -29,7 +29,7 @@ func TestOwnerSerialization(t *testing.T) {
 
 	// Create a lease as the identity user; response must carry owner = user id.
 	create := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/sandboxes", strings.NewReader(`{"image":"py-base","ttl":60}`))
+	req := httptest.NewRequest("POST", "/api/leases", strings.NewReader(`{"image":"py-base","ttl":60}`))
 	req.Header.Set("Authorization", "Bearer user-tok")
 	req.Header.Set("Content-Type", "application/json")
 	h.ServeHTTP(create, req)
@@ -48,7 +48,7 @@ func TestOwnerSerialization(t *testing.T) {
 
 	// List response must carry owner too (via Lease struct json tag).
 	list := httptest.NewRecorder()
-	req2 := httptest.NewRequest("GET", "/api/sandboxes", nil)
+	req2 := httptest.NewRequest("GET", "/api/leases", nil)
 	req2.Header.Set("Authorization", "Bearer user-tok")
 	h.ServeHTTP(list, req2)
 	if list.Code != http.StatusOK {
@@ -68,7 +68,7 @@ func TestOwnerSerializationLegacy(t *testing.T) {
 	h := srv.Handler()
 
 	create := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/sandboxes", strings.NewReader(`{"image":"py-base","ttl":60}`))
+	req := httptest.NewRequest("POST", "/api/leases", strings.NewReader(`{"image":"py-base","ttl":60}`))
 	req.Header.Set("Authorization", "Bearer legacy-tok")
 	req.Header.Set("Content-Type", "application/json")
 	h.ServeHTTP(create, req)
@@ -103,7 +103,7 @@ func TestOwnerScopedByName(t *testing.T) {
 	}
 
 	create := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/sandboxes", strings.NewReader(`{"image":"py-base","ttl":60,"persistent":true}`))
+	req := httptest.NewRequest("POST", "/api/leases", strings.NewReader(`{"image":"py-base","ttl":60,"persistent":true}`))
 	req.Header.Set("Authorization", "Bearer tok-a")
 	req.Header.Set("Content-Type", "application/json")
 	h.ServeHTTP(create, req)
@@ -118,7 +118,7 @@ func TestOwnerScopedByName(t *testing.T) {
 	}
 	// Name the lease via the tag endpoint.
 	tag := httptest.NewRecorder()
-	reqT := httptest.NewRequest("POST", "/api/sandboxes/"+leaseID+"/tag", strings.NewReader(`{"name":"mylease"}`))
+	reqT := httptest.NewRequest("POST", "/api/leases/"+leaseID+"/tag", strings.NewReader(`{"name":"mylease"}`))
 	reqT.Header.Set("Authorization", "Bearer tok-a")
 	reqT.Header.Set("Content-Type", "application/json")
 	h.ServeHTTP(tag, reqT)

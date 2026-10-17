@@ -72,7 +72,7 @@ func pointHostIP(t *testing.T, svc *Service, id, host string, port int) {
 // dialGuest opens the dial WebSocket and registers cleanup.
 func dialGuest(t *testing.T, ts *httptest.Server, id string, port int, token string) (*websocket.Conn, *http.Response, error) {
 	t.Helper()
-	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/api/sandboxes/" + id + "/ports/" + strconv.Itoa(port) + "/dial"
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/api/leases/" + id + "/ports/" + strconv.Itoa(port) + "/dial"
 	hdr := http.Header{}
 	if token != "" {
 		hdr.Set("Authorization", "Bearer "+token)
@@ -91,11 +91,11 @@ func TestGuestDialEcho(t *testing.T) {
 	ts, svc, _, _ := newTestServerWithService(t)
 	host, port := newEchoServer(t)
 
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "ttl": 300})
 	id := create["id"].(string)
 	pointHostIP(t, svc, id, host, port)
 
-	// The /api/leases alias must work like the /api/sandboxes spelling.
+	// The /api/leases alias must work like the /api/leases spelling.
 	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/api/leases/" + id + "/ports/" + strconv.Itoa(port) + "/dial"
 	ws, _, err := websocket.DefaultDialer.Dial(wsURL, http.Header{"Authorization": {"Bearer token-a"}})
 	if err != nil {
@@ -146,7 +146,7 @@ func TestGuestDialClosePropagation(t *testing.T) {
 	ts, svc, _, _ := newTestServerWithService(t)
 	host, port := newEchoServer(t)
 
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "ttl": 300})
 	id := create["id"].(string)
 	pointHostIP(t, svc, id, host, port)
 
@@ -188,7 +188,7 @@ func TestGuestDialGuestClose(t *testing.T) {
 	ts, svc, _, _ := newTestServerWithService(t)
 	host, port := newEchoServer(t)
 
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "ttl": 300})
 	id := create["id"].(string)
 	pointHostIP(t, svc, id, host, port)
 
@@ -223,7 +223,7 @@ func TestGuestDialNotFoundForOtherOwner(t *testing.T) {
 	ts, svc, _, _ := newTestServerWithService(t)
 	host, port := newEchoServer(t)
 
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "ttl": 300})
 	id := create["id"].(string)
 	pointHostIP(t, svc, id, host, port)
 
@@ -237,11 +237,11 @@ func TestGuestDialSuspendedResumes(t *testing.T) {
 	ts, svc, _, _ := newTestServerWithService(t)
 	host, port := newEchoServer(t)
 
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
 	id := create["id"].(string)
 	pointHostIP(t, svc, id, host, port)
 
-	resp, _ := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/suspend", "token-a", nil)
+	resp, _ := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/suspend", "token-a", nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("suspend = %d", resp.StatusCode)
 	}
@@ -265,7 +265,7 @@ func TestGuestDialLimit(t *testing.T) {
 	ts, svc, _, _ := newTestServerWithService(t)
 	host, port := newEchoServer(t)
 
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "ttl": 300})
 	id := create["id"].(string)
 	pointHostIP(t, svc, id, host, port)
 
@@ -289,7 +289,7 @@ func TestGuestDialLimit(t *testing.T) {
 	}
 
 	// Another owner is not affected by token-a's cap.
-	_, createB := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-b", map[string]any{"image": "py-base", "ttl": 300})
+	_, createB := doReq(t, "POST", ts.URL+"/api/leases", "token-b", map[string]any{"image": "py-base", "ttl": 300})
 	idB := createB["id"].(string)
 	pointHostIP(t, svc, idB, host, port)
 	if _, _, err := dialGuest(t, ts, idB, port, "token-b"); err != nil {
@@ -315,7 +315,7 @@ func TestGuestDialLimit(t *testing.T) {
 func TestGuestDialBadPort(t *testing.T) {
 	ts, _ := newTestServer(t)
 	for _, port := range []string{"0", "-1", "65536", "99999999999999999999", "abc"} {
-		wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/api/sandboxes/whatever-id/ports/" + port + "/dial"
+		wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/api/leases/whatever-id/ports/" + port + "/dial"
 		if _, resp, err := websocket.DefaultDialer.Dial(wsURL, http.Header{"Authorization": {"Bearer token-a"}}); err == nil {
 			t.Fatalf("port %q dial succeeded, want 400", port)
 		} else if resp.StatusCode != http.StatusBadRequest {
@@ -327,7 +327,7 @@ func TestGuestDialBadPort(t *testing.T) {
 func TestGuestDialDialFailureIsBadGateway(t *testing.T) {
 	ts, svc, _, _ := newTestServerWithService(t)
 
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "ttl": 300})
 	id := create["id"].(string)
 	// Nothing listens on the guest port: the substrate dial fails.
 	pointHostIP(t, svc, id, "127.0.0.1", 1)
@@ -343,7 +343,7 @@ func TestGuestDialMetricsAndAlias(t *testing.T) {
 	ts, svc, _, _ := newTestServerWithService(t)
 	host, port := newEchoServer(t)
 
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "ttl": 300})
 	id := create["id"].(string)
 	pointHostIP(t, svc, id, host, port)
 
@@ -450,7 +450,7 @@ func TestGuestDialAdminAllowed(t *testing.T) {
 	}
 
 	host, port := newEchoServer(t)
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "ttl": 300})
 	id := create["id"].(string)
 	pointHostIP(t, svc, id, host, port)
 
@@ -478,8 +478,8 @@ func TestGuestDialAdminAllowed(t *testing.T) {
 func TestGuestDialMetricsPathNormalized(t *testing.T) {
 	// The guest port must not become a metrics label: one series per
 	// port would be unbounded cardinality.
-	in := "/api/sandboxes/0123456789abcdef0123456789abcdef/ports/8080/dial"
-	if got, want := normalizePath(in), "/api/sandboxes/:id/ports/:port/dial"; got != want {
+	in := "/api/leases/0123456789abcdef0123456789abcdef/ports/8080/dial"
+	if got, want := normalizePath(in), "/api/leases/:id/ports/:port/dial"; got != want {
 		t.Fatalf("normalizePath(%q) = %q, want %q", in, got, want)
 	}
 }
@@ -511,7 +511,7 @@ func TestGuestDialIdleTimeout(t *testing.T) {
 	}()
 	port := ln.Addr().(*net.TCPAddr).Port
 
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "ttl": 300})
 	id := create["id"].(string)
 	pointHostIP(t, svc, id, "127.0.0.1", port)
 
@@ -552,7 +552,7 @@ func TestGuestDialIdleTimeout(t *testing.T) {
 
 func TestGuestDialRefusesEnvdAndNoHost(t *testing.T) {
 	ts, svc, _, _ := newTestServerWithService(t)
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "ttl": 300})
 	id := create["id"].(string)
 
 	// No host address: refused, never dialed as ":port" (the backend's
@@ -591,7 +591,7 @@ func TestGuestDialOneWayStaysOpen(t *testing.T) {
 	}()
 	port := ln.Addr().(*net.TCPAddr).Port
 
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "ttl": 300})
 	id := create["id"].(string)
 	pointHostIP(t, svc, id, "127.0.0.1", port)
 

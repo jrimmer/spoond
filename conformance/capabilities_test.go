@@ -89,7 +89,7 @@ func TestA20_Capabilities(t *testing.T) {
 	for _, row := range doc.Endpoints {
 		have[row.Method+" "+row.Path] = true
 	}
-	for _, want := range []string{"GET /api/images", "POST /api/sandboxes"} {
+	for _, want := range []string{"GET /api/images", "POST /api/leases"} {
 		if !have[want] {
 			failf(t, "capabilities: endpoints lacks %q", want)
 		}

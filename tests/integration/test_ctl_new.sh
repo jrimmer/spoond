@@ -55,7 +55,7 @@ if [ -n "$CTLID" ]; then
   OUT=$(timeout 90 $SSH "restart $CTLID" 2>&1)
   assert_contains "restart returns JSON" "$OUT" '"status":"running"'
   # exec after restart must work (fresh sandbox, state restored)
-  OUT2=$(api POST "/api/sandboxes/$CTLID/exec" '{"cmd":"echo RESTARTED_OK"}')
+  OUT2=$(api POST "/api/leases/$CTLID/exec" '{"cmd":"echo RESTARTED_OK"}')
   assert_contains "exec works after restart" "$OUT2" "RESTARTED_OK"
   # proxy after restart must work (guest address preserved across resume)
   sleep 5
@@ -71,17 +71,17 @@ fi
 echo
 echo "== ctl-new: prompt (no agent -> 409) =="
 if [ -n "$CTLID" ]; then
-  CODE=$(curl -sk -o /tmp/prompt_resp -w '%{http_code}' --max-time 30 -X POST "$BE_API/api/sandboxes/$CTLID/prompt" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"message":"hi"}')
+  CODE=$(curl -sk -o /tmp/prompt_resp -w '%{http_code}' --max-time 30 -X POST "$BE_API/api/leases/$CTLID/prompt" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"message":"hi"}')
   assert_eq "prompt without agent conflicts" "$CODE" "409"
 fi
 
 echo
 echo "== ctl-new: cleanup =="
 if [ -n "${CTLID2:-}" ]; then
-  api DELETE "/api/sandboxes/$CTLID2" >/dev/null && ok "deleted second lease" || bad "delete second lease"
+  api DELETE "/api/leases/$CTLID2" >/dev/null && ok "deleted second lease" || bad "delete second lease"
 fi
 if [ -n "$CTLID" ]; then
-  api DELETE "/api/sandboxes/$CTLID" >/dev/null && ok "deleted ctl lease" || bad "delete ctl lease"
+  api DELETE "/api/leases/$CTLID" >/dev/null && ok "deleted ctl lease" || bad "delete ctl lease"
 fi
 cp /tmp/ctl-unit.bak "$UNIT"
 rm -f "$KEYS/itest.pub" "$GWKEY" "$GWKEY_PUB"

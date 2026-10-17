@@ -109,17 +109,17 @@ func TestUsersTokenResolutionAndLegacyFallback(t *testing.T) {
 		t.Fatalf("bootstrap: %d", rec.Code)
 	}
 	// user token resolves (owner = user id)
-	rec2, _ := doUsersReq(t, h, "GET", "/api/sandboxes", "user-tok", "")
+	rec2, _ := doUsersReq(t, h, "GET", "/api/leases", "user-tok", "")
 	if rec2.Code != http.StatusOK {
 		t.Fatalf("user token auth: %d", rec2.Code)
 	}
 	// legacy token still resolves (backward compat)
-	rec3, _ := doUsersReq(t, h, "GET", "/api/sandboxes", "legacy-tok", "")
+	rec3, _ := doUsersReq(t, h, "GET", "/api/leases", "legacy-tok", "")
 	if rec3.Code != http.StatusOK {
 		t.Fatalf("legacy token auth: %d", rec3.Code)
 	}
 	// unknown token rejected
-	rec4, _ := doUsersReq(t, h, "GET", "/api/sandboxes", "nope", "")
+	rec4, _ := doUsersReq(t, h, "GET", "/api/leases", "nope", "")
 	if rec4.Code != http.StatusUnauthorized {
 		t.Fatalf("unknown token should 401, got %d", rec4.Code)
 	}

@@ -79,7 +79,7 @@ func TestKeptMetricsGauges(t *testing.T) {
 		t.Fatalf("fresh server: spoond_kept_builds_bytes = %v (present %v), want a 0 gauge (updateKeptMetrics runs on every scrape)", n, ok)
 	}
 
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a",
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a",
 		map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
 	id := create["id"].(string)
 
@@ -129,7 +129,7 @@ func TestLeaseDetailListsKeptBuilds(t *testing.T) {
 	seedImage(t, db, "py-base", 2048)
 	roomyDisk(svc) // the create and the keeps must fit in the snapshot disk (FS3b)
 
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a",
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a",
 		map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
 	id := create["id"].(string)
 
@@ -203,7 +203,7 @@ func TestKeptBudgetIsPerOwner(t *testing.T) {
 	}
 	sliceOf := keptBudgetSetup(t, svc) // the create and every checkpoint must fit (FS3b)
 
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "solo-tok",
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "solo-tok",
 		map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
 	id := create["id"].(string)
 	// Every build is twice the owner's slice: every keep is over budget.
@@ -244,7 +244,7 @@ func TestKeptDiskProbeFeedsNotify(t *testing.T) {
 	// root disk and the checkpoint's snapshot estimate must fit (FS3b).
 	svc.diskCapacity = func(string) (uint64, uint64, error) { return 64 << 30, 32 << 30, nil }
 
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a",
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a",
 		map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
 	id := create["id"].(string)
 	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/checkpoint", "token-a",

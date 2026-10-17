@@ -28,7 +28,7 @@ func TestKeptCapFifthKeepConflicts(t *testing.T) {
 	svc.cfg.MaxKeptPerLease = 4
 	seedImage(t, db, "py-base", 2048)
 
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a",
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a",
 		map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
 	id := create["id"].(string)
 	ctx := context.Background()
@@ -95,7 +95,7 @@ func TestKeptCapUnpinFreesSlot(t *testing.T) {
 	seedImage(t, db, "py-base", 2048)
 	roomyDisk(svc) // the create and every keep must fit (FS3b)
 
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a",
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a",
 		map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
 	id := create["id"].(string)
 
@@ -200,7 +200,7 @@ func TestKeptBudgetOverBudgetKeepNotPinned(t *testing.T) {
 	}
 	sliceOf := keptBudgetSetup(t, svc)
 
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "keeper-tok",
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "keeper-tok",
 		map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
 	id := create["id"].(string)
 	ctx := context.Background()
@@ -272,7 +272,7 @@ func TestKeptBudgetInsideSliceKeeps(t *testing.T) {
 		t.Fatal(err)
 	}
 	sliceOf := keptBudgetSetup(t, svc)
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "keeper-tok",
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "keeper-tok",
 		map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
 	id := create["id"].(string)
 
@@ -309,7 +309,7 @@ func TestKeptBudgetCountsNamedSnapshots(t *testing.T) {
 		t.Fatal(err)
 	}
 	sliceOf := keptBudgetSetup(t, svc)
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "keeper-tok",
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "keeper-tok",
 		map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
 	id := create["id"].(string)
 	slice := sliceOf(u.ID)

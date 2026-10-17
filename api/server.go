@@ -13,6 +13,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -69,9 +70,6 @@ type Server struct {
 	// GET /api/admin/config (#137) so a caller can tell whether the
 	// backend restarted since the unit env changed.
 	startedAt time.Time
-	// depLog (#139 groundwork) throttles the deprecated-surface notice
-	// to one line per caller per hour.
-	depLog *deprecationLogger
 	// fileSecrets (#137 C2): the secrets this process resolved from a
 	// <NAME>_FILE value file rather than the environment. The backend
 	// sets nothing in its own env, so GET /api/admin/config would report
@@ -199,7 +197,6 @@ func NewServer(svc *Service, reg *ImageRegistry) *Server {
 // exe.dev catalog model ids to upstream ids.
 func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRouterKey, defaultModel string, modelMap map[string]string) *Server {
 	s := &Server{svc: svc, reg: reg, mux: http.NewServeMux(), authFails: newAuthFailLimiter(),
-		depLog:    newDeprecationLogger(),
 		busyCount: map[string]int{}, busyMax: 8, fileXfer: make(chan struct{}, maxFileTransfers),
 		dialCount: map[string]int{}, metrics: metrics.NewBackendMetrics(),
 		startedAt: time.Now()}
@@ -214,38 +211,38 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 		s.llm.metrics = s.metrics
 	}
 	s.svc.SetMetrics(s.metrics)
-	s.mux.HandleFunc("POST /api/sandboxes", s.handleCreate)
-	s.mux.HandleFunc("GET /api/sandboxes", s.handleList)
-	s.mux.HandleFunc("GET /api/sandboxes/queue", s.handleQueue)
-	s.mux.HandleFunc("GET /api/sandboxes/{id}", s.handleGetSandbox)
-	s.mux.HandleFunc("POST /api/sandboxes/{id}/exec", s.handleExec)
+	s.mux.HandleFunc("POST /api/leases", s.handleCreate)
+	s.mux.HandleFunc("GET /api/leases", s.handleList)
+	s.mux.HandleFunc("GET /api/leases/queue", s.handleQueue)
+	s.mux.HandleFunc("GET /api/leases/{id}", s.handleGetSandbox)
+	s.mux.HandleFunc("POST /api/leases/{id}/exec", s.handleExec)
 	// Background exec jobs (2.6, #135): list, read (with long-poll),
 	// stream raw output by range, and signal a job.
-	s.mux.HandleFunc("GET /api/sandboxes/{id}/jobs", s.handleJobsList)
-	s.mux.HandleFunc("GET /api/sandboxes/{id}/jobs/{job}", s.handleJobGet)
-	s.mux.HandleFunc("GET /api/sandboxes/{id}/jobs/{job}/output", s.handleJobOutput)
-	s.mux.HandleFunc("POST /api/sandboxes/{id}/jobs/{job}/signal", s.handleJobSignal)
-	s.mux.HandleFunc("DELETE /api/sandboxes/{id}", s.handleDelete)
-	s.mux.HandleFunc("POST /api/sandboxes/{id}/keepalive", s.handleKeepAlive)
-	s.mux.HandleFunc("POST /api/sandboxes/{id}/suspend", s.handleSuspend)
-	s.mux.HandleFunc("POST /api/sandboxes/{id}/resume", s.handleResume)
-	s.mux.HandleFunc("POST /api/sandboxes/{id}/restart", s.handleRestart)
-	s.mux.HandleFunc("POST /api/sandboxes/{id}/checkpoint", s.handleCheckpoint)
-	s.mux.HandleFunc("POST /api/sandboxes/{id}/tag", s.handleTag)
-	s.mux.HandleFunc("POST /api/sandboxes/{id}/comment", s.handleComment)
-	s.mux.HandleFunc("POST /api/sandboxes/{id}/prompt", s.handlePrompt)
-	s.mux.HandleFunc("GET /api/sandboxes/{id}/endpoint", s.handleEndpoint)
-	s.mux.HandleFunc("GET /api/sandboxes/{id}/stat", s.handleStat)
-	s.mux.HandleFunc("GET /api/sandboxes/{id}/stream", s.handleStream)
+	s.mux.HandleFunc("GET /api/leases/{id}/jobs", s.handleJobsList)
+	s.mux.HandleFunc("GET /api/leases/{id}/jobs/{job}", s.handleJobGet)
+	s.mux.HandleFunc("GET /api/leases/{id}/jobs/{job}/output", s.handleJobOutput)
+	s.mux.HandleFunc("POST /api/leases/{id}/jobs/{job}/signal", s.handleJobSignal)
+	s.mux.HandleFunc("DELETE /api/leases/{id}", s.handleDelete)
+	s.mux.HandleFunc("POST /api/leases/{id}/keepalive", s.handleKeepAlive)
+	s.mux.HandleFunc("POST /api/leases/{id}/suspend", s.handleSuspend)
+	s.mux.HandleFunc("POST /api/leases/{id}/resume", s.handleResume)
+	s.mux.HandleFunc("POST /api/leases/{id}/restart", s.handleRestart)
+	s.mux.HandleFunc("POST /api/leases/{id}/checkpoint", s.handleCheckpoint)
+	s.mux.HandleFunc("POST /api/leases/{id}/tag", s.handleTag)
+	s.mux.HandleFunc("POST /api/leases/{id}/comment", s.handleComment)
+	s.mux.HandleFunc("POST /api/leases/{id}/prompt", s.handlePrompt)
+	s.mux.HandleFunc("GET /api/leases/{id}/endpoint", s.handleEndpoint)
+	s.mux.HandleFunc("GET /api/leases/{id}/stat", s.handleStat)
+	s.mux.HandleFunc("GET /api/leases/{id}/stream", s.handleStream)
 	// Live egress policy change (U09).
-	s.mux.HandleFunc("POST /api/sandboxes/{id}/network", s.handleNetwork)
-	s.mux.HandleFunc("POST /api/sandboxes/{id}/clone", s.handleClone)
-	s.mux.HandleFunc("POST /api/sandboxes/{id}/fork", s.handleFork)
+	s.mux.HandleFunc("POST /api/leases/{id}/network", s.handleNetwork)
+	s.mux.HandleFunc("POST /api/leases/{id}/clone", s.handleClone)
+	s.mux.HandleFunc("POST /api/leases/{id}/fork", s.handleFork)
 	// Sharing (T6/#33). The fair-share admin view is a separate
 	// route, GET /api/fair-shares (#145 FS1); GET /api/shares keeps
 	// listing the caller's lease grants.
-	s.mux.HandleFunc("POST /api/sandboxes/{id}/share", s.handleShareGrant)
-	s.mux.HandleFunc("DELETE /api/sandboxes/{id}/share/{grantee}", s.handleShareRevoke)
+	s.mux.HandleFunc("POST /api/leases/{id}/share", s.handleShareGrant)
+	s.mux.HandleFunc("DELETE /api/leases/{id}/share/{grantee}", s.handleShareRevoke)
 	s.mux.HandleFunc("GET /api/shares", s.handleShareList)
 	// Every owner's fair-share slice and usage, admin-only (#145 FS1).
 	s.mux.HandleFunc("GET /api/fair-shares", s.handleSharesList)
@@ -261,7 +258,7 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	// Named snapshots (2.7, #83): save a lease as a named snapshot, and
 	// list/show/delete/retune the owner's named snapshots. The {name...}
 	// wildcard accepts a slash in the name and an @version suffix.
-	s.mux.HandleFunc("POST /api/sandboxes/{id}/snapshots", s.handleLeaseSnapshotSave)
+	s.mux.HandleFunc("POST /api/leases/{id}/snapshots", s.handleLeaseSnapshotSave)
 	s.mux.HandleFunc("GET /api/named-snapshots", s.handleNamedSnapshotsList)
 	s.mux.HandleFunc("GET /api/named-snapshots/{name...}", s.handleNamedSnapshotShow)
 	s.mux.HandleFunc("PUT /api/named-snapshots/{name...}", s.handleNamedSnapshotKeep)
@@ -285,42 +282,41 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	s.mux.HandleFunc("POST /api/admin/unpin-by-holder", s.handleAdminUnpinByHolder)
 	// Lease event streams (2.2, #115): Server-Sent Events of every lease
 	// lifecycle change, the caller's leases (admins see all) or one
-	// lease. The /api/leases alias covers both via rewriteLeasePath; the
-	// events-only EVENTS_TOKEN is admitted before that rewrite, on
+	// lease. The events-only EVENTS_TOKEN is admitted before auth, on
 	// GET /api/leases/events only (api/server.go).
-	s.mux.HandleFunc("GET /api/sandboxes/events", s.handleLeaseEvents)
-	s.mux.HandleFunc("GET /api/sandboxes/{id}/events", s.handleLeaseEventsOne)
+	s.mux.HandleFunc("GET /api/leases/events", s.handleLeaseEvents)
+	s.mux.HandleFunc("GET /api/leases/{id}/events", s.handleLeaseEventsOne)
 	// Held leases (2.1): since FS5 (2026-10-08) the holder and holder_url
 	// labels have no lifecycle effect; only a pin does. Setting a holder
 	// never pins. Owner or admin; the handler 404s for anyone else, like
 	// the other lease routes.
-	s.mux.HandleFunc("PUT /api/sandboxes/{id}/holder", s.handleHolder)
+	s.mux.HandleFunc("PUT /api/leases/{id}/holder", s.handleHolder)
 	// Pin (FS5): a pinned lease is never paused or deleted before its own
 	// expiry. PUT pins, DELETE unpins; owner or admin, 404 for anyone
 	// else.
-	s.mux.HandleFunc("PUT /api/sandboxes/{id}/pin", s.handlePin)
-	s.mux.HandleFunc("DELETE /api/sandboxes/{id}/pin", s.handleUnpin)
+	s.mux.HandleFunc("PUT /api/leases/{id}/pin", s.handlePin)
+	s.mux.HandleFunc("DELETE /api/leases/{id}/pin", s.handleUnpin)
 	// Per-lease checkpoint interval (2.3, #122): owner or admin, 404 for
 	// anyone else.
-	s.mux.HandleFunc("PUT /api/sandboxes/{id}/checkpoint-policy", s.handleCheckpointPolicy)
+	s.mux.HandleFunc("PUT /api/leases/{id}/checkpoint-policy", s.handleCheckpointPolicy)
 	// Per-lease idle reclamation threshold (2.5, #129 part 2): owner or
 	// admin, 404 for anyone else.
-	s.mux.HandleFunc("PUT /api/sandboxes/{id}/idle-policy", s.handleIdlePolicy)
+	s.mux.HandleFunc("PUT /api/leases/{id}/idle-policy", s.handleIdlePolicy)
 	// Restore in place to a kept checkpoint (2.3, #121): owner or admin,
 	// 404 for anyone else and for a build that is not the lease's own.
-	s.mux.HandleFunc("POST /api/sandboxes/{id}/restore", s.handleRestore)
+	s.mux.HandleFunc("POST /api/leases/{id}/restore", s.handleRestore)
 	// Crash test for one lease (Honey M3): delete its sandbox as a crash
 	// would and run the same per-lease recovery the reconcile pass does.
 	// Owner or admin, 404 for anyone else; only when the host sets
 	// CRASH_TEST (404 otherwise). See api/crash.go.
-	s.mux.HandleFunc("POST /api/sandboxes/{id}/crash-test", s.handleCrashTest)
+	s.mux.HandleFunc("POST /api/leases/{id}/crash-test", s.handleCrashTest)
 	// Lease file operations (#114): download/upload/stat/mkdir/remove a
 	// guest file through the substrate. Owner or admin; 404 for anyone
 	// else, 409 while suspended.
-	s.mux.HandleFunc("GET /api/sandboxes/{id}/files/{path...}", s.handleFileDownload)
-	s.mux.HandleFunc("PUT /api/sandboxes/{id}/files/{path...}", s.handleFileUpload)
-	s.mux.HandleFunc("POST /api/sandboxes/{id}/files/{path...}", s.handleFileOp)
-	s.mux.HandleFunc("DELETE /api/sandboxes/{id}/files/{path...}", s.handleFileDelete)
+	s.mux.HandleFunc("GET /api/leases/{id}/files/{path...}", s.handleFileDownload)
+	s.mux.HandleFunc("PUT /api/leases/{id}/files/{path...}", s.handleFileUpload)
+	s.mux.HandleFunc("POST /api/leases/{id}/files/{path...}", s.handleFileOp)
+	s.mux.HandleFunc("DELETE /api/leases/{id}/files/{path...}", s.handleFileDelete)
 	// Owner-blind resume for held leases (2.1): the SSH gateway resumes
 	// a rule-1-suspended held lease on attach, where the capability is
 	// the lease id/name and no owner id is known.
@@ -334,7 +330,7 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	// Guest port dial (2.2, #113): a WebSocket carrying raw bytes to a
 	// guest TCP port inside the lease, over substrate.DialGuest. Owner or
 	// admin; anyone else gets the same 404 as the other lease routes.
-	s.mux.HandleFunc("GET /api/sandboxes/{id}/ports/{port}/dial", s.handleGuestDial)
+	s.mux.HandleFunc("GET /api/leases/{id}/ports/{port}/dial", s.handleGuestDial)
 	// Identity endpoints (epic #26 T1): user management + key resolution.
 	if s.svc.identities != nil {
 		s.mux.HandleFunc("GET /api/users", s.handleUsersList)
@@ -390,15 +386,6 @@ func (s *Server) SetHeartbeatMetrics(m *metrics.BackendMetrics) {
 func (s *Server) SetLLMMaxConcurrent(n int) {
 	if s.llm != nil {
 		s.llm.maxConcurrent = n
-	}
-}
-
-// SetLLMRequireKey controls whether identity-store users WITHOUT an
-// LLM key are denied on /llm/ (security review #37 C2). Default false
-// keeps legacy-open; set true unless LLM_OPEN_LEGACY=1.
-func (s *Server) SetLLMRequireKey(v bool) {
-	if s.llm != nil {
-		s.llm.requireKey = v
 	}
 }
 
@@ -516,61 +503,75 @@ func (s *Server) collectServiceMetrics() {
 	s.busyMu.Unlock()
 }
 
-// apiLeasePathPrefix is the lease API's primary, documented path
-// prefix; apiSandboxPathPrefix is its permanent alias. Every route
-// registered under /api/sandboxes is served identically under
-// /api/leases (2.0, D5): requests to the primary /api/leases form are
-// rewritten onto the registered /api/sandboxes routes at the top of the
-// handler chain — before auth and the mux — so there is one route
-// table, one auth path and one set of metric labels.
-const (
-	apiLeasePathPrefix   = "/api/leases"
-	apiSandboxPathPrefix = "/api/sandboxes"
-)
+// apiLeasePathPrefix is the lease API's one path prefix (4.0): the
+// routes register under it and requests to the removed /api/sandboxes
+// alias answer 410 naming it.
+const apiLeasePathPrefix = "/api/leases"
 
-// rewriteLeasePath maps an /api/leases… path onto its /api/sandboxes…
-// twin. Only a whole path segment matches: /api/leasesX is not a lease
-// path and stays itself (the mux then 404s it, as before).
-func rewriteLeasePath(p string) string {
-	switch {
-	case p == apiLeasePathPrefix:
-		return apiSandboxPathPrefix
-	case strings.HasPrefix(p, apiLeasePathPrefix+"/"):
-		return apiSandboxPathPrefix + p[len(apiLeasePathPrefix):]
+// apiRemovedAlias is the path alias 4.0 removed. A request to it — the
+// bare prefix or anything under it — answers 410 with the same JSON
+// error shape as the rest of the API, plus an RFC 8594 Link header
+// naming the same route spelled on /api/leases.
+const apiRemovedAlias = "/api/sandboxes"
+
+// removedAliasGone answers a request on the removed /api/sandboxes
+// alias (4.0): 410 Gone, the API's JSON error shape, and the Link
+// successor naming the same route under /api/leases. It runs before
+// auth, so even a misconfigured client learns where the API moved; the
+// answer is otherwise identical for every caller.
+func removedAliasGone(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Link", `<`+aliasSuccessorPath(r.URL.Path)+`>; rel="successor-version"`)
+	w.WriteHeader(http.StatusGone)
+	_, _ = w.Write([]byte(`{"error":"` + apiRemovedAlias + ` is removed in 4.0; use /api/leases","code":"path_removed"}` + "\n"))
+}
+
+// aliasSuccessorPath maps a removed /api/sandboxes path onto its
+// /api/leases twin for the successor Link. Only whole segments match:
+// /api/sandboxesXY is not the alias and keeps itself (the mux then 404s
+// it, as for any unknown path). The result is percent-escaped: it goes
+// into a header before auth, and a raw `>` from the request path would
+// close the <…> and let the caller add Link entries of their own.
+func aliasSuccessorPath(p string) string {
+	if !isAPIRemovedAliasPath(p) {
+		return apiLeasePathPrefix
 	}
-	return p
+	return (&url.URL{Path: apiLeasePathPrefix + strings.TrimPrefix(p, apiRemovedAlias)}).EscapedPath()
+}
+
+// isAPIRemovedAliasPath reports whether p is on the removed
+// /api/sandboxes lease API (a whole-segment match, so /api/sandboxesXY
+// is not one).
+func isAPIRemovedAliasPath(p string) bool {
+	return p == apiRemovedAlias || strings.HasPrefix(p, apiRemovedAlias+"/")
 }
 
 // Handler returns the HTTP handler with auth + metrics middleware
-// applied. The /api/leases → /api/sandboxes rewrite sits at the top of
-// the chain — before auth and the mux — so both path families share one
-// auth path and one route table. The events-only EVENTS_TOKEN is
-// admitted even before that rewrite, on exactly GET /api/leases/events:
-// its one route, matched on the spelling it is documented and
-// contracted on.
+// applied. The removed-alias gate sits at the top of the chain —
+// before auth and the mux — so a request to the removed /api/sandboxes
+// alias answers 410 (with the successor Link) no matter what it
+// carries. The events-only EVENTS_TOKEN is admitted before auth, on
+// exactly GET /api/leases/events: its one route, matched on the
+// spelling it is documented and contracted on.
 func (s *Server) Handler() http.Handler {
 	authed := s.authMiddleware(s.mux)
-	rewrite := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Deprecation groundwork (#139): a request still on the
-		// /api/sandboxes alias gets the 4.0 headers before anything
-		// else answers it, so even a refused request learns the
-		// surface goes away. It is skipped for a path just rewritten
-		// from /api/leases (or the events token's documented route)
-		// below, so the primary path never reports the alias.
-		if isAPISandboxesPath(r.URL.Path) {
-			markDeprecatedAliasHeaders(w, r)
+	gate := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The /api/sandboxes alias is gone in 4.0: 410 with the
+		// successor Link, before anything else looks at the request.
+		if isAPIRemovedAliasPath(r.URL.Path) {
+			removedAliasGone(w, r)
+			return
 		}
 		if eventsPath(r.URL.Path) && s.isEventsToken(r) {
 			if !s.allowEventsToken(w, r) {
 				return
 			}
-			// Hand the request to the stream handler on the route the mux
-			// knows, carrying the marker its second gate reads. Every other
-			// path or spelling carries the token no further than
+			// Hand the request to the stream handler on the route the
+			// mux knows, carrying the marker its second gate reads. Every
+			// other path or spelling carries the token no further than
 			// authMiddleware's refusal.
-			r.URL.Path = apiSandboxPathPrefix + "/events"
+			r.URL.Path = apiLeasePathPrefix + "/events"
 			r = r.WithContext(context.WithValue(r.Context(), ctxEventsToken{}, true))
-			r = r.WithContext(context.WithValue(r.Context(), apiRewrittenKey{}, true))
 			authed.ServeHTTP(w, r)
 			return
 		}
@@ -584,13 +585,9 @@ func (s *Server) Handler() http.Handler {
 		if adminMint {
 			r = r.WithContext(context.WithValue(r.Context(), ctxAdminMint{}, true))
 		}
-		if p := rewriteLeasePath(r.URL.Path); p != r.URL.Path {
-			r.URL.Path = p
-			r = r.WithContext(context.WithValue(r.Context(), apiRewrittenKey{}, true))
-		}
 		authed.ServeHTTP(w, r)
 	})
-	return s.metricsMiddleware(rewrite)
+	return s.metricsMiddleware(gate)
 }
 
 // metricsMiddleware records HTTP request count and latency by path
@@ -647,10 +644,6 @@ func (sw *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 // normalizePath reduces high-cardinality paths (sandbox ids, user ids)
 // to stable labels for metrics.
 func normalizePath(p string) string {
-	// The /api/leases alias reports the /api/sandboxes labels: the
-	// rewrite happens before the mux, so the request counters must not
-	// split each route's series in two either.
-	p = rewriteLeasePath(p)
 	// Guest-service lease routes: the lease id is a capability, so it is
 	// reduced like any other id to keep metrics cardinality bounded.
 	// The documented route leaves "/active" as the only remainder.
@@ -665,10 +658,10 @@ func normalizePath(p string) string {
 	}
 	// Replace hex ids with :id
 	if len(p) > 40 && isHexPath(p) {
-		return "/api/sandboxes/:id"
+		return "/api/leases/:id"
 	}
-	if strings.HasPrefix(p, "/api/sandboxes/") {
-		rest := strings.TrimPrefix(p, "/api/sandboxes/")
+	if strings.HasPrefix(p, "/api/leases/") {
+		rest := strings.TrimPrefix(p, "/api/leases/")
 		parts := strings.SplitN(rest, "/", 2)
 		if len(parts) > 0 && len(parts[0]) >= 32 {
 			if len(parts) > 1 {
@@ -676,16 +669,16 @@ func normalizePath(p string) string {
 				// request counters per-file cardinality, so only the
 				// route stays.
 				if strings.HasPrefix(parts[1], "files/") {
-					return "/api/sandboxes/:id/files"
+					return "/api/leases/:id/files"
 				}
 				// The guest dial path carries the guest port; keeping it
 				// would give the request counter one series per port.
 				if strings.HasPrefix(parts[1], "ports/") && strings.HasSuffix(parts[1], "/dial") {
-					return "/api/sandboxes/:id/ports/:port/dial"
+					return "/api/leases/:id/ports/:port/dial"
 				}
-				return "/api/sandboxes/:id/" + parts[1]
+				return "/api/leases/:id/" + parts[1]
 			}
-			return "/api/sandboxes/:id"
+			return "/api/leases/:id"
 		}
 	}
 	if strings.HasPrefix(p, "/api/users/") {
@@ -720,20 +713,8 @@ func isHexPath(p string) bool {
 // exempt (liveness and readiness, issue #81); the /llm/ prefix is
 // exempt — the lease id in the path is the capability, and sandboxes
 // hold no consumer token.
-// /api/admin/ is exempt because ADMIN_TOKEN is not a user/consumer
-// token; api/admin.go authenticates those routes itself.
-// The break-glass mint (#138 A3) is exempt the same way: Handler has
-// already bound the ADMIN_TOKEN to POST /api/users/{id}/tokens and
-// marked the request; everything else must authenticate as a consumer
-// or user token.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// originalPath is the path as it reaches the middleware: Handler
-		// has already rewritten /api/leases onto /api/sandboxes above, so
-		// an alias request and a rewritten primary one look alike here;
-		// the apiRewrittenKey marker is what distinguishes them — the
-		// alias deprecation below counts only a request without it.
-		originalPath := r.URL.Path
 		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" ||
 			strings.HasPrefix(r.URL.Path, "/api/admin/") || strings.HasPrefix(r.URL.Path, llmGatewayPrefix) {
 			next.ServeHTTP(w, r)
@@ -748,9 +729,8 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		// The events-only EVENTS_TOKEN was admitted at the top of the
 		// chain, on exactly GET /api/leases/events — the marker below is
 		// set nowhere else. A request still carrying the token here (the
-		// canonical /api/sandboxes spelling, the one-lease streams, any
-		// other route at all) never passed that gate and is refused
-		// before consumer auth gets to count it.
+		// one-lease streams, any other route at all) never passed that
+		// gate and is refused before consumer auth gets to count it.
 		if s.isEventsToken(r) {
 			if r.Context().Value(ctxEventsToken{}) != true {
 				writeError(w, http.StatusUnauthorized, "invalid token")
@@ -819,16 +799,6 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 					}
 				}
 			}
-		}
-		// Deprecation groundwork (#139): count and notice alias usage —
-		// after the caller is fully resolved (identity user, impersonated
-		// user or legacy consumer), so the measured usage carries an
-		// identity for the throttled notice and the counter measures real
-		// (authorized) usage; the headers already went on before auth.
-		// A path rewritten from the primary /api/leases spelling carries
-		// the apiRewrittenKey marker and stays out.
-		if r.Context().Value(apiRewrittenKey{}) != true && isAPISandboxesPath(originalPath) {
-			s.noteDeprecatedAlias(r, userFrom(ctx), ownerFrom(ctx))
 		}
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
@@ -1085,12 +1055,9 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		// scratch work) and HolderURL links to it. Since FS5 these are
 		// plain labels with no lifecycle effect; they never pin. Pinned
 		// asks spoond never to pause or delete the lease before its own
-		// expiry. HoldTTL is removed (pins replace holds); it is
-		// accepted and ignored for one release, with a Deprecation
-		// header.
+		// expiry.
 		Holder    string `json:"holder"`
 		HolderURL string `json:"holder_url"`
-		HoldTTL   *int   `json:"hold_ttl"`
 		// Comment is the lease's free-text annotation on the create
 		// itself (#132): the runner sends its job label
 		// ("forgejo job <id> <url>", runner/executor.go) with the create,
@@ -1191,9 +1158,6 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	if err := validateComment(req.Comment); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
-	}
-	if req.HoldTTL != nil {
-		writeDeprecatedHoldTTL(w)
 	}
 	// Per-lease checkpoint interval (2.3, #122): omitted (nil) is the
 	// host default; otherwise 0 (never) or 60..604800 seconds.
@@ -2033,22 +1997,17 @@ func (s *Server) handleComment(w http.ResponseWriter, r *http.Request) {
 // on the lease's lifecycle and never pin. request
 // {"holder":"…","holder_url":"…"}. Both fields empty clears the
 // label. Owner or admin; anyone else gets the same 404 as the other
-// lease routes (no existence leak). The deprecated hold_ttl field is
-// accepted and ignored for one release, with a Deprecation header.
+// lease routes (no existence leak).
 func (s *Server) handleHolder(w http.ResponseWriter, r *http.Request) {
 	owner := ownerFrom(r.Context())
 	id := r.PathValue("id")
 	var req struct {
 		Holder    string `json:"holder"`
 		HolderURL string `json:"holder_url"`
-		HoldTTL   *int   `json:"hold_ttl"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
-	}
-	if req.HoldTTL != nil {
-		writeDeprecatedHoldTTL(w)
 	}
 	lease := s.svc.lookup(owner, id)
 	if lease == nil && isAdmin(r) {
@@ -2121,14 +2080,6 @@ func (s *Server) setPinnedRoute(w http.ResponseWriter, r *http.Request, pinned b
 		"pinned": updated.Pinned,
 		"ok":     true,
 	})
-}
-
-// writeDeprecatedHoldTTL marks a request that still sends the removed
-// hold_ttl field: accepted and ignored for one release, with a
-// Deprecation header so a caller can see it must stop sending it.
-func writeDeprecatedHoldTTL(w http.ResponseWriter) {
-	w.Header().Set("Deprecation", "true")
-	w.Header().Set("Warning", `299 - "hold_ttl is removed; pins replace holds"`)
 }
 
 // handlePrompt sends a message to the Shelley coding agent running inside
@@ -2738,7 +2689,6 @@ func (s *Server) handleFork(w http.ResponseWriter, r *http.Request) {
 		TTL        int    `json:"ttl"` // seconds
 		Holder     string `json:"holder"`
 		HolderURL  string `json:"holder_url"`
-		HoldTTL    *int   `json:"hold_ttl"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
@@ -2747,9 +2697,6 @@ func (s *Server) handleFork(w http.ResponseWriter, r *http.Request) {
 	if err := validateHolder(req.Holder, req.HolderURL); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
-	}
-	if req.HoldTTL != nil {
-		writeDeprecatedHoldTTL(w)
 	}
 	leases, buildID, err := s.svc.fork(r.Context(), owner, id, req.Count, req.Persistent, time.Duration(req.TTL)*time.Second, req.Holder, req.HolderURL)
 	if err != nil {

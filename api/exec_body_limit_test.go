@@ -30,7 +30,7 @@ func withExecBodyLimit(t *testing.T, n int64) {
 func TestExecBodyLimit413(t *testing.T) {
 	withExecBodyLimit(t, 1<<10)
 	ts, _, _, _ := newTestServerWithService(t)
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "ttl": 300})
 	id := create["id"].(string)
 
 	// A cmd string pushes the JSON body past the 1 KiB cap.
@@ -38,7 +38,7 @@ func TestExecBodyLimit413(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	req, _ := http.NewRequest("POST", ts.URL+"/api/sandboxes/"+id+"/exec", strings.NewReader(string(oversize)))
+	req, _ := http.NewRequest("POST", ts.URL+"/api/leases/"+id+"/exec", strings.NewReader(string(oversize)))
 	req.Header.Set("Authorization", "Bearer token-a")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -55,7 +55,7 @@ func TestExecBodyLimit413(t *testing.T) {
 	}
 
 	// A body within the cap is served as before.
-	resp, ok := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/exec", "token-a", map[string]any{"cmd": "echo hi"})
+	resp, ok := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/exec", "token-a", map[string]any{"cmd": "echo hi"})
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("in-cap exec = %d (%v), want 200", resp.StatusCode, ok)
 	}
@@ -133,7 +133,7 @@ func TestExecBodyLimitDoesNotResumeIdleSuspended(t *testing.T) {
 func TestStreamFirstFrameLimit(t *testing.T) {
 	withExecBodyLimit(t, 1<<10)
 	ts, _, _, _ := newTestServerWithService(t)
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "ttl": 300})
 	id := create["id"].(string)
 
 	ws := dialStream(t, ts, id, bearerHeader("token-a", ""))
@@ -168,7 +168,7 @@ func TestStreamFirstFrameLimit(t *testing.T) {
 func TestExecBodyLimitDefaultAcceptsLargeLegalBody(t *testing.T) {
 	withExecBodyLimit(t, defaultMaxExecBodyBytes)
 	ts, _, _, _ := newTestServerWithService(t)
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "ttl": 300})
 	id := create["id"].(string)
 
 	secrets := map[string]string{}
@@ -192,7 +192,7 @@ func TestExecBodyLimitDefaultAcceptsLargeLegalBody(t *testing.T) {
 	if int64(len(raw)) >= maxExecBodyBytes {
 		t.Fatalf("test body is %d bytes, at or above the cap %d; it must be legal", len(raw), maxExecBodyBytes)
 	}
-	req, _ := http.NewRequest("POST", ts.URL+"/api/sandboxes/"+id+"/exec", bytes.NewReader(raw))
+	req, _ := http.NewRequest("POST", ts.URL+"/api/leases/"+id+"/exec", bytes.NewReader(raw))
 	req.Header.Set("Authorization", "Bearer token-a")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

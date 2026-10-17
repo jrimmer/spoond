@@ -63,7 +63,7 @@ func TestCommentRoutesRejectControlChars(t *testing.T) {
 		setComment string
 	}{
 		{"/api/leases", "/api/leases/" + id + "/comment"},
-		{"/api/sandboxes", "/api/sandboxes/" + id + "/comment"},
+		{"/api/leases", "/api/leases/" + id + "/comment"},
 	}
 	bad := []struct {
 		name  string

@@ -50,18 +50,18 @@ assert_contains "non-admin create rejected" "$nonadmin" 'admin required'
 # --- owner serialization (U2) -------------------------------------------
 lid=$(new_lease dev-base 120 false)   # created as admin token
 [ -n "$lid" ] || bad "identity: create lease"
-out=$(api GET /api/sandboxes)
+out=$(api GET /api/leases)
 assert_contains "list carries owner" "$out" '"owner"'
 
 # --- owner scoping: other user cannot see/rm the lease ------------------
-other_list=$(curl -sk "$BE_API/api/sandboxes" -H "Authorization: Bearer $T2")
+other_list=$(curl -sk "$BE_API/api/leases" -H "Authorization: Bearer $T2")
 if echo "$other_list" | grep -q "$lid"; then
   bad "identity: cross-owner list leak"
 else
   ok "identity: cross-owner list isolated"
 fi
 
-other_rm=$(curl -sk -o /dev/null -w '%{http_code}' -X DELETE "$BE_API/api/sandboxes/$lid" \
+other_rm=$(curl -sk -o /dev/null -w '%{http_code}' -X DELETE "$BE_API/api/leases/$lid" \
   -H "Authorization: Bearer $T2")
 assert_eq "identity: cross-owner rm denied" "$other_rm" "404"
 
@@ -69,7 +69,7 @@ assert_eq "identity: cross-owner rm denied" "$other_rm" "404"
 curl -sk -X POST "$BE_API/api/users/$U1_ID/quota" -H "Authorization: Bearer $ADMIN_TOK" \
   -H "Content-Type: application/json" -d '{"max_ttl":10}' >/dev/null
 # first lease as U1 (TTL clamps 3600 -> 10)
-r1=$(curl -sk -w '\n%{http_code}' -X POST "$BE_API/api/sandboxes" -H "Authorization: Bearer $T1" \
+r1=$(curl -sk -w '\n%{http_code}' -X POST "$BE_API/api/leases" -H "Authorization: Bearer $T1" \
   -H "Content-Type: application/json" -d '{"image":"dev-base","ttl":3600}')
 assert_contains "quota: first lease ok" "$r1" "201"
 assert_contains "quota: ttl clamped" "$r1" '"ttl":10'
@@ -83,12 +83,12 @@ assert_contains "quota: deprecation header" "$r2" "deprecation: true"
 # --- trusted gateway impersonation (U6) ----------------------------------
 GWT=$(sed -n 's/.*backend-token \([^ ]*\).*/\1/p' /etc/systemd/system/spoond-sshd-gateway.service 2>/dev/null | head -1)
 if [ -n "$GWT" ]; then
-  imp=$(curl -sk -X POST "$BE_API/api/sandboxes" -H "Authorization: Bearer $GWT" \
+  imp=$(curl -sk -X POST "$BE_API/api/leases" -H "Authorization: Bearer $GWT" \
     -H "X-Spoond-User-Id: $U2_ID" -H "Content-Type: application/json" \
     -d '{"image":"dev-base","ttl":60}')
   assert_contains "impersonated create owner" "$imp" "\"owner\":\"$U2_ID\""
   # unknown user impersonation -> 403
-  code=$(curl -sk -o /dev/null -w '%{http_code}' -X POST "$BE_API/api/sandboxes" \
+  code=$(curl -sk -o /dev/null -w '%{http_code}' -X POST "$BE_API/api/leases" \
     -H "Authorization: Bearer $GWT" -H "X-Spoond-User-Id: u-nope" \
     -H "Content-Type: application/json" -d '{"image":"dev-base","ttl":60}')
   assert_eq "impersonate unknown user -> 403" "$code" "403"
@@ -97,7 +97,7 @@ else
 fi
 
 # --- cleanup -------------------------------------------------------------
-[ -n "${lid:-}" ] && curl -sk -X DELETE "$BE_API/api/sandboxes/$lid" -H "Authorization: Bearer $ADMIN_TOK" >/dev/null
+[ -n "${lid:-}" ] && curl -sk -X DELETE "$BE_API/api/leases/$lid" -H "Authorization: Bearer $ADMIN_TOK" >/dev/null
 curl -sk -X DELETE "$BE_API/api/users/$U1_ID" -H "Authorization: Bearer $ADMIN_TOK" >/dev/null
 curl -sk -X DELETE "$BE_API/api/users/$U2_ID" -H "Authorization: Bearer $ADMIN_TOK" >/dev/null
 ok "identity: cleanup"

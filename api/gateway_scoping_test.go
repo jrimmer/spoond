@@ -49,7 +49,7 @@ func doUsersReqList(t *testing.T, h http.Handler) map[string]any {
 
 // gwCreate creates a lease impersonating the given user via the gateway token.
 func gwCreate(h http.Handler, gwTok, userID string) (*httptest.ResponseRecorder, map[string]any) {
-	req := httptest.NewRequest("POST", "/api/sandboxes", strings.NewReader(`{"image":"py-base","ttl":60}`))
+	req := httptest.NewRequest("POST", "/api/leases", strings.NewReader(`{"image":"py-base","ttl":60}`))
 	req.Header.Set("Authorization", "Bearer "+gwTok)
 	if userID != "" {
 		req.Header.Set("X-Spoond-User-Id", userID)
@@ -97,7 +97,7 @@ func TestNonGatewayTokenCannotImpersonate(t *testing.T) {
 	h, _ := newGatewayScopedServer(t)
 	// a regular user token + X-Spoond-User-Id must be ignored (the
 	// request acts as the token's own owner, not the header).
-	req := httptest.NewRequest("POST", "/api/sandboxes", strings.NewReader(`{"image":"py-base","ttl":60}`))
+	req := httptest.NewRequest("POST", "/api/leases", strings.NewReader(`{"image":"py-base","ttl":60}`))
 	req.Header.Set("Authorization", "Bearer tok-a")
 	req.Header.Set("X-Spoond-User-Id", "u-anyone")
 	req.Header.Set("Content-Type", "application/json")
@@ -137,7 +137,7 @@ func TestCrossOwnerRmDenied(t *testing.T) {
 
 	// b tries to rm a's lease via gateway impersonation -> 404
 	del := httptest.NewRecorder()
-	dreq := httptest.NewRequest("DELETE", "/api/sandboxes/"+leaseID, nil)
+	dreq := httptest.NewRequest("DELETE", "/api/leases/"+leaseID, nil)
 	dreq.Header.Set("Authorization", "Bearer "+gwTok)
 	dreq.Header.Set("X-Spoond-User-Id", bID)
 	h.ServeHTTP(del, dreq)
@@ -147,7 +147,7 @@ func TestCrossOwnerRmDenied(t *testing.T) {
 
 	// a can rm it
 	del2 := httptest.NewRecorder()
-	dreq2 := httptest.NewRequest("DELETE", "/api/sandboxes/"+leaseID, nil)
+	dreq2 := httptest.NewRequest("DELETE", "/api/leases/"+leaseID, nil)
 	dreq2.Header.Set("Authorization", "Bearer "+gwTok)
 	dreq2.Header.Set("X-Spoond-User-Id", aID)
 	h.ServeHTTP(del2, dreq2)

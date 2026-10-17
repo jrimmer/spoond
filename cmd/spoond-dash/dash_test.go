@@ -30,7 +30,7 @@ spoond_leases_total 1234
 # TYPE spoond_node_running_sandboxes gauge
 spoond_node_running_sandboxes 3
 # TYPE spoond_http_requests_total counter
-spoond_http_requests_total{path="/api/sandboxes",method="POST",code="201"} %d
+spoond_http_requests_total{path="/api/leases",method="POST",code="201"} %d
 # TYPE spoond_create_duration_seconds histogram
 spoond_create_duration_seconds_bucket{resume="false",le="+Inf"} %d
 spoond_create_duration_seconds_sum{resume="false"} %s

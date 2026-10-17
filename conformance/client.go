@@ -140,15 +140,15 @@ func (c *client) do(method, path string, body any) (int, []byte, error) {
 }
 
 func (c *client) create(body map[string]any) (int, []byte, error) {
-	return c.do("POST", "/api/sandboxes", body)
+	return c.do("POST", "/api/leases", body)
 }
 
 func (c *client) exec(id string, body execReq) (int, []byte, error) {
-	return c.do("POST", "/api/sandboxes/"+id+"/exec", body)
+	return c.do("POST", "/api/leases/"+id+"/exec", body)
 }
 
 func (c *client) delete(id string) (int, []byte, error) {
-	return c.do("DELETE", "/api/sandboxes/"+id, nil)
+	return c.do("DELETE", "/api/leases/"+id, nil)
 }
 
 // filePut uploads raw bytes to the lease file at path (guest-absolute).
@@ -189,11 +189,11 @@ func (c *client) fileDelete(id, path, query string) (int, []byte, error) {
 }
 
 func (c *client) keepalive(id string, body map[string]any) (int, []byte, error) {
-	return c.do("POST", "/api/sandboxes/"+id+"/keepalive", body)
+	return c.do("POST", "/api/leases/"+id+"/keepalive", body)
 }
 
 func (c *client) suspend(id string) (int, []byte, error) {
-	return c.do("POST", "/api/sandboxes/"+id+"/suspend", nil)
+	return c.do("POST", "/api/leases/"+id+"/suspend", nil)
 }
 
 // heartbeat posts the guest heartbeat (POST /lease/{id}/active) on the
@@ -219,33 +219,33 @@ func (c *client) heartbeat(id string) (int, []byte, error) {
 }
 
 func (c *client) resume(id string) (int, []byte, error) {
-	return c.do("POST", "/api/sandboxes/"+id+"/resume", nil)
+	return c.do("POST", "/api/leases/"+id+"/resume", nil)
 }
 
 func (c *client) restart(id string) (int, []byte, error) {
-	return c.do("POST", "/api/sandboxes/"+id+"/restart", nil)
+	return c.do("POST", "/api/leases/"+id+"/restart", nil)
 }
 
 func (c *client) clone(id string, body map[string]any) (int, []byte, error) {
-	return c.do("POST", "/api/sandboxes/"+id+"/clone", body)
+	return c.do("POST", "/api/leases/"+id+"/clone", body)
 }
 
 func (c *client) fork(id string, body map[string]any) (int, []byte, error) {
-	return c.do("POST", "/api/sandboxes/"+id+"/fork", body)
+	return c.do("POST", "/api/leases/"+id+"/fork", body)
 }
 
 func (c *client) network(id string, body map[string]any) (int, []byte, error) {
-	return c.do("POST", "/api/sandboxes/"+id+"/network", body)
+	return c.do("POST", "/api/leases/"+id+"/network", body)
 }
 
 func (c *client) checkpoint(id string) (int, []byte, error) {
-	return c.do("POST", "/api/sandboxes/"+id+"/checkpoint", nil)
+	return c.do("POST", "/api/leases/"+id+"/checkpoint", nil)
 }
 
 // checkpointKeep checkpoints with {"keep":true} (2.3, #121): the build
 // joins the GC's kept set and is a restore point.
 func (c *client) checkpointKeep(id string) (int, []byte, error) {
-	return c.do("POST", "/api/sandboxes/"+id+"/checkpoint", map[string]any{"keep": true})
+	return c.do("POST", "/api/leases/"+id+"/checkpoint", map[string]any{"keep": true})
 }
 
 // startJob runs a command as a background job (2.6, #135).
@@ -323,11 +323,11 @@ func (c *client) restore(id, buildID string) (int, []byte, error) {
 }
 
 func (c *client) stat(id string) (int, []byte, error) {
-	return c.do("GET", "/api/sandboxes/"+id+"/stat", nil)
+	return c.do("GET", "/api/leases/"+id+"/stat", nil)
 }
 
 func (c *client) list() (int, []byte, error) {
-	return c.do("GET", "/api/sandboxes", nil)
+	return c.do("GET", "/api/leases", nil)
 }
 
 func (c *client) images(query string) (int, []byte, error) {
@@ -570,10 +570,10 @@ func (c *client) wsURLOf(path string) string {
 	return scheme + "://" + host + path
 }
 
-// stream opens GET /api/sandboxes/{id}/stream, sends the exec request as
+// stream opens GET /api/leases/{id}/stream, sends the exec request as
 // the first frame and returns the connection.
 func (c *client) stream(id string, req streamReq) (*wsConn, error) {
-	url := c.wsURLOf("/api/sandboxes/" + id + "/stream")
+	url := c.wsURLOf("/api/leases/" + id + "/stream")
 	dialer := websocket.Dialer{
 		HandshakeTimeout: 15 * time.Second,
 		TLSClientConfig:  &tls.Config{InsecureSkipVerify: true},
@@ -596,12 +596,12 @@ func (c *client) stream(id string, req streamReq) (*wsConn, error) {
 	return w, nil
 }
 
-// dialGuest opens GET /api/sandboxes/{id}/ports/{port}/dial — the raw
+// dialGuest opens GET /api/leases/{id}/ports/{port}/dial — the raw
 // host-to-guest TCP bridge (2.2, #113) — and returns the WebSocket. A
 // failed upgrade returns the HTTP status (0 when the transport itself
 // failed) for status assertions.
 func (c *client) dialGuest(id string, port int) (*websocket.Conn, int, error) {
-	url := c.wsURLOf("/api/sandboxes/" + id + "/ports/" + strconv.Itoa(port) + "/dial")
+	url := c.wsURLOf("/api/leases/" + id + "/ports/" + strconv.Itoa(port) + "/dial")
 	dialer := websocket.Dialer{
 		HandshakeTimeout: 15 * time.Second,
 		TLSClientConfig:  &tls.Config{InsecureSkipVerify: true},

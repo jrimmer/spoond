@@ -97,10 +97,9 @@ type capabilityAPI struct {
 	// named absolute in endpoints below so a caller can join either
 	// way; both spellings are stable (#52).
 	Base string `json:"base"`
-	// Primary is the documented lease path prefix; Alias its permanent
-	// pre-2.0 twin with identical behavior, auth and responses.
+	// Primary is the documented lease path prefix; Auth the auth
+	// model, from docs/api.md's "Who can do what".
 	Primary string `json:"primary"`
-	Alias   string `json:"alias"`
 	// Auth is the auth model, from docs/api.md's "Who can do what".
 	Auth string `json:"auth"`
 }
@@ -323,7 +322,6 @@ func (s *Server) capabilities() capabilityJSON {
 		API: capabilityAPI{
 			Base:    "/api",
 			Primary: apiLeasePathPrefix,
-			Alias:   apiSandboxPathPrefix,
 			Auth:    capabilitiesAuth,
 		},
 		Endpoints:       append([]endpointSpec(nil), endpointTable...),

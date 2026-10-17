@@ -41,7 +41,7 @@ func newQuotaTestServer(t *testing.T) (http.Handler, string) {
 }
 
 func createAs(h http.Handler, token string) int {
-	req := httptest.NewRequest("POST", "/api/sandboxes", strings.NewReader(`{"image":"py-base","ttl":60}`))
+	req := httptest.NewRequest("POST", "/api/leases", strings.NewReader(`{"image":"py-base","ttl":60}`))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -52,7 +52,7 @@ func createAs(h http.Handler, token string) int {
 func TestQuotaTTLClamp(t *testing.T) {
 	h, tok := newQuotaTestServer(t)
 	// user max_ttl = 10s; request 60s must clamp to 10s
-	req := httptest.NewRequest("POST", "/api/sandboxes", strings.NewReader(`{"image":"py-base","ttl":60}`))
+	req := httptest.NewRequest("POST", "/api/leases", strings.NewReader(`{"image":"py-base","ttl":60}`))
 	req.Header.Set("Authorization", "Bearer "+tok)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -184,7 +184,7 @@ func TestUserViewsOmitRemovedQuotaFields(t *testing.T) {
 		check("users list", u.(map[string]any))
 	}
 
-	req := httptest.NewRequest("POST", "/api/sandboxes", strings.NewReader(`{"image":"py-base","ttl":5}`))
+	req := httptest.NewRequest("POST", "/api/leases", strings.NewReader(`{"image":"py-base","ttl":5}`))
 	req.Header.Set("Authorization", "Bearer "+tok)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -194,7 +194,7 @@ func TestUserViewsOmitRemovedQuotaFields(t *testing.T) {
 	var created map[string]any
 	_ = json.Unmarshal(rec.Body.Bytes(), &created)
 	det := httptest.NewRecorder()
-	dreq := httptest.NewRequest("GET", "/api/sandboxes/"+created["id"].(string), nil)
+	dreq := httptest.NewRequest("GET", "/api/leases/"+created["id"].(string), nil)
 	dreq.Header.Set("Authorization", "Bearer "+tok)
 	h.ServeHTTP(det, dreq)
 	var detail map[string]any

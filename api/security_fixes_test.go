@@ -157,7 +157,7 @@ func TestM2GatewayTokenConstantTime(t *testing.T) {
 
 	// Create a lease as jason via impersonation.
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/sandboxes", strings.NewReader(`{"image":"py-base","ttl":60}`))
+	req := httptest.NewRequest("POST", "/api/leases", strings.NewReader(`{"image":"py-base","ttl":60}`))
 	req.Header.Set("Authorization", "Bearer gw-tok")
 	req.Header.Set("X-Spoond-User-Id", jid)
 	h.ServeHTTP(rec, req)
@@ -166,7 +166,7 @@ func TestM2GatewayTokenConstantTime(t *testing.T) {
 	}
 	// Wrong gateway token must NOT impersonate (would fail as invalid token → 401).
 	rec = httptest.NewRecorder()
-	req = httptest.NewRequest("POST", "/api/sandboxes", strings.NewReader(`{"image":"py-base","ttl":60}`))
+	req = httptest.NewRequest("POST", "/api/leases", strings.NewReader(`{"image":"py-base","ttl":60}`))
 	req.Header.Set("Authorization", "Bearer gw-tokX")
 	req.Header.Set("X-Spoond-User-Id", jid)
 	h.ServeHTTP(rec, req)
@@ -187,7 +187,7 @@ func TestL5AuthRateLimit(t *testing.T) {
 	got429 := false
 	for i := 0; i < 8; i++ {
 		rec := httptest.NewRecorder()
-		req := httptest.NewRequest("GET", "/api/sandboxes", nil)
+		req := httptest.NewRequest("GET", "/api/leases", nil)
 		req.Header.Set("Authorization", "Bearer wrong-token")
 		req.RemoteAddr = "203.0.113.9:12345"
 		h.ServeHTTP(rec, req)
@@ -202,7 +202,7 @@ func TestL5AuthRateLimit(t *testing.T) {
 	// A valid token from the same IP still works and resets the window.
 	doUsersReq(t, h, "POST", "/api/users", "legacy-tok", `{"name":"admin","fingerprints":["SHA256:fp-x"],"token":"admin-tok"}`)
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/api/sandboxes", nil)
+	req := httptest.NewRequest("GET", "/api/leases", nil)
 	req.Header.Set("Authorization", "Bearer legacy-tok")
 	req.RemoteAddr = "203.0.113.9:12345"
 	h.ServeHTTP(rec, req)
@@ -231,16 +231,14 @@ func TestM5MetricsAdminOnly(t *testing.T) {
 	}
 }
 
-// TestC2LLMRequireKey: with requireKey, a keyless owner's lease is
-// denied on /llm/ even with a valid token; with an LLM key set, the
-// key is required.
+// TestC2LLMRequireKey: a keyless identity-user owner's lease is denied
+// on /llm/ (401, 4.0); with an LLM key set the key is required.
 func TestC2LLMRequireKey(t *testing.T) {
 	svc, db, _ := newTestService(t)
 	seedImage(t, db, "py-base", 2048)
 	ids, _ := identity.NewStore("")
 	svc.SetIdentities(ids)
 	srv := NewServerWithLLM(svc, NewImageRegistry(db), "https://upstream.example/v1", "host-key", "gpt-x", nil)
-	srv.SetLLMRequireKey(true)
 	h := srv.Handler()
 
 	doUsersReq(t, h, "POST", "/api/users", "legacy-tok", `{"name":"admin","fingerprints":["SHA256:fp-x"],"token":"admin-tok"}`)
@@ -249,7 +247,7 @@ func TestC2LLMRequireKey(t *testing.T) {
 	doUsersReq(t, h, "POST", "/api/users/"+jid+"/llm-key", "admin-tok", `{"llm_key":"user-key-1"}`)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "https://vm/api/sandboxes", strings.NewReader(`{"image":"py-base","ttl":60}`))
+	req := httptest.NewRequest("POST", "https://vm/api/leases", strings.NewReader(`{"image":"py-base","ttl":60}`))
 	req.Header.Set("Authorization", "Bearer jason-tok")
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusCreated {
@@ -257,7 +255,7 @@ func TestC2LLMRequireKey(t *testing.T) {
 	}
 	var lid string
 	rec2 := httptest.NewRecorder()
-	req2 := httptest.NewRequest("GET", "/api/sandboxes", nil)
+	req2 := httptest.NewRequest("GET", "/api/leases", nil)
 	req2.Header.Set("Authorization", "Bearer jason-tok")
 	h.ServeHTTP(rec2, req2)
 	// parse id from list body
@@ -292,14 +290,14 @@ func TestC2LLMRequireKey(t *testing.T) {
 		t.Fatal("correct key should not be 401")
 	}
 
-	// Remove the key: now requireKey denies even with valid token.
+	// Remove the key: now the keyless owner is denied outright.
 	doUsersReq(t, h, "POST", "/api/users/"+jid+"/llm-key", "admin-tok", `{"llm_key":""}`)
 	rec5 := httptest.NewRecorder()
 	req5 := httptest.NewRequest("POST", "/llm/"+lid+"/openai/chat/completions", strings.NewReader(`{}`))
 	req5.Header.Set("Authorization", "Bearer jason-tok")
 	h.ServeHTTP(rec5, req5)
 	if rec5.Code != http.StatusUnauthorized {
-		t.Fatalf("keyless owner + requireKey should 401, got %d", rec5.Code)
+		t.Fatalf("keyless owner should 401, got %d", rec5.Code)
 	}
 }
 
@@ -336,7 +334,7 @@ func TestMetricsTokenScrapeOnly(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), `spoond_leases_by_image{image="py-base"} 1`) {
 		t.Fatalf("leases_by_image missing:\n%s", rec.Body.String())
 	}
-	for _, path := range []string{"/api/sandboxes", "/api/users", "/api/images"} {
+	for _, path := range []string{"/api/leases", "/api/users", "/api/images"} {
 		if rec := get(path, "scrape-tok"); rec.Code != http.StatusUnauthorized {
 			t.Fatalf("scrape token on %s: %d, want 401", path, rec.Code)
 		}

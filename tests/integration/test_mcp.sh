@@ -30,7 +30,7 @@ rpc() {
   printf '{"jsonrpc":"2.0","id":%s,"method":"%s","params":%s}\n' "$id" "$method" "$params"
 }
 
-BEFORE=$(api GET /api/sandboxes | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('sandboxes',d)))" 2>/dev/null || echo "?")
+BEFORE=$(api GET /api/leases | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('sandboxes',d)))" 2>/dev/null || echo "?")
 
 # initialize
 INIT=$( { rpc 1 initialize '{"protocolVersion":"2025-03-26","clientInfo":{"name":"itest"}}'; sleep 1; } | SPOOND_BACKEND_URL="$GO_BE_API" SPOOND_AGENT_TOKEN="$TOKEN" timeout 15 "$MCP_BIN" mcp 2>/dev/null | head -1 )
@@ -52,5 +52,5 @@ assert_contains "mcp write_file ok" "$WRITE" "WROTE"
 
 # leases released after stateless calls (should be near the baseline)
 sleep 2
-AFTER=$(api GET /api/sandboxes | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('sandboxes',d)))" 2>/dev/null || echo "?")
+AFTER=$(api GET /api/leases | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('sandboxes',d)))" 2>/dev/null || echo "?")
 echo "  (sandbox count before=$BEFORE after=$AFTER — warm pool may vary)"

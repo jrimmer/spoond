@@ -25,7 +25,7 @@ func createLiveLease(t *testing.T, ts, token string, body map[string]any) string
 	if body == nil {
 		body = map[string]any{"image": "py-base", "ttl": 300}
 	}
-	resp, out := doReq(t, "POST", ts+"/api/sandboxes", token, body)
+	resp, out := doReq(t, "POST", ts+"/api/leases", token, body)
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("create lease: status %d: %v", resp.StatusCode, out)
 	}
@@ -779,7 +779,7 @@ func TestNamedSnapshotKeptBudget(t *testing.T) {
 	}
 	sliceOf := keptBudgetSetup(t, svc) // the create and the saves must fit in the snapshot disk (FS3b)
 
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "keeper-tok",
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "keeper-tok",
 		map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
 	id := create["id"].(string)
 	// Each build is 70% of the owner's slice: the first save fits, the

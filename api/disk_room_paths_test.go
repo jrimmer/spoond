@@ -147,7 +147,7 @@ func TestDiskRoomPathCreateTakesBackVictim(t *testing.T) {
 	// short; vict-1's 2 GiB pause build (the oldest) covers it exactly.
 	h.tightBox(t, 8<<30, 0, "0")
 
-	resp, body := doReq(t, "POST", h.ts.URL+"/api/sandboxes", "token-a",
+	resp, body := doReq(t, "POST", h.ts.URL+"/api/leases", "token-a",
 		map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("create: %d (%v), want 201 after the take-back", resp.StatusCode, body)
@@ -167,7 +167,7 @@ func TestDiskRoomPathCreateNothingReclaimableBoxFull(t *testing.T) {
 	h.seedNamedAndKept(t, "consumer-b", 0, 900<<20)
 	h.tightBox(t, 100<<20, 60, "5")
 
-	resp, body := doReq(t, "POST", h.ts.URL+"/api/sandboxes", "token-a",
+	resp, body := doReq(t, "POST", h.ts.URL+"/api/leases", "token-a",
 		map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
 	expectBoxFull(t, resp, body, "lkc-consumer-b", h)
 }

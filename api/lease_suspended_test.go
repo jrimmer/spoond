@@ -39,13 +39,13 @@ func requireLeaseSuspended(t *testing.T, what string, status int, body map[strin
 // public verb, so the refused routes see a hand-suspended lease.
 func suspendedLease(t *testing.T, ts *httptest.Server) string {
 	t.Helper()
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a",
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a",
 		map[string]any{"image": "py-base", "persistent": true})
 	id, _ := create["id"].(string)
 	if id == "" {
 		t.Fatalf("create: no id in %v", create)
 	}
-	if resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/suspend", "token-a", nil); resp.StatusCode != 200 {
+	if resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/suspend", "token-a", nil); resp.StatusCode != 200 {
 		t.Fatalf("suspend: status %d: %v", resp.StatusCode, body)
 	}
 	return id
@@ -57,7 +57,7 @@ func suspendedLease(t *testing.T, ts *httptest.Server) string {
 func TestLeaseSuspendedErrorCodeStat(t *testing.T) {
 	ts, _, _, _ := newTestServerWithService(t)
 	id := suspendedLease(t, ts)
-	resp, body := doReq(t, "GET", ts.URL+"/api/sandboxes/"+id+"/stat", "token-a", nil)
+	resp, body := doReq(t, "GET", ts.URL+"/api/leases/"+id+"/stat", "token-a", nil)
 	requireLeaseSuspended(t, "stat", resp.StatusCode, body)
 }
 
@@ -66,7 +66,7 @@ func TestLeaseSuspendedErrorCodeStat(t *testing.T) {
 func TestLeaseSuspendedErrorCodeFork(t *testing.T) {
 	ts, _, _, _ := newTestServerWithService(t)
 	id := suspendedLease(t, ts)
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/fork", "token-a",
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/fork", "token-a",
 		map[string]any{"count": 1})
 	requireLeaseSuspended(t, "fork", resp.StatusCode, body)
 }
@@ -86,7 +86,7 @@ func requireNoLeaseSuspended(t *testing.T, what string, status int, body map[str
 func TestResumeOnUseExec(t *testing.T) {
 	ts, _, _, _ := newTestServerWithService(t)
 	id := suspendedLease(t, ts)
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/exec", "token-a",
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/exec", "token-a",
 		map[string]any{"cmd": "echo hi"})
 	requireNoLeaseSuspended(t, "exec", resp.StatusCode, body)
 	if resp.StatusCode != http.StatusOK {
@@ -100,7 +100,7 @@ func TestResumeOnUseExec(t *testing.T) {
 func TestResumeOnUseNetwork(t *testing.T) {
 	ts, _, _, _ := newTestServerWithService(t)
 	id := suspendedLease(t, ts)
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/network", "token-a",
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/network", "token-a",
 		map[string]any{"network_policy": "lan"})
 	requireNoLeaseSuspended(t, "network", resp.StatusCode, body)
 	if resp.StatusCode != http.StatusOK {
@@ -113,7 +113,7 @@ func TestResumeOnUseNetwork(t *testing.T) {
 func TestResumeOnUsePrompt(t *testing.T) {
 	ts, _, _, _ := newTestServerWithService(t)
 	id := suspendedLease(t, ts)
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/prompt", "token-a",
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/prompt", "token-a",
 		map[string]any{"message": "hi"})
 	requireNoLeaseSuspended(t, "prompt", resp.StatusCode, body)
 	if resp.StatusCode != http.StatusOK {
@@ -126,7 +126,7 @@ func TestResumeOnUsePrompt(t *testing.T) {
 // running, never 409 lease_suspended.
 func TestResumeOnUseJobSignal(t *testing.T) {
 	ts, svc, _, sub := newTestServerWithService(t)
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a",
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a",
 		map[string]any{"image": "py-base", "persistent": true})
 	id, _ := create["id"].(string)
 
@@ -139,7 +139,7 @@ func TestResumeOnUseJobSignal(t *testing.T) {
 	if _, err := svc.suspend(context.Background(), "consumer-a", id); err != nil {
 		t.Fatalf("suspend: %v", err)
 	}
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/jobs/"+jobID+"/signal", "token-a",
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/jobs/"+jobID+"/signal", "token-a",
 		map[string]any{"signal": "TERM"})
 	requireNoLeaseSuspended(t, "job signal", resp.StatusCode, body)
 	if svc.lookupAny(id).Suspended {

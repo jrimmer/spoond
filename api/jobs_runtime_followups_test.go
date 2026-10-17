@@ -225,14 +225,14 @@ func TestJobSynchronousExecRejectsNegativeRuntime(t *testing.T) {
 	p := fake.NewProcess(1105)
 	installJobProcess(t, sub, p)
 
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/exec", "token-a", map[string]any{
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/exec", "token-a", map[string]any{
 		"cmd": "echo hi", "max_runtime_secs": -1,
 	})
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("synchronous exec with negative max_runtime_secs = %d, want 400 (%v)", resp.StatusCode, body)
 	}
 
-	resp, body = doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/exec", "token-a", map[string]any{
+	resp, body = doReq(t, "POST", ts.URL+"/api/leases/"+id+"/exec", "token-a", map[string]any{
 		"cmd": "echo hi", "max_runtime_secs": 60,
 	})
 	if resp.StatusCode != http.StatusOK {

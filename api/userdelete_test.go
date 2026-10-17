@@ -57,7 +57,7 @@ func TestUserDeleteCleanup(t *testing.T) {
 
 	// The victim creates a lease, pins a kept build and saves a named
 	// snapshot.
-	resp, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "victim-tok",
+	resp, create := doReq(t, "POST", ts.URL+"/api/leases", "victim-tok",
 		map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("victim create: %d %v", resp.StatusCode, create)
@@ -82,7 +82,7 @@ func TestUserDeleteCleanup(t *testing.T) {
 	// what settles it.
 	p := fake.NewProcess(4242)
 	installJobProcess(t, sub, p)
-	resp, jobBody := doReq(t, "POST", ts.URL+"/api/sandboxes/"+leaseID+"/exec", "victim-tok",
+	resp, jobBody := doReq(t, "POST", ts.URL+"/api/leases/"+leaseID+"/exec", "victim-tok",
 		map[string]any{"cmd": "sleep 600", "background": true})
 	if resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("background exec: %d %v", resp.StatusCode, jobBody)
@@ -120,7 +120,7 @@ func TestUserDeleteCleanup(t *testing.T) {
 	if ids.UserByID(victimID) != nil {
 		t.Fatal("victim identity still present")
 	}
-	resp, _ = doReq(t, "GET", ts.URL+"/api/sandboxes/"+leaseID, "admin-tok", nil)
+	resp, _ = doReq(t, "GET", ts.URL+"/api/leases/"+leaseID, "admin-tok", nil)
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("victim lease still readable: %d", resp.StatusCode)
 	}
@@ -202,7 +202,7 @@ func TestUserDeleteCleanupDetachedFromRequest(t *testing.T) {
 	ts, svc, _, _, _, victimID := newUserDeleteServer(t)
 	_ = svc
 
-	resp, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "victim-tok",
+	resp, create := doReq(t, "POST", ts.URL+"/api/leases", "victim-tok",
 		map[string]any{"image": "py-base", "ttl": 300})
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("victim create: %d %v", resp.StatusCode, create)
@@ -213,7 +213,7 @@ func TestUserDeleteCleanupDetachedFromRequest(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("delete user: %d", resp.StatusCode)
 	}
-	resp, _ = doReq(t, "GET", ts.URL+"/api/sandboxes/"+leaseID, "admin-tok", nil)
+	resp, _ = doReq(t, "GET", ts.URL+"/api/leases/"+leaseID, "admin-tok", nil)
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("lease survived delete: %d", resp.StatusCode)
 	}

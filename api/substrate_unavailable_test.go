@@ -17,10 +17,10 @@ import (
 // stall must never become one.
 func TestExecSubstrateUnavailableIsRetryable(t *testing.T) {
 	ts, svc, _, sub := newTestServerWithService(t)
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "ttl": 300})
 	id := create["id"].(string)
 	sub.FailCall("Exec", 0, substrate.ErrUnavailable)
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/exec", "token-a", map[string]any{"cmd": "echo hi"})
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/exec", "token-a", map[string]any{"cmd": "echo hi"})
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("substrate unavailable exec = %d: %v, want 503", resp.StatusCode, body)
 	}
@@ -86,14 +86,14 @@ func TestResumeOnUseThenExecSubstrateUnavailable(t *testing.T) {
 // lease_lost.
 func TestExecSandboxConfirmedGoneIsStillGone(t *testing.T) {
 	ts, svc, _, sub := newTestServerWithService(t)
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "ttl": 300})
 	id := create["id"].(string)
 	svc.store.mu.Lock()
 	sandboxID := svc.store.leases[id].SandboxID
 	svc.store.mu.Unlock()
 	sub.Kill(sandboxID)
 	sub.FailCall("Exec", 0, substrate.ErrNotFound)
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/exec", "token-a", map[string]any{"cmd": "echo hi"})
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/exec", "token-a", map[string]any{"cmd": "echo hi"})
 	if resp.StatusCode != http.StatusGone {
 		t.Fatalf("confirmed-gone exec = %d: %v, want 410", resp.StatusCode, body)
 	}

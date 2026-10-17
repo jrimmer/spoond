@@ -54,7 +54,7 @@ func filesCreate(t *testing.T, ts *httptest.Server, persistent bool) string {
 	if persistent {
 		body["persistent"] = true
 	}
-	resp, doc := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", body)
+	resp, doc := doReq(t, "POST", ts.URL+"/api/leases", "token-a", body)
 	if resp.StatusCode != 201 {
 		t.Fatalf("create: %d %v", resp.StatusCode, doc)
 	}
@@ -72,7 +72,7 @@ func filesSetup(t *testing.T) (*httptest.Server, *Service, *testSub, string) {
 // filesURL renders the files URL for id and guest path, appending the
 // given query.
 func filesURL(ts *httptest.Server, id, p, query string) string {
-	u := ts.URL + "/api/sandboxes/" + id + "/files" + p
+	u := ts.URL + "/api/leases/" + id + "/files" + p
 	if query != "" {
 		u += "?" + query
 	}
@@ -401,7 +401,7 @@ func filesSetupAdmin(t *testing.T) (*httptest.Server, string) {
 		t.Fatalf("create user: %d %v", rec.Code, body)
 	}
 
-	resp, doc := doReq(t, "POST", ts.URL+"/api/sandboxes", "legacy-tok", map[string]any{"image": "py-base", "ttl": 300})
+	resp, doc := doReq(t, "POST", ts.URL+"/api/leases", "legacy-tok", map[string]any{"image": "py-base", "ttl": 300})
 	if resp.StatusCode != 201 {
 		t.Fatalf("create: %d %v", resp.StatusCode, doc)
 	}

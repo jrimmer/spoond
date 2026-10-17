@@ -492,19 +492,19 @@ func TestGCSkipsWhileDraining(t *testing.T) {
 // build_id and resume_build_id (U11).
 func TestLeaseRowsExposeBuildIDs(t *testing.T) {
 	ts, _, _, _ := newTestServerWithService(t)
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a",
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases", "token-a",
 		map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
 	if resp.StatusCode != 201 {
 		t.Fatalf("create status %d: %v", resp.StatusCode, body)
 	}
 	id := body["id"].(string)
 
-	_, detail := doReq(t, "GET", ts.URL+"/api/sandboxes/"+id, "token-a", nil)
+	_, detail := doReq(t, "GET", ts.URL+"/api/leases/"+id, "token-a", nil)
 	if detail["build_id"] == nil || detail["build_id"] == "" {
 		t.Errorf("detail row lacks build_id: %v", detail)
 	}
 
-	_, list := doReq(t, "GET", ts.URL+"/api/sandboxes", "token-a", nil)
+	_, list := doReq(t, "GET", ts.URL+"/api/leases", "token-a", nil)
 	rows := leaseRows(t, list)
 	if len(rows) != 1 {
 		t.Fatalf("expected 1 list row, got %d", len(rows))
@@ -513,16 +513,16 @@ func TestLeaseRowsExposeBuildIDs(t *testing.T) {
 		t.Errorf("list row lacks build_id: %v", rows[0])
 	}
 
-	resp, sbody := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/suspend", "token-a", nil)
+	resp, sbody := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/suspend", "token-a", nil)
 	if resp.StatusCode != 200 {
 		t.Fatalf("suspend status %d: %v", resp.StatusCode, sbody)
 	}
-	_, detail = doReq(t, "GET", ts.URL+"/api/sandboxes/"+id, "token-a", nil)
+	_, detail = doReq(t, "GET", ts.URL+"/api/leases/"+id, "token-a", nil)
 	resume := detail["resume_build_id"]
 	if resume == nil || resume == "" {
 		t.Fatalf("suspended detail row lacks resume_build_id: %v", detail)
 	}
-	_, list = doReq(t, "GET", ts.URL+"/api/sandboxes", "token-a", nil)
+	_, list = doReq(t, "GET", ts.URL+"/api/leases", "token-a", nil)
 	rows = leaseRows(t, list)
 	if rows[0]["resume_build_id"] != resume {
 		t.Errorf("list resume_build_id = %v, want %v", rows[0]["resume_build_id"], resume)

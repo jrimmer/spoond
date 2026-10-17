@@ -50,7 +50,7 @@ func createPersistentAs(t *testing.T, h http.Handler, token, image string) (*htt
 
 func createSandboxBody(t *testing.T, h http.Handler, token, body string) (*httptest.ResponseRecorder, map[string]any) {
 	t.Helper()
-	req := httptest.NewRequest("POST", "/api/sandboxes", strings.NewReader(body))
+	req := httptest.NewRequest("POST", "/api/leases", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -179,7 +179,7 @@ func TestMemQuotaRestartFitsAfterSuspend(t *testing.T) {
 	if _, err := svc.suspend(context.Background(), owner, id); err != nil {
 		t.Fatalf("suspend: %v", err)
 	}
-	if rec := postLeaseAction(t, h, tok, "/api/sandboxes/"+id+"/restart?mode=cold", ""); rec.Code != http.StatusOK {
+	if rec := postLeaseAction(t, h, tok, "/api/leases/"+id+"/restart?mode=cold", ""); rec.Code != http.StatusOK {
 		t.Fatalf("cold restart = %d %s, want 200", rec.Code, rec.Body.String())
 	}
 	if l := svc.lookup(uid, id); l == nil || !l.live() {
@@ -199,7 +199,7 @@ func TestMemQuotaReleaseFrees(t *testing.T) {
 		t.Fatalf("used_mib = %d, want 4096", got)
 	}
 	del := httptest.NewRecorder()
-	dreq := httptest.NewRequest("DELETE", "/api/sandboxes/"+first["id"].(string), nil)
+	dreq := httptest.NewRequest("DELETE", "/api/leases/"+first["id"].(string), nil)
 	dreq.Header.Set("Authorization", "Bearer "+tok)
 	h.ServeHTTP(del, dreq)
 	if del.Code != http.StatusNoContent {
@@ -210,7 +210,7 @@ func TestMemQuotaReleaseFrees(t *testing.T) {
 	}
 }
 
-// TestMemQuotaLeaseDetailShowsCharge: GET /api/sandboxes/{id} carries
+// TestMemQuotaLeaseDetailShowsCharge: GET /api/leases/{id} carries
 // the lease's charged_mib.
 func TestMemQuotaLeaseDetailShowsCharge(t *testing.T) {
 	_, h, tok, _ := newMemQuotaServer(t, map[string]int{"big": 4096})
@@ -219,7 +219,7 @@ func TestMemQuotaLeaseDetailShowsCharge(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
 	}
-	req := httptest.NewRequest("GET", "/api/sandboxes/"+first["id"].(string), nil)
+	req := httptest.NewRequest("GET", "/api/leases/"+first["id"].(string), nil)
 	req.Header.Set("Authorization", "Bearer "+tok)
 	det := httptest.NewRecorder()
 	h.ServeHTTP(det, req)
@@ -261,7 +261,7 @@ func TestMemQuotaPreQuotaLeaseResume(t *testing.T) {
 
 	// Resume is admitted (the uncharged lease logs and passes), and the
 	// row keeps its 0 until the lease is rebuilt.
-	if rec := postLeaseAction(t, h, tok, "/api/sandboxes/"+id+"/resume", ""); rec.Code != http.StatusOK {
+	if rec := postLeaseAction(t, h, tok, "/api/leases/"+id+"/resume", ""); rec.Code != http.StatusOK {
 		t.Fatalf("resume of an unstamped lease = %d %s, want 200", rec.Code, rec.Body.String())
 	}
 	rows, err := svc.db.ListLeases(context.Background())

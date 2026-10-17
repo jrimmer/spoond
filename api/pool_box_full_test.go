@@ -370,7 +370,7 @@ func TestBoxFullStockedPoolHTTP429OwnLeases(t *testing.T) {
 
 	ts := httptest.NewServer(NewServer(svc, NewImageRegistry(db)).Handler())
 	t.Cleanup(ts.Close)
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "mid", "ttl": 3600})
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "mid", "ttl": 3600})
 	if resp.StatusCode != 429 {
 		t.Fatalf("the over-slice create with a stocked pool = %d (%v), want 429", resp.StatusCode, body)
 	}

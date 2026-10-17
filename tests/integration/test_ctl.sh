@@ -83,17 +83,17 @@ if [ -n "$CTLID" ]; then
   OUT=$(timeout 60 $SSH "suspend $CTLID" 2>&1)
   assert_contains "suspend returns JSON" "$OUT" '"status":"suspended"'
   # the lease is now suspended in the catalog
-  WS_STATE=$(api GET "/api/sandboxes/$CTLID")
+  WS_STATE=$(api GET "/api/leases/$CTLID")
   assert_contains "lease suspended in catalog" "$WS_STATE" '"state":"suspended"'
   # exec while suspended must fail cleanly (409 conflict, not hang)
-  CODE=$(curl -sk -o /dev/null -w '%{http_code}' -X POST "$BE_API/api/sandboxes/$CTLID/exec" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"cmd":"echo should-not-run"}')
+  CODE=$(curl -sk -o /dev/null -w '%{http_code}' -X POST "$BE_API/api/leases/$CTLID/exec" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"cmd":"echo should-not-run"}')
   assert_eq "exec on suspended lease 409" "$CODE" "409"
   OUT=$(timeout 90 $SSH "resume $CTLID" 2>&1)
   assert_contains "resume returns JSON" "$OUT" '"status":"running"'
-  WS_STATE2=$(api GET "/api/sandboxes/$CTLID")
+  WS_STATE2=$(api GET "/api/leases/$CTLID")
   assert_contains "lease running after resume" "$WS_STATE2" '"state":"running"'
   # exec after resume must work (state restored, fresh sandbox id)
-  OUT2=$(api POST "/api/sandboxes/$CTLID/exec" '{"cmd":"echo RESUMED_OK"}')
+  OUT2=$(api POST "/api/leases/$CTLID/exec" '{"cmd":"echo RESUMED_OK"}')
   assert_contains "exec works after resume" "$OUT2" "RESUMED_OK"
 fi
 
@@ -107,10 +107,10 @@ assert_contains "rm without id rejected" "$OUT" "usage"
 echo
 echo "== ctl: cleanup =="
 if [ -n "${CLONEID:-}" ]; then
-  api DELETE "/api/sandboxes/$CLONEID" >/dev/null && ok "deleted clone lease" || bad "delete clone lease"
+  api DELETE "/api/leases/$CLONEID" >/dev/null && ok "deleted clone lease" || bad "delete clone lease"
 fi
 if [ -n "$CTLID" ]; then
-  api DELETE "/api/sandboxes/$CTLID" >/dev/null && ok "deleted ctl lease" || bad "delete ctl lease"
+  api DELETE "/api/leases/$CTLID" >/dev/null && ok "deleted ctl lease" || bad "delete ctl lease"
 fi
 cp /tmp/ctl-unit.bak "$UNIT"
 rm -f "$KEYS/itest.pub" "$GWKEY" "$GWKEY_PUB"

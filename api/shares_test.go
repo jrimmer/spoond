@@ -49,7 +49,7 @@ func newShareTestServer(t *testing.T) (http.Handler, string, string) {
 
 // createLeaseAs creates a lease with a token and returns its id.
 func createLeaseAs(h http.Handler, token string) string {
-	req := httptest.NewRequest("POST", "/api/sandboxes", strings.NewReader(`{"image":"py-base","ttl":120}`))
+	req := httptest.NewRequest("POST", "/api/leases", strings.NewReader(`{"image":"py-base","ttl":120}`))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -65,7 +65,7 @@ func createLeaseAs(h http.Handler, token string) string {
 
 // execAs runs an exec on a lease with a token, returns status code.
 func execAs(h http.Handler, token, leaseID string) int {
-	req := httptest.NewRequest("POST", "/api/sandboxes/"+leaseID+"/exec", strings.NewReader(`{"cmd":"echo hi"}`))
+	req := httptest.NewRequest("POST", "/api/leases/"+leaseID+"/exec", strings.NewReader(`{"cmd":"echo hi"}`))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -85,7 +85,7 @@ func TestShareGrantEnablesExec(t *testing.T) {
 	}
 	// a shares with b (http mode)
 	grant := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/sandboxes/"+lid+"/share", strings.NewReader(`{"grantee":"`+bID+`","mode":"http"}`))
+	req := httptest.NewRequest("POST", "/api/leases/"+lid+"/share", strings.NewReader(`{"grantee":"`+bID+`","mode":"http"}`))
 	req.Header.Set("Authorization", "Bearer tok-a")
 	req.Header.Set("Content-Type", "application/json")
 	h.ServeHTTP(grant, req)
@@ -115,7 +115,7 @@ func TestShareListJSONShapePinned(t *testing.T) {
 	}
 	// Grant one share so the list is non-empty and carries every field.
 	g := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/sandboxes/"+lid+"/share", strings.NewReader(`{"grantee":"`+bID+`","mode":"http","ttl":3600}`))
+	req := httptest.NewRequest("POST", "/api/leases/"+lid+"/share", strings.NewReader(`{"grantee":"`+bID+`","mode":"http","ttl":3600}`))
 	req.Header.Set("Authorization", "Bearer tok-a")
 	req.Header.Set("Content-Type", "application/json")
 	h.ServeHTTP(g, req)
@@ -185,7 +185,7 @@ func TestShareRevokeDenies(t *testing.T) {
 	lid := createLeaseAs(h, "tok-a")
 	// grant
 	g := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/sandboxes/"+lid+"/share", strings.NewReader(`{"grantee":"`+bID+`","mode":"http"}`))
+	req := httptest.NewRequest("POST", "/api/leases/"+lid+"/share", strings.NewReader(`{"grantee":"`+bID+`","mode":"http"}`))
 	req.Header.Set("Authorization", "Bearer tok-a")
 	req.Header.Set("Content-Type", "application/json")
 	h.ServeHTTP(g, req)
@@ -194,7 +194,7 @@ func TestShareRevokeDenies(t *testing.T) {
 	}
 	// revoke
 	r := httptest.NewRecorder()
-	req2 := httptest.NewRequest("DELETE", "/api/sandboxes/"+lid+"/share/"+bID, nil)
+	req2 := httptest.NewRequest("DELETE", "/api/leases/"+lid+"/share/"+bID, nil)
 	req2.Header.Set("Authorization", "Bearer tok-a")
 	h.ServeHTTP(r, req2)
 	if r.Code != http.StatusNoContent {
@@ -211,7 +211,7 @@ func TestShareExpiryHonored(t *testing.T) {
 	lid := createLeaseAs(h, "tok-a")
 	// share with ttl=1s
 	g := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/sandboxes/"+lid+"/share", strings.NewReader(`{"grantee":"`+bID+`","mode":"http","ttl":1}`))
+	req := httptest.NewRequest("POST", "/api/leases/"+lid+"/share", strings.NewReader(`{"grantee":"`+bID+`","mode":"http","ttl":1}`))
 	req.Header.Set("Authorization", "Bearer tok-a")
 	req.Header.Set("Content-Type", "application/json")
 	h.ServeHTTP(g, req)
@@ -234,7 +234,7 @@ func TestShareOwnerOnlyGrant(t *testing.T) {
 	lid := createLeaseAs(h, "tok-a")
 	// b cannot share a's lease with itself
 	g := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/sandboxes/"+lid+"/share", strings.NewReader(`{"grantee":"`+bID+`","mode":"http"}`))
+	req := httptest.NewRequest("POST", "/api/leases/"+lid+"/share", strings.NewReader(`{"grantee":"`+bID+`","mode":"http"}`))
 	req.Header.Set("Authorization", "Bearer tok-b")
 	req.Header.Set("Content-Type", "application/json")
 	h.ServeHTTP(g, req)
@@ -243,7 +243,7 @@ func TestShareOwnerOnlyGrant(t *testing.T) {
 	}
 	// owner cannot share with a non-existent user (grantee must exist)
 	g2 := httptest.NewRecorder()
-	req2 := httptest.NewRequest("POST", "/api/sandboxes/"+lid+"/share", strings.NewReader(`{"grantee":"self","mode":"http"}`))
+	req2 := httptest.NewRequest("POST", "/api/leases/"+lid+"/share", strings.NewReader(`{"grantee":"self","mode":"http"}`))
 	req2.Header.Set("Authorization", "Bearer tok-a")
 	req2.Header.Set("Content-Type", "application/json")
 	h.ServeHTTP(g2, req2)

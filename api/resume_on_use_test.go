@@ -136,8 +136,8 @@ func TestResumeOnUseGetNeverResumes(t *testing.T) {
 
 	for _, path := range []string{
 		"/api/leases/" + l.ID,
-		"/api/sandboxes/" + l.ID,
-		"/api/sandboxes",
+		"/api/leases/" + l.ID,
+		"/api/leases",
 		"/api/leases/" + l.ID + "/events",
 	} {
 		resp, _ := doReq(t, "GET", ts.URL+path, "token-a", nil)

@@ -43,7 +43,6 @@ type doc struct {
 	API     struct {
 		Base    string `json:"base"`
 		Primary string `json:"primary"`
-		Alias   string `json:"alias"`
 		Auth    string `json:"auth"`
 	} `json:"api"`
 	Endpoints []struct {
@@ -283,8 +282,8 @@ func printSummary(w io.Writer, d doc) {
 	} else {
 		fmt.Fprintf(w, "api: %s\n", d.API.Base)
 	}
-	if d.API.Primary != "" && d.API.Alias != "" {
-		fmt.Fprintf(w, "lease paths: %s (alias: %s, identical behavior)\n", d.API.Primary, d.API.Alias)
+	if d.API.Primary != "" {
+		fmt.Fprintf(w, "lease paths: %s\n", d.API.Primary)
 	}
 	if len(d.Images) > 0 {
 		fmt.Fprintf(w, "\nimages:\n")

@@ -17,7 +17,7 @@ import (
 // (which must carry "snapshot") and asserts 201.
 func createFromSnapshot(t *testing.T, ts, token string, body map[string]any) map[string]any {
 	t.Helper()
-	resp, out := doReq(t, "POST", ts+"/api/sandboxes", token, body)
+	resp, out := doReq(t, "POST", ts+"/api/leases", token, body)
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("create from snapshot: status %d: %v", resp.StatusCode, out)
 	}
@@ -146,7 +146,7 @@ func TestSnapshotStartImageMismatch(t *testing.T) {
 	id := createLiveLease(t, ts.URL, "token-a", nil)
 	saveSnapshotOK(t, ts.URL, "token-a", id, map[string]any{"name": "warm"})
 
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a",
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases", "token-a",
 		map[string]any{"snapshot": "warm", "image": "go-base"})
 	if resp.StatusCode != http.StatusBadRequest || body["code"] != "image_mismatch" {
 		t.Fatalf("mismatched image: status %d (%v), want 400 image_mismatch", resp.StatusCode, body)
@@ -158,7 +158,7 @@ func TestSnapshotStartImageMismatch(t *testing.T) {
 	}
 
 	for _, ref := range []string{"nope", "warm@99"} {
-		resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"snapshot": ref})
+		resp, body := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"snapshot": ref})
 		if resp.StatusCode != http.StatusNotFound || body["code"] != "not_found" {
 			t.Fatalf("start %s: status %d (%v), want 404 not_found", ref, resp.StatusCode, body)
 		}
@@ -260,7 +260,7 @@ func TestSnapshotStartCannotStart(t *testing.T) {
 		return substrate.Sandbox{}, fmt.Errorf("e2b: create %s: %w", req.BuildID, substrate.ErrNotFound)
 	}
 	t.Cleanup(func() { sub.createFn = nil })
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"snapshot": "warm"})
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"snapshot": "warm"})
 	if resp.StatusCode != http.StatusConflict || body["code"] != "cannot_start" {
 		t.Fatalf("missing build: status %d (%v), want 409 cannot_start", resp.StatusCode, body)
 	}
@@ -273,7 +273,7 @@ func TestSnapshotStartCannotStart(t *testing.T) {
 	sub.createFn = func(ctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error) {
 		return substrate.Sandbox{}, fmt.Errorf("e2b: create %s: envd not healthy within 30s: connect: connection refused", req.BuildID)
 	}
-	resp, body = doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"snapshot": "warm"})
+	resp, body = doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"snapshot": "warm"})
 	if resp.StatusCode == http.StatusConflict || body["code"] == "cannot_start" {
 		t.Fatalf("slow host misclassified as cannot_start: status %d (%v)", resp.StatusCode, body)
 	}
@@ -282,7 +282,7 @@ func TestSnapshotStartCannotStart(t *testing.T) {
 	sub.createFn = func(ctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error) {
 		return substrate.Sandbox{}, fmt.Errorf("%w: node full", substrate.ErrCapacity)
 	}
-	resp, body = doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"snapshot": "warm"})
+	resp, body = doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"snapshot": "warm"})
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("capacity: status %d (%v), want 503", resp.StatusCode, body)
 	}
@@ -294,7 +294,7 @@ func TestSnapshotStartCannotStart(t *testing.T) {
 	sub.createFn = func(ctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error) {
 		return substrate.Sandbox{}, fmt.Errorf("connection reset by peer")
 	}
-	resp, _ = doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"snapshot": "warm"})
+	resp, _ = doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"snapshot": "warm"})
 	if resp.StatusCode != http.StatusInternalServerError {
 		t.Fatalf("generic failure: status %d, want 500", resp.StatusCode)
 	}
@@ -322,7 +322,7 @@ func TestSnapshotStartHostVersionMismatch(t *testing.T) {
 	if err := db.SetNamedSnapshotVersions(context.Background(), row.BuildID, "envd-old", "fc-host", "orch-host"); err != nil {
 		t.Fatalf("set versions: %v", err)
 	}
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"snapshot": "warm"})
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"snapshot": "warm"})
 	if resp.StatusCode != http.StatusConflict || body["code"] != "cannot_start" {
 		t.Fatalf("envd mismatch: status %d (%v), want 409 cannot_start", resp.StatusCode, body)
 	}
@@ -357,7 +357,7 @@ func TestSnapshotStartNonReadyBuild(t *testing.T) {
 	if err := db.UpdateBuildState(context.Background(), row.BuildID, "failed", "gone", nil); err != nil {
 		t.Fatalf("mark failed: %v", err)
 	}
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"snapshot": "warm"})
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"snapshot": "warm"})
 	if resp.StatusCode != http.StatusConflict || body["code"] != "cannot_start" {
 		t.Fatalf("non-ready build: status %d (%v), want 409 cannot_start", resp.StatusCode, body)
 	}
@@ -552,7 +552,7 @@ func TestSnapshotStartCreateRefusalCodes(t *testing.T) {
 		} else {
 			sub.createFn = nil
 		}
-		resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", c.body)
+		resp, body := doReq(t, "POST", ts.URL+"/api/leases", "token-a", c.body)
 		sub.createFn = nil
 		if resp.StatusCode != c.wantStatus || body["code"] != c.wantCode {
 			t.Fatalf("%s: status %d (%v), want %d %s", c.name, resp.StatusCode, body, c.wantStatus, c.wantCode)
@@ -654,7 +654,7 @@ func rawCreate(t *testing.T, ts, token string, body map[string]any) (map[string]
 	if err := json.NewEncoder(&buf).Encode(body); err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequest("POST", ts+"/api/sandboxes", &buf)
+	req, err := http.NewRequest("POST", ts+"/api/leases", &buf)
 	if err != nil {
 		return nil, err
 	}
@@ -728,7 +728,7 @@ func TestSnapshotStartCrossOwnerNotFound(t *testing.T) {
 	src := createLiveLease(t, ts.URL, "token-a", nil)
 	saveSnapshotOK(t, ts.URL, "token-a", src, map[string]any{"name": "warm"})
 
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-b", map[string]any{"snapshot": "warm"})
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases", "token-b", map[string]any{"snapshot": "warm"})
 	if resp.StatusCode != http.StatusNotFound || body["code"] != "not_found" {
 		t.Fatalf("cross-owner start: status %d (%v), want 404 not_found", resp.StatusCode, body)
 	}
@@ -748,7 +748,7 @@ func TestSnapshotStartMarkerWriteFailure(t *testing.T) {
 	before := len(sub.sandboxesLive(t))
 	// Every WriteFile fails: the started-from marker cannot land.
 	sub.FailCall("WriteFile", 0, fmt.Errorf("disk gone"))
-	resp, _ := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"snapshot": "warm"})
+	resp, _ := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"snapshot": "warm"})
 	if resp.StatusCode != http.StatusInternalServerError {
 		t.Fatalf("marker write failure: status %d, want 500", resp.StatusCode)
 	}

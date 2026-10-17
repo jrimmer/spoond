@@ -67,7 +67,7 @@ func heartbeat(t *testing.T, url string) *http.Response {
 func TestLeaseHeartbeatSuccess(t *testing.T) {
 	ts, _, svc, db, _, m := newHeartbeatTestServer(t)
 
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "persistent": true, "ttl": 600})
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "persistent": true, "ttl": 600})
 	id := create["id"].(string)
 
 	before := *svc.lookup("consumer-a", id)
@@ -134,7 +134,7 @@ func TestLeaseHeartbeatUnknownLease(t *testing.T) {
 func TestLeaseHeartbeatReleasedLease(t *testing.T) {
 	ts, _, svc, _, _, _ := newHeartbeatTestServer(t)
 
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "persistent": true})
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "persistent": true})
 	id := create["id"].(string)
 	l := svc.lookup("consumer-a", id)
 	svc.store.mu.Lock()
@@ -151,11 +151,11 @@ func TestLeaseHeartbeatReleasedLease(t *testing.T) {
 func TestLeaseHeartbeatSuspendedLease(t *testing.T) {
 	ts, _, svc, _, sub, _ := newHeartbeatTestServer(t)
 
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "persistent": true})
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "persistent": true})
 	id := create["id"].(string)
 	// Suspend through the public verb so State/Suspended/ResumeBuildID
 	// all move together.
-	if resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/suspend", "token-a", nil); resp.StatusCode != 200 {
+	if resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/suspend", "token-a", nil); resp.StatusCode != 200 {
 		t.Fatalf("suspend: status %d: %v", resp.StatusCode, body)
 	}
 
@@ -176,7 +176,7 @@ func TestLeaseHeartbeatSuspendedLease(t *testing.T) {
 func TestLeaseHeartbeatMethodNotAllowed(t *testing.T) {
 	ts, _, svc, _, _, m := newHeartbeatTestServer(t)
 
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "persistent": true})
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "persistent": true})
 	id := create["id"].(string)
 	before := svc.lookup("consumer-a", id).LastActive
 
@@ -211,7 +211,7 @@ func TestLeaseHeartbeatMethodNotAllowed(t *testing.T) {
 func TestLeaseHeartbeatWriteLimit(t *testing.T) {
 	ts, srv, svc, _, _, m := newHeartbeatTestServer(t)
 
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "persistent": true})
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "persistent": true})
 	id := create["id"].(string)
 	url := ts.URL + "/lease/" + id + "/active"
 
@@ -256,8 +256,8 @@ func TestLeaseHeartbeatKeepsIdleSuspendAway(t *testing.T) {
 
 	// Two persistent leases with a 60 s idle_suspend, both idle for two
 	// hours.
-	_, a := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "persistent": true, "idle_suspend": 60})
-	_, b := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-b", map[string]any{"image": "py-base", "persistent": true, "idle_suspend": 60})
+	_, a := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "persistent": true, "idle_suspend": 60})
+	_, b := doReq(t, "POST", ts.URL+"/api/leases", "token-b", map[string]any{"image": "py-base", "persistent": true, "idle_suspend": 60})
 	idA, idB := a["id"].(string), b["id"].(string)
 	stale := time.Now().Add(-2 * time.Hour)
 	svc.store.mu.Lock()
@@ -295,8 +295,8 @@ func TestLeaseHeartbeatMetricsPathLabels(t *testing.T) {
 		"/lease/abcdef/active":                           "/lease/:id/active",
 		"/lease/0123456789abcdef0123456789abcdef/active": "/lease/:id/active",
 		"/lease/0123456789abcdef0123456789abcdef":        "/lease/:id",
-		"/lease/":               "/lease/",
-		"/api/sandboxes/x/exec": "/api/sandboxes/x/exec",
+		"/lease/":            "/lease/",
+		"/api/leases/x/exec": "/api/leases/x/exec",
 	}
 	for in, want := range cases {
 		if got := normalizePath(in); got != want {

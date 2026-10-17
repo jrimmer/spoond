@@ -195,7 +195,7 @@ func TestRootfsProbeRecentExecSkips(t *testing.T) {
 		t.Fatalf("grant: %v", err)
 	}
 	// A real exec through the API records the success.
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+l.ID+"/exec", "token-a", map[string]any{"cmd": "true"})
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+l.ID+"/exec", "token-a", map[string]any{"cmd": "true"})
 	if resp.StatusCode != 200 {
 		t.Fatalf("exec = %d (%v), want 200", resp.StatusCode, body)
 	}

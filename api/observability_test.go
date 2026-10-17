@@ -24,7 +24,7 @@ func TestLeaseGrantDurationObservedOnGrant(t *testing.T) {
 		t.Fatalf("fresh server: lease_grant_duration count = %d, want 0", n)
 	}
 
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "ttl": 300})
 	if resp.StatusCode != 201 {
 		t.Fatalf("create status %d: %v", resp.StatusCode, body)
 	}

@@ -62,7 +62,7 @@ func TestCreateHostENOMEMAnswersCapacityWait(t *testing.T) {
 			ts, _, _, sub := newTestServerWithService(t)
 			enomemCreate(sub, msg)
 			t.Cleanup(func() { sub.createFn = nil })
-			resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a",
+			resp, body := doReq(t, "POST", ts.URL+"/api/leases", "token-a",
 				map[string]any{"image": "py-base", "ttl": 300})
 			expectHostENOMEMCapacityWait(t, resp, body)
 			resp.Body.Close()
@@ -84,7 +84,7 @@ func TestCreateHostENOMEMCountedAndClean(t *testing.T) {
 	svc.SetMetrics(m)
 	enomemCreate(sub, hostENOMEMErrors[0])
 	t.Cleanup(func() { sub.createFn = nil })
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a",
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases", "token-a",
 		map[string]any{"image": "py-base", "ttl": 300})
 	expectHostENOMEMCapacityWait(t, resp, body)
 	resp.Body.Close()
@@ -137,7 +137,7 @@ func TestCreateHostENOMEMIsWaitable(t *testing.T) {
 	}
 	res := make(chan result, 1)
 	go func() {
-		resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a",
+		resp, body := doReq(t, "POST", ts.URL+"/api/leases", "token-a",
 			map[string]any{"image": "py-base", "ttl": 300, "wait": 30})
 		res <- result{resp.StatusCode, body}
 	}()
@@ -180,7 +180,7 @@ func TestResumeHostENOMEMAnswersCapacityWait(t *testing.T) {
 	}
 	enomemCreate(sub, hostENOMEMErrors[1])
 	t.Cleanup(func() { sub.createFn = nil })
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+l.ID+"/resume", "token-a", nil)
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+l.ID+"/resume", "token-a", nil)
 	expectHostENOMEMCapacityWait(t, resp, body)
 	resp.Body.Close()
 
@@ -218,7 +218,7 @@ func TestCreateOtherSubstrateErrorsStay500(t *testing.T) {
 		return substrate.Sandbox{}, errors.New("failed to start FC: vmlinux file not found")
 	}
 	t.Cleanup(func() { sub.createFn = nil })
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a",
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases", "token-a",
 		map[string]any{"image": "py-base", "ttl": 300})
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusInternalServerError {

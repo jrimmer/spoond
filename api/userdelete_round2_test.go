@@ -246,7 +246,7 @@ func TestUsersDeleteCleansStateWithoutIdentity(t *testing.T) {
 	ts, _, db, _, ids, victimID := newUserDeleteServer(t)
 	ctx := context.Background()
 
-	resp, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "victim-tok",
+	resp, create := doReq(t, "POST", ts.URL+"/api/leases", "victim-tok",
 		map[string]any{"image": "py-base", "ttl": 300})
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("victim create: %d %v", resp.StatusCode, create)
@@ -279,17 +279,17 @@ func TestLifecycleHandlersMapOwnerGone(t *testing.T) {
 
 	// A running lease for clone/fork, and a suspended one for
 	// restart/resume.
-	resp, running := doReq(t, "POST", ts.URL+"/api/sandboxes", "victim-tok",
+	resp, running := doReq(t, "POST", ts.URL+"/api/leases", "victim-tok",
 		map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("create running: %d %v", resp.StatusCode, running)
 	}
-	resp, susp := doReq(t, "POST", ts.URL+"/api/sandboxes", "victim-tok",
+	resp, susp := doReq(t, "POST", ts.URL+"/api/leases", "victim-tok",
 		map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("create suspended: %d %v", resp.StatusCode, susp)
 	}
-	resp, _ = doReq(t, "POST", ts.URL+"/api/sandboxes/"+susp["id"].(string)+"/suspend", "victim-tok", nil)
+	resp, _ = doReq(t, "POST", ts.URL+"/api/leases/"+susp["id"].(string)+"/suspend", "victim-tok", nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("suspend: %d", resp.StatusCode)
 	}
@@ -301,9 +301,9 @@ func TestLifecycleHandlersMapOwnerGone(t *testing.T) {
 		path string
 		body any
 	}{
-		{"clone", "/api/sandboxes/" + running["id"].(string) + "/clone", nil},
-		{"fork", "/api/sandboxes/" + running["id"].(string) + "/fork", map[string]any{"count": 1}},
-		{"restart", "/api/sandboxes/" + susp["id"].(string) + "/restart", nil},
+		{"clone", "/api/leases/" + running["id"].(string) + "/clone", nil},
+		{"fork", "/api/leases/" + running["id"].(string) + "/fork", map[string]any{"count": 1}},
+		{"restart", "/api/leases/" + susp["id"].(string) + "/restart", nil},
 		{"resume", "/api/leases/" + susp["id"].(string) + "/resume", nil},
 	}
 	for _, tc := range cases {

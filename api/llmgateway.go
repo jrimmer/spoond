@@ -61,15 +61,6 @@ type llmGateway struct {
 	maxConcurrent int
 	inflightMu    sync.Mutex
 	inflight      map[string]int
-	// requireKey (security review #37 C2): when true (identity store
-	// present and the caller did NOT opt into legacy-open), a lease
-	// whose owner has no LLM key configured is DENIED instead of
-	// silently open. Set via LLM_OPEN_LEGACY=1 to keep the pre-U8
-	// capability model for keyless owners.
-	requireKey bool
-	// depLog (#139 groundwork) throttles the keyless notice to one line
-	// per owner per hour.
-	depLog *deprecationLogger
 	// metrics (issue #20): LLM gateway Prometheus metrics.
 	metrics *metrics.BackendMetrics
 }
@@ -82,7 +73,7 @@ type llmGateway struct {
 // neither mapped nor known to the upstream (Shelley also probes
 // gpt-5.x/claude ids for slug generation etc.). users is the identity
 // store consulted for per-user LLM keys; nil keeps the gateway open for
-// every lease (legacy single-user behavior). resumeLease resumes a
+// every lease (legacy capability model, no identity store). resumeLease resumes a
 // suspended lease on its holder's next gateway call (#145 D2).
 func newLLMGateway(log *log.Logger, lookup func(string) *Lease, resumeLease func(context.Context, *Lease) (*Lease, error), users *identity.Store, upstreamURL, key, defaultModel string, modelMap map[string]string) *llmGateway {
 	u, err := url.Parse(strings.TrimSuffix(upstreamURL, "/"))
@@ -100,7 +91,6 @@ func newLLMGateway(log *log.Logger, lookup func(string) *Lease, resumeLease func
 		modelMap:     modelMap,
 		defaultModel: defaultModel,
 		inflight:     map[string]int{},
-		depLog:       newDeprecationLogger(),
 	}
 }
 
@@ -142,8 +132,9 @@ func (g *llmGateway) mapModel(body []byte) []byte {
 // key configured (U8/T8), the request must present it in the standard
 // OpenAI-compatible Authorization header; the user key only authorizes
 // the caller and never reaches the upstream (the host key below
-// authenticates to the provider). Owners without a key keep the legacy
-// open behavior.
+// authenticates to the provider). A keyless identity-user owner gets
+// `401` (4.0: the LLM_OPEN_LEGACY opt-out is gone); legacy
+// consumer-owned leases keep the open capability model.
 func (g *llmGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, llmGatewayPrefix)
 	slash := strings.IndexByte(rest, '/')
@@ -166,10 +157,11 @@ func (g *llmGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// configured, the caller must present it. A key that verifies is by
 	// construction the owner's key, so this check doubles as the
 	// lease-owner check (the U9 share case extends this predicate).
-	// Security review #37 C2: when the identity store is present and the
-	// deployment has not opted into legacy-open, a keyless owner's lease
-	// is DENIED rather than silently open — otherwise any token holder
-	// could burn the host's LLM quota through another user's lease.
+	// An identity-store user WITHOUT a key is denied (`401`, 4.0 — the
+	// legacy-open opt-out is gone): any token holder could otherwise
+	// burn the host's LLM quota through another user's lease. Legacy
+	// consumer-owned leases — owner not in the store — keep the
+	// capability model: the operator controls those tokens.
 	// Authentication runs BEFORE the resume (#145 D2, review R2): an
 	// unauthenticated or wrongly-keyed request must not spend hugepages
 	// (or preempt another lease) only to answer 401.
@@ -185,23 +177,12 @@ func (g *llmGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "missing or invalid LLM key (admin: POST /api/users/{id}/llm-key)", http.StatusUnauthorized)
 				return
 			}
-		} else if owner != nil && g.requireKey {
-			// Identity-store user WITHOUT a key: deny unless the
-			// deployment opted into legacy-open. (Legacy consumer-owned
-			// leases — owner not in the store — keep the capability
-			// model: the operator controls those tokens.)
+		} else if owner != nil {
+			// Identity-store user WITHOUT a key: denied (4.0). Legacy
+			// consumer-owned leases (owner not in the store) stay out
+			// of this branch and keep the capability model.
 			http.Error(w, "LLM access requires the lease owner to configure an LLM key (admin: POST /api/users/{id}/llm-key)", http.StatusUnauthorized)
 			return
-		} else if owner != nil {
-			// Identity-store user WITHOUT a key, served anyway: only
-			// the legacy-open opt-out keeps this request from the
-			// denial above. Deprecation groundwork (#139): this is
-			// the keyless access 4.0 removes — counted and noticed
-			// once an hour per owner; the answer is unchanged. Legacy
-			// consumer-owned leases (owner not in the store) stay
-			// out: legacy-open did not enable them, so their traffic
-			// says nothing about removing the opt-out.
-			g.noteDeprecatedKeylessLLM(leaseID, owner.ID)
 		}
 	}
 

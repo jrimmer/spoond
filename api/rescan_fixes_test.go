@@ -92,18 +92,18 @@ func TestF4CapabilityNoFriendlyNames(t *testing.T) {
 // code invalid_size, and the image's own memory and 0 still create.
 func TestF6MemoryFixedPerImage(t *testing.T) {
 	h, jasonTok := secServer2(t)
-	rec, body := doUsersReq(t, h, "POST", "/api/sandboxes", jasonTok, `{"image":"py-base","ttl":60,"memory_mib":999999}`)
+	rec, body := doUsersReq(t, h, "POST", "/api/leases", jasonTok, `{"image":"py-base","ttl":60,"memory_mib":999999}`)
 	if rec.Code != http.StatusBadRequest || body["code"] != "invalid_size" {
 		t.Fatalf("create with malformed memory: %d %v", rec.Code, body)
 	}
 	if !strings.Contains(body["error"].(string), "must be even") {
 		t.Fatalf("error body: %v", body["error"])
 	}
-	rec2, body2 := doUsersReq(t, h, "POST", "/api/sandboxes", jasonTok, `{"image":"py-base","ttl":60,"memory_mib":2048}`)
+	rec2, body2 := doUsersReq(t, h, "POST", "/api/leases", jasonTok, `{"image":"py-base","ttl":60,"memory_mib":2048}`)
 	if rec2.Code != http.StatusCreated {
 		t.Fatalf("create with the image's memory: %d %v", rec2.Code, body2)
 	}
-	rec3, body3 := doUsersReq(t, h, "POST", "/api/sandboxes", jasonTok, `{"image":"py-base","ttl":60,"memory_mib":0}`)
+	rec3, body3 := doUsersReq(t, h, "POST", "/api/leases", jasonTok, `{"image":"py-base","ttl":60,"memory_mib":0}`)
 	if rec3.Code != http.StatusCreated {
 		t.Fatalf("create without memory: %d %v", rec3.Code, body3)
 	}
@@ -112,7 +112,7 @@ func TestF6MemoryFixedPerImage(t *testing.T) {
 // TestF9BusyCap: >busyMax concurrent execs per owner → 429.
 func TestF9BusyCap(t *testing.T) {
 	h, jasonTok := secServer2(t)
-	rec, cb := doUsersReq(t, h, "POST", "/api/sandboxes", jasonTok, `{"image":"py-base","ttl":60}`)
+	rec, cb := doUsersReq(t, h, "POST", "/api/leases", jasonTok, `{"image":"py-base","ttl":60}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create: %d", rec.Code)
 	}
@@ -131,7 +131,7 @@ func TestF9BusyCap(t *testing.T) {
 	doUsersReq(t, h2, "POST", "/api/users", "legacy-tok", `{"name":"admin","fingerprints":["SHA256:fp-x"],"token":"admin-tok"}`)
 	_, jbody := doUsersReq(t, h2, "POST", "/api/users", "admin-tok", `{"name":"jason","fingerprints":["SHA256:fp-j"],"token":"jason-tok"}`)
 	jid2 := jbody["user"].(map[string]any)["id"].(string)
-	doUsersReq(t, h2, "POST", "/api/sandboxes", "jason-tok", `{"image":"py-base","ttl":60}`)
+	doUsersReq(t, h2, "POST", "/api/leases", "jason-tok", `{"image":"py-base","ttl":60}`)
 	// busy is keyed by the resolved owner id (u-...), not the token.
 	for i := 0; i < srv.busyMax; i++ {
 		if !srv.acquireBusy(jid2) {
@@ -140,7 +140,7 @@ func TestF9BusyCap(t *testing.T) {
 	}
 	// Next request must 429.
 	r2 := httptest.NewRecorder()
-	q := httptest.NewRequest("POST", "/api/sandboxes/"+lid+"/exec", strings.NewReader(`{"cmd":"echo hi"}`))
+	q := httptest.NewRequest("POST", "/api/leases/"+lid+"/exec", strings.NewReader(`{"cmd":"echo hi"}`))
 	q.Header.Set("Authorization", "Bearer jason-tok")
 	h2.ServeHTTP(r2, q)
 	if r2.Code != http.StatusTooManyRequests {

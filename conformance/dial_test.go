@@ -4,7 +4,7 @@ package conformance
 
 // Guest port dial (2.2, #113): a TCP echo listener runs inside a py-base
 // lease (a python3 one-liner via exec) and the suite dials it through
-// GET /api/sandboxes/{id}/ports/{port}/dial, proving host-to-guest TCP
+// GET /api/leases/{id}/ports/{port}/dial, proving host-to-guest TCP
 // works on E2B (substrate.DialGuest, the orchestrator's HostIP DNAT).
 // The dial is host-to-guest, not guest egress, so it must work under
 // every network policy; the test runs under the default restricted.

@@ -151,12 +151,12 @@ set -e
 TOK=$(cat /run/secrets/CONFORMANCE_TOKEN)
 api='` + apiBase + `'
 resp=$(curl -sk --max-time 15 -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' \
-  -d '{"image":"py-base","ttl":120}' "$api/api/sandboxes")
+  -d '{"image":"py-base","ttl":120}' "$api/api/leases")
 id=$(printf '%s' "$resp" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 [ -n "$id" ] || { echo "no id in create answer: $resp" >&2; exit 3; }
 printf 'created:%s\n' "$id"
 code=$(curl -sk --max-time 15 -o /dev/null -w '%{http_code}' -X DELETE \
-  -H "Authorization: Bearer $TOK" "$api/api/sandboxes/$id")
+  -H "Authorization: Bearer $TOK" "$api/api/leases/$id")
 [ "$code" = 204 ] || { echo "delete answered $code" >&2; exit 4; }
 echo deleted
 `

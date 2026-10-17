@@ -14,7 +14,7 @@ sleep 3
 # Start a python http.server on port 3000 inside the sandbox. One-shot
 # exec kills background children on return, so detach with setsid into a
 # new session (a real user would run it in tmux, which survives too).
-R=$(api POST "/api/sandboxes/$L/exec" '{"cmd":"setsid python3 -m http.server 3000 --bind 0.0.0.0 >/tmp/httpd.log 2>&1 < /dev/null & sleep 2; pgrep -f http.server >/dev/null && echo SERVER_UP || echo SERVER_DOWN"}')
+R=$(api POST "/api/leases/$L/exec" '{"cmd":"setsid python3 -m http.server 3000 --bind 0.0.0.0 >/tmp/httpd.log 2>&1 < /dev/null & sleep 2; pgrep -f http.server >/dev/null && echo SERVER_UP || echo SERVER_DOWN"}')
 echo "  server start: $(echo "$R" | head -c 200)"
 
 echo
@@ -28,7 +28,7 @@ if echo "$OUT" | grep -q 'Directory listing for'; then ok "public URL serves san
 echo
 echo "== proxy: custom port + Host passthrough =="
 # Start a custom header-echo server on port 8001 (setsid detach).
-R2=$(api POST "/api/sandboxes/$L/exec" '{"cmd":"cat > /tmp/hdr.py <<EOF\nfrom http.server import BaseHTTPRequestHandler, HTTPServer\nclass H(BaseHTTPRequestHandler):\n    def do_GET(self):\n        body=(\"host=\" + self.headers.get(\"Host\",\"\")).encode()\n        self.send_response(200); self.send_header(\"Content-Length\", str(len(body))); self.end_headers(); self.wfile.write(body)\n    def log_message(self, *a): pass\nHTTPServer((\"0.0.0.0\", 8001), H).serve_forever()\nEOF\nsetsid python3 /tmp/hdr.py >/tmp/hdr.log 2>&1 < /dev/null & sleep 2; pgrep -f hdr.py >/dev/null && echo HDR_UP || echo HDR_DOWN"}')
+R2=$(api POST "/api/leases/$L/exec" '{"cmd":"cat > /tmp/hdr.py <<EOF\nfrom http.server import BaseHTTPRequestHandler, HTTPServer\nclass H(BaseHTTPRequestHandler):\n    def do_GET(self):\n        body=(\"host=\" + self.headers.get(\"Host\",\"\")).encode()\n        self.send_response(200); self.send_header(\"Content-Length\", str(len(body))); self.end_headers(); self.wfile.write(body)\n    def log_message(self, *a): pass\nHTTPServer((\"0.0.0.0\", 8001), H).serve_forever()\nEOF\nsetsid python3 /tmp/hdr.py >/tmp/hdr.log 2>&1 < /dev/null & sleep 2; pgrep -f hdr.py >/dev/null && echo HDR_UP || echo HDR_DOWN"}')
 echo "  hdr start: $(echo "$R2" | head -c 100)"
 sleep 1
 OUT3=$(curl -sk --max-time 20 "https://$L-8001.$PROXY_SUFFIX/" 2>&1)

@@ -26,7 +26,7 @@ func TestUserDeleteIncompleteAnswers500AndRetryCompletes(t *testing.T) {
 	ts, svc, _, _, ids, victimID := newUserDeleteServer(t)
 	svc.cfg.TemplateStoragePath = t.TempDir()
 
-	resp, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "victim-tok",
+	resp, create := doReq(t, "POST", ts.URL+"/api/leases", "victim-tok",
 		map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("victim create: %d %v", resp.StatusCode, create)
@@ -107,7 +107,7 @@ func TestUserDeleteIncompleteFirstStepStillRunsRest(t *testing.T) {
 	svc.cfg.TemplateStoragePath = t.TempDir()
 	ctx := context.Background()
 
-	resp, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "victim-tok",
+	resp, create := doReq(t, "POST", ts.URL+"/api/leases", "victim-tok",
 		map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("victim create: %d %v", resp.StatusCode, create)
@@ -190,7 +190,7 @@ func TestUserDeleteRetryAfterRestartStoreErrorAnswers500(t *testing.T) {
 	svc.cfg.TemplateStoragePath = t.TempDir()
 	ctx := context.Background()
 
-	resp, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "victim-tok",
+	resp, create := doReq(t, "POST", ts.URL+"/api/leases", "victim-tok",
 		map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("victim create: %d %v", resp.StatusCode, create)

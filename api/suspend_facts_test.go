@@ -100,7 +100,7 @@ func TestAdminDrainCarriesNoReason(t *testing.T) {
 	}
 
 	// The 409 the suspended lease answers omits the reason.
-	resp, body := doReq(t, "GET", ts.URL+"/api/sandboxes/"+l.ID+"/stat", "token-a", nil)
+	resp, body := doReq(t, "GET", ts.URL+"/api/leases/"+l.ID+"/stat", "token-a", nil)
 	if resp.StatusCode != http.StatusConflict {
 		t.Fatalf("stat status = %d, want 409: %v", resp.StatusCode, body)
 	}
@@ -309,7 +309,7 @@ func TestSuspendFactsPersistedAndServed(t *testing.T) {
 
 	// The 409 (a stat probe, which needs a running guest and is not a
 	// resume-on-use work call) carries the reason.
-	resp, body = doReq(t, "GET", ts.URL+"/api/sandboxes/"+id+"/stat", "token-a", nil)
+	resp, body = doReq(t, "GET", ts.URL+"/api/leases/"+id+"/stat", "token-a", nil)
 	if resp.StatusCode != http.StatusConflict {
 		t.Fatalf("stat status = %d, want 409", resp.StatusCode)
 	}
@@ -324,7 +324,7 @@ func TestSuspendFactsPersistedAndServed(t *testing.T) {
 func TestLeaseSuspended409NoReasonForHandSuspend(t *testing.T) {
 	ts, _, _, _ := newTestServerWithService(t)
 	id := suspendedLease(t, ts)
-	resp, body := doReq(t, "GET", ts.URL+"/api/sandboxes/"+id+"/stat", "token-a", nil)
+	resp, body := doReq(t, "GET", ts.URL+"/api/leases/"+id+"/stat", "token-a", nil)
 	if resp.StatusCode != http.StatusConflict {
 		t.Fatalf("status = %d, want 409", resp.StatusCode)
 	}

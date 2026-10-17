@@ -45,7 +45,7 @@ func TestCapacityWaitEveryPath(t *testing.T) {
 		ts, _, _, sub := newTestServerWithService(t)
 		sub.createFn = refuseCreate
 		t.Cleanup(func() { sub.createFn = nil })
-		resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a",
+		resp, body := doReq(t, "POST", ts.URL+"/api/leases", "token-a",
 			map[string]any{"image": "py-base", "ttl": 300})
 		expectCapacityWait(t, resp, body)
 	})
@@ -58,7 +58,7 @@ func TestCapacityWaitEveryPath(t *testing.T) {
 		}
 		sub.createFn = refuseCreate
 		t.Cleanup(func() { sub.createFn = nil })
-		resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+l.ID+"/clone", "token-a", nil)
+		resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+l.ID+"/clone", "token-a", nil)
 		expectCapacityWait(t, resp, body)
 	})
 
@@ -70,7 +70,7 @@ func TestCapacityWaitEveryPath(t *testing.T) {
 		}
 		sub.createFn = refuseCreate
 		t.Cleanup(func() { sub.createFn = nil })
-		resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+l.ID+"/fork", "token-a",
+		resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+l.ID+"/fork", "token-a",
 			map[string]any{"count": 1})
 		expectCapacityWait(t, resp, body)
 	})
@@ -87,7 +87,7 @@ func TestCapacityWaitEveryPath(t *testing.T) {
 		}
 		sub.createFn = refuseCreate
 		t.Cleanup(func() { sub.createFn = nil })
-		resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+l.ID+"/restore", "token-a",
+		resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+l.ID+"/restore", "token-a",
 			map[string]any{"build_id": b.BuildID})
 		expectCapacityWait(t, resp, body)
 	})
@@ -100,7 +100,7 @@ func TestCapacityWaitEveryPath(t *testing.T) {
 		}
 		sub.createFn = refuseCreate
 		t.Cleanup(func() { sub.createFn = nil })
-		resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+l.ID+"/restart?mode=cold", "token-a", nil)
+		resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+l.ID+"/restart?mode=cold", "token-a", nil)
 		expectCapacityWait(t, resp, body)
 	})
 
@@ -114,7 +114,7 @@ func TestCapacityWaitEveryPath(t *testing.T) {
 			return "", substrate.BuildRefs{}, substrate.ErrCapacity
 		}
 		t.Cleanup(func() { sub.checkpointFn = nil })
-		resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+l.ID+"/checkpoint", "token-a", nil)
+		resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+l.ID+"/checkpoint", "token-a", nil)
 		expectCapacityWait(t, resp, body)
 	})
 

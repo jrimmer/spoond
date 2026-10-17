@@ -169,7 +169,7 @@ func TestD3_SnapshotDeletion(t *testing.T) {
 	if st != 200 {
 		failf(t, "suspend B: status %d: %s", st, truncate(body))
 	}
-	st, body, err = cl.do("GET", "/api/sandboxes/"+b.ID, nil)
+	st, body, err = cl.do("GET", "/api/leases/"+b.ID, nil)
 	if err != nil {
 		failf(t, "get B: %v", err)
 	}

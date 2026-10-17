@@ -1056,10 +1056,10 @@ func (s *sseStream) lastIDSnapshot() string {
 }
 
 // TestEventsTokenScopeIsEventsOnly: the EVENTS_TOKEN is refused on
-// every route but GET /api/leases/events — the canonical /api/sandboxes
-// spelling, the one-lease streams and everything else included. Requests
-// hit the handler directly, so the failed-auth throttle (per client IP)
-// never trips and the plain status codes are visible.
+// every route but GET /api/leases/events — its one documented route.
+// The one-lease streams and everything else included. Requests hit the
+// handler directly, so the failed-auth throttle (per client IP) never
+// trips and the plain status codes are visible.
 func TestEventsTokenScopeIsEventsOnly(t *testing.T) {
 	svc, db, _ := newTestService(t)
 	seedImage(t, db, "py-base", 2048)
@@ -1094,7 +1094,7 @@ func TestEventsTokenScopeIsEventsOnly(t *testing.T) {
 		"/api/leases/x/y/events",                // not an events route
 		"/api/leases/" + l.ID + "/events/extra", // neither
 		"/api/leases/" + l.ID + "/events",       // the one-lease form is not its route
-		"/api/sandboxes/events",                 // not the documented spelling
+		"/api/leases/queue",                     // not a stream at all
 	} {
 		if got := do("GET", path, "events-tok"); got != http.StatusUnauthorized {
 			t.Errorf("GET %s with the events token: %d, want 401", path, got)
@@ -1122,21 +1122,22 @@ func TestEventsTokenScopeIsEventsOnly(t *testing.T) {
 	}
 
 	// Consumer tokens are untouched by all of this.
-	if got := do("GET", "/api/sandboxes/"+l.ID, "token-a"); got != http.StatusOK {
+	if got := do("GET", "/api/leases/"+l.ID, "token-a"); got != http.StatusOK {
 		t.Fatalf("consumer token on its lease: %d, want 200", got)
 	}
 
 	// An unset EVENTS_TOKEN matches nothing — not even the literal it
 	// would have been.
 	svc.cfg.EventsToken = ""
-	if got := do("GET", "/api/sandboxes/events", ""); got != http.StatusUnauthorized {
+	if got := do("GET", "/api/leases/events", ""); got != http.StatusUnauthorized {
 		t.Fatalf("stream without credentials: %d, want 401", got)
 	}
 }
 
 // TestEventsTokenOneLeaseRefused: the events token's one route is the
 // all-events stream; the one-lease spelling refuses it outright, even
-// for a lease that exists (it would otherwise stream it).
+// for a lease that exists (it would otherwise stream it). Every other
+// route (an unknown lease's events included) is not its route either.
 func TestEventsTokenOneLeaseRefused(t *testing.T) {
 	svc, db, _ := newTestService(t)
 	seedImage(t, db, "py-base", 2048)
@@ -1144,7 +1145,7 @@ func TestEventsTokenOneLeaseRefused(t *testing.T) {
 	h := NewServer(svc, NewImageRegistry(db)).Handler()
 	for _, path := range []string{
 		"/api/leases/no-such-lease/events", // unknown lease
-		"/api/sandboxes/events",            // the canonical spelling
+		"/api/leases/queue",                // not a stream at all
 	} {
 		req := httptest.NewRequest("GET", path, nil)
 		req.Header.Set("Authorization", "Bearer events-tok")

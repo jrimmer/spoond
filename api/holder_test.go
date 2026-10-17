@@ -331,7 +331,7 @@ func TestLeaseHolderPutAdminAllowed(t *testing.T) {
 	if lid == "" {
 		t.Fatal("a could not create lease")
 	}
-	req := httptest.NewRequest("PUT", "/api/sandboxes/"+lid+"/holder",
+	req := httptest.NewRequest("PUT", "/api/leases/"+lid+"/holder",
 		strings.NewReader(`{"holder":"ops","holder_url":"https://ops.example/x"}`))
 	req.Header.Set("Authorization", "Bearer admin-tok")
 	h.ServeHTTP(rec, req)
@@ -339,7 +339,7 @@ func TestLeaseHolderPutAdminAllowed(t *testing.T) {
 		t.Fatalf("admin put holder = %d (%s), want 200", rec.Code, rec.Body.String())
 	}
 	// The owner sees the admin-set holder.
-	req2 := httptest.NewRequest("GET", "/api/sandboxes/"+lid, nil)
+	req2 := httptest.NewRequest("GET", "/api/leases/"+lid, nil)
 	req2.Header.Set("Authorization", "Bearer tok-a")
 	rec2 := httptest.NewRecorder()
 	h.ServeHTTP(rec2, req2)

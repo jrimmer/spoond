@@ -139,7 +139,7 @@ func TestSnapshotGrantStartCrossOwner(t *testing.T) {
 
 	// snapshot_owner naming the caller itself is an ordinary own start:
 	// consumer-b has no such name.
-	resp, body := doReq(t, "POST", ts+"/api/sandboxes", "token-b", map[string]any{"snapshot": "honey/warm", "snapshot_owner": "consumer-b"})
+	resp, body := doReq(t, "POST", ts+"/api/leases", "token-b", map[string]any{"snapshot": "honey/warm", "snapshot_owner": "consumer-b"})
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("own-name start = %d %v, want 404", resp.StatusCode, body)
 	}
@@ -161,7 +161,7 @@ func TestSnapshotGrantNotFoundIndistinguishable(t *testing.T) {
 	saveSnapshotOK(t, ts, "token-a", dirty, map[string]any{"name": "dirty"})
 
 	start := func(snapshot, owner string) (int, string) {
-		resp, body := doReq(t, "POST", ts+"/api/sandboxes", "token-b", map[string]any{"snapshot": snapshot, "snapshot_owner": owner})
+		resp, body := doReq(t, "POST", ts+"/api/leases", "token-b", map[string]any{"snapshot": snapshot, "snapshot_owner": owner})
 		raw, _ := json.Marshal(body)
 		return resp.StatusCode, string(raw)
 	}
@@ -226,7 +226,7 @@ func TestSnapshotGrantTaintedVersion(t *testing.T) {
 	if savedSecretFree(t, ts, db, tainted, "warm") {
 		t.Fatal("warm@2 must not be secret-free")
 	}
-	resp, body = doReq(t, "POST", ts+"/api/sandboxes", "token-b", map[string]any{"snapshot": "warm", "snapshot_owner": "consumer-a"})
+	resp, body = doReq(t, "POST", ts+"/api/leases", "token-b", map[string]any{"snapshot": "warm", "snapshot_owner": "consumer-a"})
 	if resp.StatusCode != http.StatusConflict || body["code"] != "not_secret_free" {
 		t.Fatalf("start of tainted latest = %d %v, want 409 not_secret_free", resp.StatusCode, body)
 	}
@@ -269,7 +269,7 @@ func TestSnapshotGrantRevoke(t *testing.T) {
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("revoke = %d, want 204", resp.StatusCode)
 	}
-	resp, body := doReq(t, "POST", ts+"/api/sandboxes", "token-b", map[string]any{"snapshot": "warm", "snapshot_owner": "consumer-a"})
+	resp, body := doReq(t, "POST", ts+"/api/leases", "token-b", map[string]any{"snapshot": "warm", "snapshot_owner": "consumer-a"})
 	if resp.StatusCode != http.StatusNotFound || body["code"] != "not_found" {
 		t.Fatalf("start after revoke = %d %v, want 404 not_found", resp.StatusCode, body)
 	}
@@ -289,7 +289,7 @@ func TestSnapshotGrantRevoke(t *testing.T) {
 	if err != nil {
 		t.Fatalf("version: %v", err)
 	}
-	resp, _ = doReq(t, "POST", ts+"/api/sandboxes/"+running+"/restore", "token-b", map[string]any{"build_id": row.BuildID})
+	resp, _ = doReq(t, "POST", ts+"/api/leases/"+running+"/restore", "token-b", map[string]any{"build_id": row.BuildID})
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("restore to start after revoke = %d, want 404", resp.StatusCode)
 	}
@@ -311,7 +311,7 @@ func TestSnapshotGrantGoesWithTheName(t *testing.T) {
 		t.Fatalf("grant after the name was deleted = %v, want gone", err)
 	}
 	saveSnapshotOK(t, ts, "token-a", src, map[string]any{"name": "warm"})
-	resp, body = doReq(t, "POST", ts+"/api/sandboxes", "token-b", map[string]any{"snapshot": "warm", "snapshot_owner": "consumer-a"})
+	resp, body = doReq(t, "POST", ts+"/api/leases", "token-b", map[string]any{"snapshot": "warm", "snapshot_owner": "consumer-a"})
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("start of the re-saved name without a new grant = %d %v, want 404", resp.StatusCode, body)
 	}
@@ -342,7 +342,7 @@ func TestSnapshotGrantValidation(t *testing.T) {
 	if resp, body := grantSnapshot(t, ts, "token-b", "warm", "legacy-consumer"); resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("grant of another owner's name = %d %v, want 404", resp.StatusCode, body)
 	}
-	if resp, body := doReq(t, "POST", ts+"/api/sandboxes", "token-b", map[string]any{"image": "py-base", "snapshot_owner": "consumer-a"}); resp.StatusCode != http.StatusBadRequest {
+	if resp, body := doReq(t, "POST", ts+"/api/leases", "token-b", map[string]any{"image": "py-base", "snapshot_owner": "consumer-a"}); resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("snapshot_owner without snapshot = %d %v, want 400", resp.StatusCode, body)
 	}
 }
@@ -413,7 +413,7 @@ func TestHadSecretsInherited(t *testing.T) {
 		src  string
 		want bool
 	}{{dirty, true}, {clean, false}} {
-		resp, body := doReq(t, "POST", ts+"/api/sandboxes/"+c.src+"/clone", "token-a", nil)
+		resp, body := doReq(t, "POST", ts+"/api/leases/"+c.src+"/clone", "token-a", nil)
 		if resp.StatusCode != http.StatusCreated {
 			t.Fatalf("clone: %d %v", resp.StatusCode, body)
 		}
@@ -421,7 +421,7 @@ func TestHadSecretsInherited(t *testing.T) {
 		if svc.store.leases[cid].HadSecrets != c.want || storedHadSecrets(t, db, cid) != c.want {
 			t.Fatalf("clone of %s had_secrets = %v, want %v", c.src, svc.store.leases[cid].HadSecrets, c.want)
 		}
-		resp, body = doReq(t, "POST", ts+"/api/sandboxes/"+c.src+"/fork", "token-a", map[string]any{"count": 1})
+		resp, body = doReq(t, "POST", ts+"/api/leases/"+c.src+"/fork", "token-a", map[string]any{"count": 1})
 		if resp.StatusCode != http.StatusCreated {
 			t.Fatalf("fork: %d %v", resp.StatusCode, body)
 		}
@@ -517,7 +517,7 @@ func TestRestoreToStartSnapshot(t *testing.T) {
 	}
 	t.Cleanup(func() { sub.createFn = nil })
 
-	resp, body := doReq(t, "POST", ts+"/api/sandboxes/"+id+"/restore", "token-b", map[string]any{"build_id": row.BuildID})
+	resp, body := doReq(t, "POST", ts+"/api/leases/"+id+"/restore", "token-b", map[string]any{"build_id": row.BuildID})
 	if resp.StatusCode != http.StatusOK || body["build_id"] != row.BuildID || body["generation"].(float64) != 2 {
 		t.Fatalf("restore to start = %d %v, want 200 at generation 2", resp.StatusCode, body)
 	}
@@ -542,13 +542,13 @@ func TestRestoreToStartSnapshot(t *testing.T) {
 
 	// Nobody else may restore to it.
 	other := createLiveLease(t, ts, "token-b", nil)
-	resp, body = doReq(t, "POST", ts+"/api/sandboxes/"+id+"/clone", "token-b", nil)
+	resp, body = doReq(t, "POST", ts+"/api/leases/"+id+"/clone", "token-b", nil)
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("clone: %d %v", resp.StatusCode, body)
 	}
 	clone := body["id"].(string)
 	for _, c := range []struct{ lease, token string }{{other, "token-b"}, {clone, "token-b"}} {
-		resp, body := doReq(t, "POST", ts+"/api/sandboxes/"+c.lease+"/restore", c.token, map[string]any{"build_id": row.BuildID})
+		resp, body := doReq(t, "POST", ts+"/api/leases/"+c.lease+"/restore", c.token, map[string]any{"build_id": row.BuildID})
 		if resp.StatusCode != http.StatusNotFound {
 			t.Fatalf("restore of %s to another's start build = %d %v, want 404", c.lease, resp.StatusCode, body)
 		}
@@ -558,7 +558,7 @@ func TestRestoreToStartSnapshot(t *testing.T) {
 	if _, err := svc.checkpointLease(t.Context(), svc.store.leases[src]); err != nil {
 		t.Fatalf("checkpoint source: %v", err)
 	}
-	if resp, body := doReq(t, "POST", ts+"/api/sandboxes/"+src+"/restore", "token-a", map[string]any{"build_id": row.BuildID}); resp.StatusCode != http.StatusNotFound {
+	if resp, body := doReq(t, "POST", ts+"/api/leases/"+src+"/restore", "token-a", map[string]any{"build_id": row.BuildID}); resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("source restore to the version = %d %v, want 404", resp.StatusCode, body)
 	}
 }
@@ -577,7 +577,7 @@ func TestRestoreToStartMarkerFailureKeepsLease(t *testing.T) {
 
 	// Every WriteFile fails: the copy-side markers cannot land.
 	sub.FailCall("WriteFile", 0, fmt.Errorf("disk gone"))
-	resp, body := doReq(t, "POST", ts+"/api/sandboxes/"+id+"/restore", "token-a", map[string]any{"build_id": row.BuildID})
+	resp, body := doReq(t, "POST", ts+"/api/leases/"+id+"/restore", "token-a", map[string]any{"build_id": row.BuildID})
 	if resp.StatusCode != http.StatusInternalServerError {
 		t.Fatalf("restore with failing marker = %d %v, want 500", resp.StatusCode, body)
 	}

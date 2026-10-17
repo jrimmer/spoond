@@ -106,7 +106,7 @@ func TestBoxFullOwnLeasesHTTP(t *testing.T) {
 
 	dropNodeCache(svc)
 	warmFairShares(svc, ctx)
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "mid", "ttl": 3600})
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "mid", "ttl": 3600})
 	if resp.StatusCode != http.StatusTooManyRequests {
 		t.Fatalf("alice's over-slice create = %d (%v), want 429 box_full", resp.StatusCode, body)
 	}
@@ -156,7 +156,7 @@ func TestBoxFullOwnLeasesHTTP(t *testing.T) {
 	// paused and his create succeeds without own_leases.
 	dropNodeCache(svc)
 	warmFairShares(svc, ctx)
-	resp2, body2 := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-b", map[string]any{"image": "mid", "ttl": 3600})
+	resp2, body2 := doReq(t, "POST", ts.URL+"/api/leases", "token-b", map[string]any{"image": "mid", "ttl": 3600})
 	if resp2.StatusCode != http.StatusCreated {
 		t.Fatalf("bob's create = %d (%v), want 201 (take-back pauses an over-slice lease)", resp2.StatusCode, body2)
 	}
@@ -259,7 +259,7 @@ func TestBoxFullPinnedNoOwnLeasesKey(t *testing.T) {
 		t.Fatalf("pin: %v", err)
 	}
 	warmFairShares(svc, ctx)
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "mid", "ttl": 3600})
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "mid", "ttl": 3600})
 	if resp.StatusCode != http.StatusTooManyRequests {
 		t.Fatalf("pinned box_full create = %d (%v), want 429", resp.StatusCode, body)
 	}

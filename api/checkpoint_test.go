@@ -94,7 +94,7 @@ func TestManualCheckpointRoute(t *testing.T) {
 		t.Fatalf("grant: %v", err)
 	}
 
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+l.ID+"/checkpoint", "token-a", nil)
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+l.ID+"/checkpoint", "token-a", nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("checkpoint = %d (%v), want 200", resp.StatusCode, body)
 	}
@@ -117,7 +117,7 @@ func TestManualCheckpointRoute(t *testing.T) {
 	}
 
 	// Another owner's lease is not found.
-	resp, _ = doReq(t, "POST", ts.URL+"/api/sandboxes/"+l.ID+"/checkpoint", "token-b", nil)
+	resp, _ = doReq(t, "POST", ts.URL+"/api/leases/"+l.ID+"/checkpoint", "token-b", nil)
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("checkpoint of another owner's lease = %d, want 404", resp.StatusCode)
 	}
@@ -126,7 +126,7 @@ func TestManualCheckpointRoute(t *testing.T) {
 	if _, err := svc.suspend(ctx, "consumer-a", l.ID); err != nil {
 		t.Fatalf("suspend: %v", err)
 	}
-	resp, body = doReq(t, "POST", ts.URL+"/api/sandboxes/"+l.ID+"/checkpoint", "token-a", nil)
+	resp, body = doReq(t, "POST", ts.URL+"/api/leases/"+l.ID+"/checkpoint", "token-a", nil)
 	if resp.StatusCode != http.StatusConflict {
 		t.Fatalf("checkpoint of a suspended lease = %d (%v), want 409", resp.StatusCode, body)
 	}
@@ -137,10 +137,10 @@ func TestManualCheckpointRoute(t *testing.T) {
 func TestCheckpointHistogramObserved(t *testing.T) {
 	ts, _, db, _ := newTestServerWithService(t)
 	seedImage(t, db, "py-base", 2048)
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
 	id := create["id"].(string)
 
-	if _, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/checkpoint", "token-a", nil); body["build_id"] == nil {
+	if _, body := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/checkpoint", "token-a", nil); body["build_id"] == nil {
 		t.Fatalf("checkpoint failed: %v", body)
 	}
 

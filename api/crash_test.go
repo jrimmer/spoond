@@ -131,7 +131,7 @@ func TestCrashTestRecoversFromCheckpoint(t *testing.T) {
 
 // TestCrashTestLostWithoutCheckpoint: the owner crashes a lease with no
 // checkpoint; it is marked lost and its stale sandbox row goes. Driven
-// through the /api/sandboxes alias.
+// through the /api/leases alias.
 func TestCrashTestLostWithoutCheckpoint(t *testing.T) {
 	ts, svc, db, _ := newCrashServer(t, true)
 	ctx := context.Background()
@@ -141,7 +141,7 @@ func TestCrashTestLostWithoutCheckpoint(t *testing.T) {
 		t.Fatalf("sandbox row missing before crash: %v", err)
 	}
 
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+l.ID+"/crash-test", "token-a", nil)
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+l.ID+"/crash-test", "token-a", nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("crash = %d (%v), want 200", resp.StatusCode, body)
 	}

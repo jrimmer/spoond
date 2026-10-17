@@ -42,7 +42,7 @@ func useJobRunner(t *testing.T, sub *testSub) string {
 // lease, and the sandbox id.
 func createJobLease(t *testing.T, ts *httptest.Server, svc *Service) (string, *Lease, string) {
 	t.Helper()
-	_, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
+	_, body := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "ttl": 300})
 	id, _ := body["id"].(string)
 	if id == "" {
 		t.Fatalf("create lease: no id in %v", body)
@@ -76,7 +76,7 @@ func writeJobFile(t *testing.T, sub *testSub, sandboxID, jobID, name, content st
 func startBackgroundJob(t *testing.T, ts *httptest.Server, id string, req map[string]any) (string, time.Time) {
 	t.Helper()
 	req["background"] = true
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/exec", "token-a", req)
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/exec", "token-a", req)
 	if resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("background exec status %d: %v", resp.StatusCode, body)
 	}
@@ -237,7 +237,7 @@ func TestJobLongPoll(t *testing.T) {
 	// A running job: wait=1 must return after about a second, still
 	// running.
 	start := time.Now()
-	resp, body := doReq(t, "GET", ts.URL+"/api/sandboxes/"+id+"/jobs/"+jobID+"?wait=1", "token-a", nil)
+	resp, body := doReq(t, "GET", ts.URL+"/api/leases/"+id+"/jobs/"+jobID+"?wait=1", "token-a", nil)
 	if resp.StatusCode != 200 {
 		t.Fatalf("wait status %d: %v", resp.StatusCode, body)
 	}
@@ -255,7 +255,7 @@ func TestJobLongPoll(t *testing.T) {
 	p.Push(substrate.ProcessEvent{Kind: substrate.EventExit, ExitCode: 0})
 	waitJobState(t, db, jobID, "exited", jobWatchTimeout)
 
-	resp, body = doReq(t, "GET", ts.URL+"/api/sandboxes/"+id+"/jobs/"+jobID+"?wait=30", "token-a", nil)
+	resp, body = doReq(t, "GET", ts.URL+"/api/leases/"+id+"/jobs/"+jobID+"?wait=30", "token-a", nil)
 	if resp.StatusCode != 200 {
 		t.Fatalf("wait-exited status %d", resp.StatusCode)
 	}
@@ -282,7 +282,7 @@ func TestJobOutputRange(t *testing.T) {
 	writeJobFile(t, sub, sandbox, jobID, "stderr", "xy")
 
 	get := func(query string) string {
-		req, _ := http.NewRequest("GET", ts.URL+"/api/sandboxes/"+id+"/jobs/"+jobID+"/output?"+query, nil)
+		req, _ := http.NewRequest("GET", ts.URL+"/api/leases/"+id+"/jobs/"+jobID+"/output?"+query, nil)
 		req.Header.Set("Authorization", "Bearer token-a")
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
@@ -367,7 +367,7 @@ func TestJobUTF8SafeCuts(t *testing.T) {
 // running sandbox to exec in until the lease resumes).
 func TestJobSignalOnSuspendedLease(t *testing.T) {
 	ts, svc, _, sub := newTestServerWithService(t)
-	_, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "persistent": true})
+	_, body := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "persistent": true})
 	id := body["id"].(string)
 
 	p := fake.NewProcess(1019)
@@ -378,7 +378,7 @@ func TestJobSignalOnSuspendedLease(t *testing.T) {
 	}
 
 	before := calls(sub.Fake, "Exec")
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/jobs/"+jobID+"/signal", "token-a", map[string]any{"signal": "TERM"})
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/jobs/"+jobID+"/signal", "token-a", map[string]any{"signal": "TERM"})
 	if resp.StatusCode != http.StatusConflict {
 		t.Fatalf("signal on suspended lease = %d, want 409: %v", resp.StatusCode, body)
 	}
@@ -393,7 +393,7 @@ func TestJobSignalOnSuspendedLease(t *testing.T) {
 // nothing. The job record is checked before the resume.
 func TestJobSignalFinishedDoesNotResume(t *testing.T) {
 	ts, svc, db, sub := newTestServerWithService(t)
-	_, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "persistent": true})
+	_, body := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "persistent": true})
 	id := body["id"].(string)
 	l := svc.lookupAny(id)
 	if l == nil {
@@ -412,7 +412,7 @@ func TestJobSignalFinishedDoesNotResume(t *testing.T) {
 		t.Fatalf("suspend: %v", err)
 	}
 	createsBefore := calls(sub.Fake, "Create")
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/jobs/"+jobID+"/signal", "token-a", map[string]any{"signal": "TERM"})
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/jobs/"+jobID+"/signal", "token-a", map[string]any{"signal": "TERM"})
 	if resp.StatusCode != http.StatusConflict {
 		t.Fatalf("signal of a finished job = %d, want 409: %v", resp.StatusCode, body)
 	}
@@ -435,7 +435,7 @@ func TestJobSignal(t *testing.T) {
 	jobID, _ := startBackgroundJob(t, ts, id, map[string]any{"cmd": "sleep 600"})
 	writeJobFile(t, sub, sandbox, jobID, "pid", "4242\n")
 
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/jobs/"+jobID+"/signal", "token-a", map[string]any{"signal": "TERM"})
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/jobs/"+jobID+"/signal", "token-a", map[string]any{"signal": "TERM"})
 	if resp.StatusCode != 200 {
 		t.Fatalf("signal status %d: %v", resp.StatusCode, body)
 	}
@@ -445,7 +445,7 @@ func TestJobSignal(t *testing.T) {
 
 	// A bad signal name is refused before anything runs (the job is
 	// still running at this point).
-	resp, _ = doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/jobs/"+jobID+"/signal", "token-a", map[string]any{"signal": "HUP"})
+	resp, _ = doReq(t, "POST", ts.URL+"/api/leases/"+id+"/jobs/"+jobID+"/signal", "token-a", map[string]any{"signal": "HUP"})
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("bad signal = %d, want 400", resp.StatusCode)
 	}
@@ -455,7 +455,7 @@ func TestJobSignal(t *testing.T) {
 	p.Push(substrate.ProcessEvent{Kind: substrate.EventExit, ExitCode: 143})
 	waitJobState(t, db, jobID, "exited", jobWatchTimeout)
 
-	resp, _ = doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/jobs/"+jobID+"/signal", "token-a", map[string]any{"signal": "KILL"})
+	resp, _ = doReq(t, "POST", ts.URL+"/api/leases/"+id+"/jobs/"+jobID+"/signal", "token-a", map[string]any{"signal": "KILL"})
 	if resp.StatusCode != http.StatusConflict {
 		t.Fatalf("signal of exited job = %d, want 409", resp.StatusCode)
 	}
@@ -487,7 +487,7 @@ func TestJobStartPerLeaseLock(t *testing.T) {
 	})
 
 	status := func(id string) int {
-		resp, _ := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/exec", "token-a", map[string]any{"cmd": "sleep 600", "background": true})
+		resp, _ := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/exec", "token-a", map[string]any{"cmd": "sleep 600", "background": true})
 		return resp.StatusCode
 	}
 
@@ -550,7 +550,7 @@ func TestJobCap(t *testing.T) {
 	startBackgroundJob(t, ts, id, map[string]any{"cmd": "sleep 600"})
 	startBackgroundJob(t, ts, id, map[string]any{"cmd": "sleep 601"})
 
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/exec", "token-a", map[string]any{"cmd": "sleep 602", "background": true})
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/exec", "token-a", map[string]any{"cmd": "sleep 602", "background": true})
 	if resp.StatusCode != http.StatusTooManyRequests {
 		t.Fatalf("third job status %d, want 429: %v", resp.StatusCode, body)
 	}
@@ -658,7 +658,7 @@ func TestJobPruning(t *testing.T) {
 // out of the idle_suspend sweep.
 func TestRunningJobKeepsLeaseActive(t *testing.T) {
 	ts, svc, _, sub := newTestServerWithService(t)
-	_, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "persistent": true, "idle_suspend": 60})
+	_, body := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "persistent": true, "idle_suspend": 60})
 	id := body["id"].(string)
 	l := svc.lookupAny(id)
 	if l == nil {
@@ -763,7 +763,7 @@ func TestJobsListAndDetail(t *testing.T) {
 	installJobProcess(t, sub, second)
 	startBackgroundJob(t, ts, id, map[string]any{"cmd": "sleep 600"})
 
-	resp, body := doReq(t, "GET", ts.URL+"/api/sandboxes/"+id+"/jobs", "token-a", nil)
+	resp, body := doReq(t, "GET", ts.URL+"/api/leases/"+id+"/jobs", "token-a", nil)
 	if resp.StatusCode != 200 {
 		t.Fatalf("list status %d", resp.StatusCode)
 	}
@@ -773,7 +773,7 @@ func TestJobsListAndDetail(t *testing.T) {
 	}
 
 	// The lease detail carries the jobs summary.
-	resp, detail := doReq(t, "GET", ts.URL+"/api/sandboxes/"+id, "token-a", nil)
+	resp, detail := doReq(t, "GET", ts.URL+"/api/leases/"+id, "token-a", nil)
 	if resp.StatusCode != 200 {
 		t.Fatalf("detail status %d", resp.StatusCode)
 	}
@@ -801,9 +801,9 @@ func TestJobsCrossConsumerDenied(t *testing.T) {
 	jobID, _ := startBackgroundJob(t, ts, id, map[string]any{"cmd": "sleep 600"})
 
 	for _, path := range []string{
-		"/api/sandboxes/" + id + "/jobs",
-		"/api/sandboxes/" + id + "/jobs/" + jobID,
-		"/api/sandboxes/" + id + "/jobs/" + jobID + "/output",
+		"/api/leases/" + id + "/jobs",
+		"/api/leases/" + id + "/jobs/" + jobID,
+		"/api/leases/" + id + "/jobs/" + jobID + "/output",
 	} {
 		resp, _ := doReq(t, "GET", ts.URL+path, "token-b", nil)
 		if resp.StatusCode != http.StatusNotFound {
@@ -817,13 +817,13 @@ func TestJobsCrossConsumerDenied(t *testing.T) {
 // old 409 lease_suspended.
 func TestJobStartOnSuspendedResumes(t *testing.T) {
 	ts, svc, _, _ := newTestServerWithService(t)
-	_, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "persistent": true})
+	_, body := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "persistent": true})
 	id := body["id"].(string)
 	if _, err := svc.suspend(context.Background(), "consumer-a", id); err != nil {
 		t.Fatalf("suspend: %v", err)
 	}
 	l := svc.lookupAny(id)
-	resp, out := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/exec", "token-a", map[string]any{"cmd": "echo", "background": true})
+	resp, out := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/exec", "token-a", map[string]any{"cmd": "echo", "background": true})
 	if resp.StatusCode == http.StatusConflict {
 		t.Fatalf("suspended background exec answered 409; it must resume on use: %v", out)
 	}
@@ -843,7 +843,7 @@ func TestJobStartOnLostLease(t *testing.T) {
 	svc.saveLeaseLocked(lease)
 	svc.store.mu.Unlock()
 
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/exec", "token-a", map[string]any{"cmd": "echo", "background": true})
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/exec", "token-a", map[string]any{"cmd": "echo", "background": true})
 	if resp.StatusCode != http.StatusGone {
 		t.Fatalf("lost background exec = %d, want 410", resp.StatusCode)
 	}
@@ -863,7 +863,7 @@ func TestJobStartFailureMapsToSandboxGone(t *testing.T) {
 	})
 	t.Cleanup(func() { sub.SetStartHandler(nil) })
 
-	resp, _ := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/exec", "token-a", map[string]any{"cmd": "echo", "background": true})
+	resp, _ := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/exec", "token-a", map[string]any{"cmd": "echo", "background": true})
 	if resp.StatusCode != http.StatusGone {
 		t.Fatalf("start not-found = %d, want 410", resp.StatusCode)
 	}
@@ -904,7 +904,7 @@ func TestJobSignalRejectsHostilePid(t *testing.T) {
 	jobID, _ := startBackgroundJob(t, ts, id, map[string]any{"cmd": "sleep 600"})
 	writeJobFile(t, sub, sandbox, jobID, "pid", "123; touch /tmp/spoond-pwned\n")
 
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/jobs/"+jobID+"/signal", "token-a", map[string]any{"signal": "TERM"})
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/jobs/"+jobID+"/signal", "token-a", map[string]any{"signal": "TERM"})
 	if resp.StatusCode == http.StatusOK {
 		t.Fatalf("hostile pid accepted: %v", body)
 	}
@@ -927,7 +927,7 @@ func TestJobSignalRejectsHostilePid(t *testing.T) {
 // gone), so the JSON shape does not depend on lease state.
 func TestJobGetOutputKeysStable(t *testing.T) {
 	ts, svc, _, sub := newTestServerWithService(t)
-	_, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "persistent": true})
+	_, body := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "persistent": true})
 	id := body["id"].(string)
 
 	// Start the job, then suspend the lease: the sandbox is gone from the
@@ -938,7 +938,7 @@ func TestJobGetOutputKeysStable(t *testing.T) {
 	l := svc.lookupAny(id)
 	sub.Fake.Kill(l.SandboxID)
 
-	resp, body := doReq(t, "GET", ts.URL+"/api/sandboxes/"+id+"/jobs/"+jobID, "token-a", nil)
+	resp, body := doReq(t, "GET", ts.URL+"/api/leases/"+id+"/jobs/"+jobID, "token-a", nil)
 	if resp.StatusCode != 200 {
 		t.Fatalf("get status %d", resp.StatusCode)
 	}
@@ -1106,7 +1106,7 @@ func TestJobShorterRequestedRuntimeWins(t *testing.T) {
 		t.Fatalf("longer request: max_runtime_secs = %d, want the 3600 host cap", row.MaxRuntimeSecs)
 	}
 
-	resp, _ := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/exec", "token-a", map[string]any{"cmd": "sleep 602", "background": true, "max_runtime_secs": -1})
+	resp, _ := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/exec", "token-a", map[string]any{"cmd": "sleep 602", "background": true, "max_runtime_secs": -1})
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("negative max_runtime_secs = %d, want 400", resp.StatusCode)
 	}
@@ -1176,7 +1176,7 @@ func TestJobHugeRequestStoresHostCap(t *testing.T) {
 // reconcile after it resumes (spoond-wb5).
 func TestJobMaxRuntimeAppliesToSuspendedLease(t *testing.T) {
 	ts, svc, db, sub := newTestServerWithService(t)
-	_, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "persistent": true})
+	_, body := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "persistent": true})
 	id := body["id"].(string)
 	lease := svc.lookupAny(id)
 	if lease == nil {
@@ -1276,7 +1276,7 @@ func TestJobMaxRuntimeDisabled(t *testing.T) {
 // still closes the record.
 func TestJobReconcileDoesNotMarkSuspendedLeaseActive(t *testing.T) {
 	ts, svc, db, sub := newTestServerWithService(t)
-	_, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "persistent": true})
+	_, body := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "persistent": true})
 	id := body["id"].(string)
 	lease := svc.lookupAny(id)
 	if lease == nil {

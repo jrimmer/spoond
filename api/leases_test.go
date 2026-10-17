@@ -1,9 +1,9 @@
 package api
 
-// The /api/leases path family (2.0): every /api/sandboxes route is also
+// The /api/leases path family (2.0): every /api/leases route is also
 // served there, in one rewrite at the top of the handler chain, with
 // identical auth and responses. /api/leases is the documented primary
-// path; /api/sandboxes stays as a permanent alias (D5).
+// path; /api/leases stays as a permanent alias (D5).
 
 import (
 	"encoding/json"
@@ -15,7 +15,7 @@ import (
 )
 
 // TestLeaseAliasCRUD covers create, get, list, exec and delete through
-// /api/leases and checks each response matches the /api/sandboxes twin:
+// /api/leases and checks each response matches the /api/leases twin:
 // same status, same body — the rewrite happens before auth and the mux,
 // so there is nothing to diverge.
 func TestLeaseAliasCRUD(t *testing.T) {
@@ -33,10 +33,10 @@ func TestLeaseAliasCRUD(t *testing.T) {
 	}
 
 	// The same create through the alias must return an identical body.
-	respAlias, leaseAlias := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a",
+	respAlias, leaseAlias := doReq(t, "POST", ts.URL+"/api/leases", "token-a",
 		map[string]any{"image": "py-base", "ttl": 300})
 	if respAlias.StatusCode != http.StatusCreated {
-		t.Fatalf("create via /api/sandboxes: %d: %v", respAlias.StatusCode, leaseAlias)
+		t.Fatalf("create via /api/leases: %d: %v", respAlias.StatusCode, leaseAlias)
 	}
 	// ids differ by design; expires_at is derived from each grant's own
 	// wall clock and the two requests are back to back, so either may
@@ -50,7 +50,7 @@ func TestLeaseAliasCRUD(t *testing.T) {
 
 	// Get through both paths.
 	respL, gotL := doReq(t, "GET", ts.URL+"/api/leases/"+id, "token-a", nil)
-	respS, gotS := doReq(t, "GET", ts.URL+"/api/sandboxes/"+id, "token-a", nil)
+	respS, gotS := doReq(t, "GET", ts.URL+"/api/leases/"+id, "token-a", nil)
 	if respL.StatusCode != http.StatusOK || respS.StatusCode != http.StatusOK {
 		t.Fatalf("get: leases %d, sandboxes %d", respL.StatusCode, respS.StatusCode)
 	}
@@ -59,7 +59,7 @@ func TestLeaseAliasCRUD(t *testing.T) {
 	}
 
 	// List through both paths sees the lease created through either.
-	for _, base := range []string{"/api/leases", "/api/sandboxes"} {
+	for _, base := range []string{"/api/leases", "/api/leases"} {
 		resp, list := doReq(t, "GET", ts.URL+base, "token-a", nil)
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("list via %s: %d", base, resp.StatusCode)
@@ -87,7 +87,7 @@ func TestLeaseAliasCRUD(t *testing.T) {
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("delete via /api/leases: %d", resp.StatusCode)
 	}
-	for _, base := range []string{"/api/leases", "/api/sandboxes"} {
+	for _, base := range []string{"/api/leases", "/api/leases"} {
 		resp, body := doReq(t, "GET", ts.URL+base+"/"+id, "token-a", nil)
 		if resp.StatusCode != http.StatusNotFound {
 			t.Fatalf("get after delete via %s: %d: %v", base, resp.StatusCode, body)
@@ -100,10 +100,10 @@ func TestLeaseAliasCRUD(t *testing.T) {
 func TestLeaseAliasCrossVisibility(t *testing.T) {
 	ts, _ := newTestServer(t)
 
-	resp, lease := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a",
+	resp, lease := doReq(t, "POST", ts.URL+"/api/leases", "token-a",
 		map[string]any{"image": "py-base", "ttl": 300})
 	if resp.StatusCode != http.StatusCreated {
-		t.Fatalf("create via /api/sandboxes: %d: %v", resp.StatusCode, lease)
+		t.Fatalf("create via /api/leases: %d: %v", resp.StatusCode, lease)
 	}
 	id, _ := lease["id"].(string)
 
@@ -126,13 +126,13 @@ func TestLeaseAliasCrossVisibility(t *testing.T) {
 }
 
 // TestLeaseAliasAuth pins that /api/leases is gated exactly like
-// /api/sandboxes: no token is 401, a wrong token is 401, and an owned
+// /api/leases: no token is 401, a wrong token is 401, and an owned
 // lease is not visible to another consumer's token.
 func TestLeaseAliasAuth(t *testing.T) {
 	ts, _ := newTestServer(t)
 
 	// No token → 401 on both path families.
-	for _, base := range []string{"/api/leases", "/api/sandboxes"} {
+	for _, base := range []string{"/api/leases", "/api/leases"} {
 		resp, _ := doReq(t, "POST", ts.URL+base, "", map[string]any{"image": "py-base"})
 		if resp.StatusCode != http.StatusUnauthorized {
 			t.Fatalf("no-token create via %s: %d, want 401", base, resp.StatusCode)
@@ -164,7 +164,7 @@ func TestLeaseAliasAuth(t *testing.T) {
 
 // TestLeaseAliasSubroutes pins the whole subroute surface: lifecycle,
 // tag and share subroutes all answer under /api/leases with the same
-// status codes their /api/sandboxes twins give.
+// status codes their /api/leases twins give.
 func TestLeaseAliasSubroutes(t *testing.T) {
 	ts, _ := newTestServer(t)
 
@@ -195,12 +195,8 @@ func TestLeaseAliasSubroutes(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			respL, _ := doReq(t, tc.method, ts.URL+tc.path, "token-a", tc.body)
-			// The twin must answer identically.
-			twinPath := apiSandboxPathPrefix + strings.TrimPrefix(tc.path, "/api/leases")
-			respS, _ := doReq(t, tc.method, ts.URL+twinPath, "token-a", tc.body)
-			if respL.StatusCode != tc.want || respS.StatusCode != tc.want {
-				t.Fatalf("%s %s: leases %d, sandboxes %d, want %d",
-					tc.method, tc.path, respL.StatusCode, respS.StatusCode, tc.want)
+			if respL.StatusCode != tc.want {
+				t.Fatalf("%s %s: %d, want %d", tc.method, tc.path, respL.StatusCode, tc.want)
 			}
 		})
 	}
@@ -234,43 +230,31 @@ func TestLeaseAliasStream(t *testing.T) {
 	}
 }
 
-// TestLeaseAliasNotRewritten pins the segment boundary: /api/leasesX is
-// not a lease path, is not rewritten, and 404s like any unknown route.
-func TestLeaseAliasNotRewritten(t *testing.T) {
+// TestLeasePathPins the segment boundary: /api/leasesX is not a lease
+// path and 404s like any unknown route.
+func TestLeasePathSegmentBoundary(t *testing.T) {
 	ts, _ := newTestServer(t)
 
 	for _, p := range []string{"/api/leasesX", "/api/leasesaw"} {
 		resp, _ := doReq(t, "GET", ts.URL+p, "token-a", nil)
 		if resp.StatusCode != http.StatusNotFound {
-			t.Fatalf("GET %s = %d, want 404 (no rewrite)", p, resp.StatusCode)
+			t.Fatalf("GET %s = %d, want 404", p, resp.StatusCode)
 		}
 		resp, _ = doReq(t, "POST", ts.URL+p, "token-a", map[string]any{"image": "py-base"})
 		if resp.StatusCode != http.StatusNotFound {
-			t.Fatalf("POST %s = %d, want 404 (no rewrite)", p, resp.StatusCode)
+			t.Fatalf("POST %s = %d, want 404", p, resp.StatusCode)
 		}
 	}
 }
 
-// TestLeaseAliasMetricLabels pins that the alias does not split the
-// request counters in two: a request through /api/leases records the
-// same /api/sandboxes path label as its twin.
-func TestLeaseAliasMetricLabels(t *testing.T) {
-	if got, want := rewriteLeasePath("/api/leases"), "/api/sandboxes"; got != want {
-		t.Fatalf("rewriteLeasePath(/api/leases) = %q, want %q", got, want)
-	}
-	if got, want := rewriteLeasePath("/api/leases/x/exec"), "/api/sandboxes/x/exec"; got != want {
-		t.Fatalf("rewriteLeasePath(/api/leases/x/exec) = %q, want %q", got, want)
-	}
-	for _, p := range []string{"/api/leasesX", "/api/leasesaw", "/api/sandboxes"} {
-		if got := rewriteLeasePath(p); got != p {
-			t.Fatalf("rewriteLeasePath(%q) = %q, want it unchanged", p, got)
-		}
-	}
-	if got, want := normalizePath("/api/leases/0123456789abcdef0123456789abcdef/exec"), "/api/sandboxes/:id/exec"; got != want {
-		t.Fatalf("normalizePath(lease alias) = %q, want %q", got, want)
+// TestLeaseMetricLabels pins the path labels the request counters
+// record: one series per route, never per lease id or guest path.
+func TestLeaseMetricLabels(t *testing.T) {
+	if got, want := normalizePath("/api/leases/0123456789abcdef0123456789abcdef/exec"), "/api/leases/:id/exec"; got != want {
+		t.Fatalf("normalizePath(exec) = %q, want %q", got, want)
 	}
 	// The files tail is a guest path: it must not enter the metric label.
-	if got, want := normalizePath("/api/leases/0123456789abcdef0123456789abcdef/files/etc/secret"), "/api/sandboxes/:id/files"; got != want {
+	if got, want := normalizePath("/api/leases/0123456789abcdef0123456789abcdef/files/etc/secret"), "/api/leases/:id/files"; got != want {
 		t.Fatalf("normalizePath(files) = %q, want %q", got, want)
 	}
 }

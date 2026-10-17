@@ -21,7 +21,7 @@ import (
 // dialStream opens a WebSocket to /stream on ts with the given headers.
 func dialStream(t *testing.T, ts *httptest.Server, id string, header http.Header) *websocket.Conn {
 	t.Helper()
-	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/api/sandboxes/" + id + "/stream"
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/api/leases/" + id + "/stream"
 	ws, _, err := websocket.DefaultDialer.Dial(wsURL, header)
 	if err != nil {
 		t.Fatalf("dial stream: %v", err)
@@ -113,7 +113,7 @@ func (h *fakeProcessHandle) readText(t *testing.T) string {
 func TestStreamBinaryFraming(t *testing.T) {
 	ts, _, db, sub := newTestServerWithService(t)
 	seedImage(t, db, "py-base", 2048)
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "ttl": 300})
 	id := create["id"].(string)
 
 	ws := dialStream(t, ts, id, bearerHeader("token-a", ""))
@@ -178,7 +178,7 @@ func TestStreamBinaryFraming(t *testing.T) {
 func TestStreamKillControl(t *testing.T) {
 	ts, _, db, sub := newTestServerWithService(t)
 	seedImage(t, db, "py-base", 2048)
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "ttl": 300})
 	id := create["id"].(string)
 
 	ws := dialStream(t, ts, id, bearerHeader("token-a", ""))
@@ -255,15 +255,15 @@ func TestStreamSSHShareWithGatewayToken(t *testing.T) {
 	}
 	friendID := body["user"].(map[string]any)["id"].(string)
 
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "owner-tok", map[string]any{"image": "py-base", "ttl": 300})
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "owner-tok", map[string]any{"image": "py-base", "ttl": 300})
 	id := create["id"].(string)
 
 	// An ssh share alone does not open /stream for a plain user token.
-	if rec, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/share", "owner-tok",
+	if rec, body := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/share", "owner-tok",
 		map[string]any{"grantee": friendID, "mode": "ssh"}); rec.StatusCode != http.StatusCreated {
 		t.Fatalf("share: %d %v", rec.StatusCode, body)
 	}
-	if resp, _ := doReq(t, "GET", ts.URL+"/api/sandboxes/"+id+"/stream", "friend-tok", nil); resp.StatusCode != http.StatusNotFound {
+	if resp, _ := doReq(t, "GET", ts.URL+"/api/leases/"+id+"/stream", "friend-tok", nil); resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("plain-token stream over ssh share = %d, want 404", resp.StatusCode)
 	}
 

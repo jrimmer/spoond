@@ -17,7 +17,6 @@ func sample() map[string]any {
 		"api": map[string]any{
 			"base":    "/api",
 			"primary": "/api/leases",
-			"alias":   "/api/sandboxes",
 			"auth":    "Bearer user token",
 		},
 		"endpoints": []map[string]any{

@@ -329,7 +329,7 @@ func TestBuildSizeFailedWalkStoresZero(t *testing.T) {
 	}
 
 	captureLogs(t, svc)
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+lease.ID+"/checkpoint", "token-a", nil)
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+lease.ID+"/checkpoint", "token-a", nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("checkpoint: status %d: %v", resp.StatusCode, body)
 	}
@@ -401,7 +401,7 @@ func seedSnapshotLease(t *testing.T, root string) (*httptest.Server, *Service, *
 	ts, svc, db, sub := newTestServerWithService(t)
 	svc.cfg.TemplateStoragePath = root
 	roomyDisk(svc) // the create's root disk and the checkpoints must fit (FS3b)
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("create: status %d: %v", resp.StatusCode, body)
 	}
@@ -435,7 +435,7 @@ func TestCheckpointBuildSizeAtWriteTime(t *testing.T) {
 		return id, substrate.BuildRefs{}, nil
 	}
 
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+lease.ID+"/checkpoint", "token-a", nil)
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+lease.ID+"/checkpoint", "token-a", nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("checkpoint: status %d: %v", resp.StatusCode, body)
 	}
@@ -490,7 +490,7 @@ func TestPauseBuildSizeAtWriteTime(t *testing.T) {
 		return id, substrate.BuildRefs{}, nil
 	}
 
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+lease.ID+"/suspend", "token-a", nil)
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+lease.ID+"/suspend", "token-a", nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("suspend: status %d: %v", resp.StatusCode, body)
 	}
@@ -521,7 +521,7 @@ func TestBuildSizeMeasurementFailureStoresZero(t *testing.T) {
 		return e2b.NewUUID(), substrate.BuildRefs{}, nil
 	}
 
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+lease.ID+"/checkpoint", "token-a", nil)
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+lease.ID+"/checkpoint", "token-a", nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("checkpoint: status %d: %v", resp.StatusCode, body)
 	}
@@ -605,7 +605,7 @@ func TestCloneBuildSizeAtWriteTime(t *testing.T) {
 		return id, substrate.BuildRefs{}, nil
 	}
 
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+lease.ID+"/clone", "token-a", nil)
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+lease.ID+"/clone", "token-a", nil)
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("clone: status %d: %v", resp.StatusCode, body)
 	}

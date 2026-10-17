@@ -90,7 +90,7 @@ func TestLLMGatewayPerUserKey(t *testing.T) {
 	})
 
 	// Create a persistent lease owned by the identity user.
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "owner-tok", map[string]any{"image": "py-base", "persistent": true})
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "owner-tok", map[string]any{"image": "py-base", "persistent": true})
 	id := create["id"].(string)
 	llmURL := ts.URL + "/llm/" + id + "/openai/chat/completions"
 
@@ -126,7 +126,7 @@ func TestLLMGatewayOpenWhenNoKey(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "owner-tok", map[string]any{"image": "py-base", "persistent": true})
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "owner-tok", map[string]any{"image": "py-base", "persistent": true})
 	id := create["id"].(string)
 	llmURL := ts.URL + "/llm/" + id + "/openai/chat/completions"
 
@@ -171,7 +171,7 @@ func TestLLMGatewayPerUserConcurrencyCap(t *testing.T) {
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "owner-tok", map[string]any{"image": "py-base", "persistent": true})
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "owner-tok", map[string]any{"image": "py-base", "persistent": true})
 	id := create["id"].(string)
 	llmURL := ts.URL + "/llm/" + id + "/openai/chat/completions"
 

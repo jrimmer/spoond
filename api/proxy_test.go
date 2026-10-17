@@ -239,7 +239,7 @@ func TestProxyLeaseHostRoutesBeforeGuestService(t *testing.T) {
 // request (#145 D2) instead of the old 409.
 func TestProxyRefusesEnvdPortAndResumesSuspended(t *testing.T) {
 	ts, svc, db, _ := newTestServerWithService(t)
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a",
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a",
 		map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
 	id := create["id"].(string)
 
@@ -255,7 +255,7 @@ func TestProxyRefusesEnvdPortAndResumesSuspended(t *testing.T) {
 
 	// Suspended → the proxy resumes on use; with the fake sandbox back
 	// and no real upstream, the request fails downstream, never 409.
-	resp, _ := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/suspend", "token-a", nil)
+	resp, _ := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/suspend", "token-a", nil)
 	if resp.StatusCode != 200 {
 		t.Fatalf("suspend status %d", resp.StatusCode)
 	}

@@ -46,7 +46,7 @@ ok "lease $L"
 
 echo
 echo "== stat/pretty: backend API path =="
-STAT=$(api GET "/api/sandboxes/$L/stat")
+STAT=$(api GET "/api/leases/$L/stat")
 assert_contains "stat returns cpu" "$STAT" '"cpu"'
 assert_contains "stat returns mem" "$STAT" '"used_mib"'
 assert_contains "stat returns net" "$STAT" '"rx_bytes"'

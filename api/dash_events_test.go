@@ -132,7 +132,7 @@ func TestCreatedEventCarriesJobLabel(t *testing.T) {
 	}
 	// The comment POST carries the owner's own token, so a create racing
 	// another consumer's comment request can never receive the label.
-	resp, _ := doReq(t, "POST", ts.URL+"/api/sandboxes/"+l1.ID+"/comment", "token-a",
+	resp, _ := doReq(t, "POST", ts.URL+"/api/leases/"+l1.ID+"/comment", "token-a",
 		map[string]any{"comment": "forgejo job 42 https://code.example.com/site/actions/runs/9/jobs/42"})
 	if resp.StatusCode != 200 {
 		t.Fatalf("comment POST status %d, want 200", resp.StatusCode)
@@ -157,14 +157,14 @@ func TestCreatedEventCommentCap(t *testing.T) {
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{
 		"image": "py-base", "ttl": 60, "persistent": true})
 	id := create["id"].(string)
 	// A comment set through the owner's route lands whole: the label the
 	// runner sends after its create answers is a single owner's own
 	// comment, never cut.
 	label := "forgejo job 43 " + strings.Repeat("u", 200)
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/comment", "token-a", map[string]any{"comment": label})
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/comment", "token-a", map[string]any{"comment": label})
 	if resp.StatusCode != 200 || body["comment"] != label {
 		t.Fatalf("comment set/clear failed: %d, comment %d bytes (want %d)", resp.StatusCode,
 			len(fmt.Sprint(body["comment"])), len(label))

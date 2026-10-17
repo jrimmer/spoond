@@ -63,15 +63,15 @@ api() { # api <method> <path> [data]
 new_lease() {
   local image="${1:-dev-base}" ttl="${2:-120}" pers="${3:-false}"
   local body
-  body=$(api POST /api/sandboxes "{\"image\":\"$image\",\"ttl\":$ttl,\"persistent\":$pers}")
+  body=$(api POST /api/leases "{\"image\":\"$image\",\"ttl\":$ttl,\"persistent\":$pers}")
   echo "$body" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null
 }
 
-del_lease() { api DELETE "/api/sandboxes/$1" >/dev/null; }
+del_lease() { api DELETE "/api/leases/$1" >/dev/null; }
 
 # lease_image <id> -> echoes image tag
 lease_image() {
-  api GET "/api/sandboxes" | python3 -c "
+  api GET "/api/leases" | python3 -c "
 import sys,json
 d=json.load(sys.stdin)
 for l in d.get('sandboxes', d):
@@ -85,7 +85,7 @@ wait_agent() {
   for i in $(seq 1 "$tries"); do
     sleep 3
     local out
-    out=$(api POST "/api/sandboxes/$id/exec" "{\"cmd\":\"echo ready\"}" 2>/dev/null)
+    out=$(api POST "/api/leases/$id/exec" "{\"cmd\":\"echo ready\"}" 2>/dev/null)
     if echo "$out" | grep -q "$needle"; then return 0; fi
   done
   return 1

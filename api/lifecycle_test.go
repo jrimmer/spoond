@@ -460,12 +460,12 @@ func TestRestartNonPersistent(t *testing.T) {
 func TestStreamRelayFrames(t *testing.T) {
 	ts, _, db, sub := newTestServerWithService(t)
 	seedImage(t, db, "py-base", 2048)
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "ttl": 300})
 	id := create["id"].(string)
 
 	dial := func(t *testing.T) *websocket.Conn {
 		t.Helper()
-		wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/api/sandboxes/" + id + "/stream"
+		wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/api/leases/" + id + "/stream"
 		h := map[string][]string{"Authorization": {"Bearer token-a"}}
 		ws, _, err := websocket.DefaultDialer.Dial(wsURL, h)
 		if err != nil {

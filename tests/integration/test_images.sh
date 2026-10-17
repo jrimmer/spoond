@@ -8,9 +8,9 @@ echo "== images: go-base (Go toolchain) =="
 L=$(new_lease go-base 120 false)
 [ -n "$L" ] && ok "create go-base lease ($L)" || bad "create go-base lease"
 sleep 3
-OUT=$(api POST "/api/sandboxes/$L/exec" '{"cmd":"export GOTOOLCHAIN=local; go version"}')
+OUT=$(api POST "/api/leases/$L/exec" '{"cmd":"export GOTOOLCHAIN=local; go version"}')
 assert_contains "go version runs" "$OUT" "go1.25"
-OUT=$(api POST "/api/sandboxes/$L/exec" '{"cmd":"export GOTOOLCHAIN=local GOCACHE=/root/.cache GOPATH=/root/go HOME=/root; cd /tmp && printf \"package main\\nfunc main(){println(\\\"GO_COMPILE_OK\\\")}\\n\" > m.go && go run m.go"}')
+OUT=$(api POST "/api/leases/$L/exec" '{"cmd":"export GOTOOLCHAIN=local GOCACHE=/root/.cache GOPATH=/root/go HOME=/root; cd /tmp && printf \"package main\\nfunc main(){println(\\\"GO_COMPILE_OK\\\")}\\n\" > m.go && go run m.go"}')
 assert_contains "go compiles+runs code" "$OUT" "GO_COMPILE_OK"
 del_lease "$L"
 
@@ -19,9 +19,9 @@ echo "== images: py-base (Python toolchain) =="
 L=$(new_lease py-base 120 false)
 [ -n "$L" ] && ok "create py-base lease ($L)" || bad "create py-base lease"
 sleep 3
-OUT=$(api POST "/api/sandboxes/$L/exec" '{"cmd":"python3 -c \"print(\\\"PY_OK\\\")\""}')
+OUT=$(api POST "/api/leases/$L/exec" '{"cmd":"python3 -c \"print(\\\"PY_OK\\\")\""}')
 assert_contains "python3 runs" "$OUT" "PY_OK"
-OUT=$(api POST "/api/sandboxes/$L/exec" '{"cmd":"pip --version"}')
+OUT=$(api POST "/api/leases/$L/exec" '{"cmd":"pip --version"}')
 assert_contains "pip available" "$OUT" "pip"
 del_lease "$L"
 
@@ -30,7 +30,7 @@ echo "== images: elixir-base =="
 L=$(new_lease elixir-base 120 false)
 [ -n "$L" ] && ok "create elixir-base lease ($L)" || bad "create elixir-base lease"
 sleep 3
-OUT=$(api POST "/api/sandboxes/$L/exec" '{"cmd":"elixir --version"}')
+OUT=$(api POST "/api/leases/$L/exec" '{"cmd":"elixir --version"}')
 assert_contains "elixir runs" "$OUT" "Elixir"
 del_lease "$L"
 
@@ -39,7 +39,7 @@ echo "== images: llm-review =="
 L=$(new_lease llm-review 120 false)
 [ -n "$L" ] && ok "create llm-review lease ($L)" || bad "create llm-review lease"
 sleep 3
-OUT=$(api POST "/api/sandboxes/$L/exec" '{"cmd":"echo LLM_REVIEW_OK"}')
+OUT=$(api POST "/api/leases/$L/exec" '{"cmd":"echo LLM_REVIEW_OK"}')
 assert_contains "llm-review shell works" "$OUT" "LLM_REVIEW_OK"
 del_lease "$L"
 
@@ -48,9 +48,9 @@ echo "== images: dev-base (interactive: tmux + guest init) =="
 L=$(new_lease dev-base 120 false)
 [ -n "$L" ] && ok "create dev-base lease ($L)" || bad "create dev-base lease"
 sleep 3
-OUT=$(api POST "/api/sandboxes/$L/exec" '{"cmd":"test -f /run/spoond-guest-ready && echo GUEST_INIT_OK"}')
+OUT=$(api POST "/api/leases/$L/exec" '{"cmd":"test -f /run/spoond-guest-ready && echo GUEST_INIT_OK"}')
 assert_contains "guest init ran" "$OUT" "GUEST_INIT_OK"
-OUT=$(api POST "/api/sandboxes/$L/exec" '{"cmd":"which tmux && echo TMUX_OK"}')
+OUT=$(api POST "/api/leases/$L/exec" '{"cmd":"which tmux && echo TMUX_OK"}')
 assert_contains "tmux installed" "$OUT" "TMUX_OK"
 del_lease "$L"
 

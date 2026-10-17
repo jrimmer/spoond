@@ -893,10 +893,6 @@ func Main(args []string) int {
 	if n := envIntOr("LLM_MAX_CONCURRENT_PER_USER", 0); n > 0 {
 		srv.SetLLMMaxConcurrent(n)
 	}
-	// Security review #37 C2: when an identity store is present, deny
-	// /llm/ for identity users WITHOUT an LLM key unless the operator
-	// explicitly opts into the pre-U8 capability model.
-	srv.SetLLMRequireKey(os.Getenv("LLM_OPEN_LEGACY") == "")
 	// Public proxy auth (U7/T7): off (default) = capability model;
 	// forward-auth = require X-Proxy-Auth secret + Remote-User identity
 	// on every hostname-routed proxy request. The secret is shared with

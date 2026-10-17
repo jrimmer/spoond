@@ -77,7 +77,7 @@ func startCreate(t *testing.T, h http.Handler, ctx context.Context, token, body 
 	t.Helper()
 	ch := make(chan createResult, 1)
 	go func() {
-		req := httptest.NewRequestWithContext(ctx, "POST", "/api/sandboxes", strings.NewReader(body))
+		req := httptest.NewRequestWithContext(ctx, "POST", "/api/leases", strings.NewReader(body))
 		req.Header.Set("Authorization", "Bearer "+token)
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
@@ -110,7 +110,7 @@ func waitResult(t *testing.T, ch <-chan createResult) createResult {
 // deleteLease deletes a lease through the API.
 func deleteLease(t *testing.T, h http.Handler, token, id string) {
 	t.Helper()
-	req := httptest.NewRequest("DELETE", "/api/sandboxes/"+id, nil)
+	req := httptest.NewRequest("DELETE", "/api/leases/"+id, nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)

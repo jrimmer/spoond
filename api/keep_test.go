@@ -118,7 +118,7 @@ func TestCheckpointKeepRoute(t *testing.T) {
 	seedImage(t, db, "py-base", 2048)
 	roomyDisk(svc) // the create and every checkpoint must fit (FS3b)
 
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a",
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a",
 		map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
 	id := create["id"].(string)
 

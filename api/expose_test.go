@@ -47,7 +47,7 @@ func TestCreateExposePorts(t *testing.T) {
 	ts, _ := newTestServer(t)
 
 	t.Run("reserved port is refused", func(t *testing.T) {
-		resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a",
+		resp, body := doReq(t, "POST", ts.URL+"/api/leases", "token-a",
 			map[string]any{"image": "py-base", "expose_ports": []int{49983}})
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Fatalf("status %d, body %v", resp.StatusCode, body)
@@ -55,7 +55,7 @@ func TestCreateExposePorts(t *testing.T) {
 	})
 
 	t.Run("exposure is supported", func(t *testing.T) {
-		resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a",
+		resp, body := doReq(t, "POST", ts.URL+"/api/leases", "token-a",
 			map[string]any{"image": "py-base", "expose_ports": []int{9042, 80}})
 		if resp.StatusCode != http.StatusCreated {
 			t.Fatalf("status %d, body %v", resp.StatusCode, body)

@@ -110,7 +110,7 @@ func TestReconcileCrashListFailureChangesNothing(t *testing.T) {
 // lease_lost and the reason, and GET names the reason.
 func TestLostLeaseExec410(t *testing.T) {
 	ts, svc, _, _ := newTestServerWithService(t)
-	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "ttl": 300})
 	id := create["id"].(string)
 
 	svc.store.mu.Lock()
@@ -118,7 +118,7 @@ func TestLostLeaseExec410(t *testing.T) {
 	svc.store.leases[id].LostReason = "substrate crashed"
 	svc.store.mu.Unlock()
 
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/exec", "token-a", map[string]any{"cmd": "echo hi"})
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/exec", "token-a", map[string]any{"cmd": "echo hi"})
 	if resp.StatusCode != http.StatusGone {
 		t.Fatalf("exec on a lost lease = %d (%v), want 410", resp.StatusCode, body)
 	}
@@ -132,7 +132,7 @@ func TestLostLeaseExec410(t *testing.T) {
 		}
 	}
 	// GET shows the lost state and the reason.
-	_, detail := doReq(t, "GET", ts.URL+"/api/sandboxes/"+id, "token-a", nil)
+	_, detail := doReq(t, "GET", ts.URL+"/api/leases/"+id, "token-a", nil)
 	if detail["state"] != "lost" || detail["lost_reason"] != "substrate crashed" {
 		t.Fatalf("detail = %v, want state lost and lost_reason substrate crashed", detail)
 	}
@@ -159,12 +159,12 @@ func TestRecoveredLeaseStillServed(t *testing.T) {
 	}
 
 	// Exec works on a recovered lease...
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+l.ID+"/exec", "token-a", map[string]any{"cmd": "echo hi"})
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+l.ID+"/exec", "token-a", map[string]any{"cmd": "echo hi"})
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("exec on a recovered lease = %d (%v), want 200", resp.StatusCode, body)
 	}
 	// ...and the detail shows the recovered state.
-	resp, detail := doReq(t, "GET", ts.URL+"/api/sandboxes/"+l.ID, "token-a", nil)
+	resp, detail := doReq(t, "GET", ts.URL+"/api/leases/"+l.ID, "token-a", nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("get recovered lease = %d", resp.StatusCode)
 	}
@@ -172,7 +172,7 @@ func TestRecoveredLeaseStillServed(t *testing.T) {
 		t.Fatalf("detail state = %v, want recovered", detail["state"])
 	}
 	// The list shows it too.
-	_, list := doReq(t, "GET", ts.URL+"/api/sandboxes", "token-a", nil)
+	_, list := doReq(t, "GET", ts.URL+"/api/leases", "token-a", nil)
 	rows := list["sandboxes"].([]any)
 	var listed bool
 	for _, r := range rows {

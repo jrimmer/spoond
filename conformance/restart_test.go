@@ -134,7 +134,7 @@ func TestR2_OrchestratorCrash(t *testing.T) {
 			if recovered[id] {
 				continue
 			}
-			st, body, err := cl.do("GET", "/api/sandboxes/"+id, nil)
+			st, body, err := cl.do("GET", "/api/leases/"+id, nil)
 			if err != nil || st != 200 {
 				continue
 			}
