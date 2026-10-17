@@ -1,20 +1,28 @@
 // Command spoond-images is spoond's image pipeline (U07): every image is
 // defined by a Dockerfile in images/, built with docker, pushed to the
 // local registry, and turned into an E2B template build recorded in
-// SQLite.
+// SQLite. A release machine republishes the built images to a remote
+// registry (publish), and an install pulls them from there instead of
+// running docker build (build --base-registry).
 //
 // Usage:
 //
-//	spoond images build <name>   build one image
-//	spoond images build --all    build every manifest entry with baked: true
-//	spoond images list           print the image catalog
+//	spoond images build <name>  build one image
+//	spoond images build --all   build every manifest entry with baked: true
+//	spoond images list          print the image catalog
+//	spoond images publish <name> | --all
+//	                            republish built images to --prefix
 //
 // Flags:
 //
-//	--manifest  image manifest path (default images/manifest.yaml)
-//	--context   docker build context directory (default images)
-//	--db        SQLite database path (default $SPOOND_DB_PATH)
-//	--registry  registry to push to (default $IMAGE_REGISTRY, localhost:5000)
+//	--manifest       image manifest path (default images/manifest.yaml)
+//	--context        docker build context directory (default images)
+//	--db             SQLite database path (default $SPOOND_DB_PATH)
+//	--registry       registry to push to (default $IMAGE_REGISTRY, localhost:5000)
+//	--base-registry  pull <prefix>/<name>:<base-tag> from here instead of docker build
+//	--base-tag       tag pulled with --base-registry (default latest)
+//	--prefix         publish destination: images go to <prefix>/<name>:<tag>
+//	--tag            publish tag (default latest)
 //
 // An entry's warm_sizes name presets from $SIZE_PRESETS (the backend's
 // setting; default sizes.DefaultSpec): each gets one more template build
@@ -59,6 +67,9 @@ const (
 // (spoond-rzz).
 var buildTimeout = substrate.BuildTimeoutFromEnv()
 
+// Every docker invocation goes through these vars — the seam tests
+// replace to record the commands without running docker.
+
 // runCmd streams a command's stdout (docker build, docker push).
 var runCmd = func(ctx context.Context, stdout io.Writer, name string, args ...string) error {
 	cmd := exec.CommandContext(ctx, name, args...)
@@ -77,6 +88,19 @@ var runOut = func(ctx context.Context, name string, args ...string) (string, err
 		return "", err
 	}
 	return strings.TrimSpace(buf.String()), nil
+}
+
+// runCapture streams a command's stdout like runCmd and captures its
+// stderr too, so a failed docker pull or push can be classified (an
+// image missing from the local registry vs. a registry that needs
+// `docker login`) while the user still sees docker's output.
+var runCapture = func(ctx context.Context, stdout io.Writer, name string, args ...string) (string, error) {
+	var stderr bytes.Buffer
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Stdout = stdout
+	cmd.Stderr = io.MultiWriter(os.Stderr, &stderr)
+	err := cmd.Run()
+	return stderr.String(), err
 }
 
 // newSubstrate builds the E2B client from the environment; tests
@@ -140,7 +164,11 @@ func Main(args []string) int {
 	contextDir := fs.String("context", "images", "docker build context directory")
 	dbPath := fs.String("db", envOr("SPOOND_DB_PATH", "/var/lib/spoond/spoond.db"), "SQLite database path")
 	registry := fs.String("registry", envOr("IMAGE_REGISTRY", "localhost:5000"), "image registry")
-	all := fs.Bool("all", false, "build every manifest entry with baked: true")
+	all := fs.Bool("all", false, "build or publish every manifest entry with baked: true")
+	baseRegistry := fs.String("base-registry", "", "pull <prefix>/<name>:<base-tag> from here instead of docker build")
+	baseTag := fs.String("base-tag", "latest", "tag pulled with --base-registry")
+	prefix := fs.String("prefix", "", "publish destination prefix: images go to <prefix>/<name>:<tag>")
+	tag := fs.String("tag", "latest", "publish tag")
 
 	// Parse, harvesting positional arguments (the flag package stops at
 	// the first one), until everything is consumed.
@@ -167,7 +195,12 @@ func Main(args []string) int {
 	case "list":
 		return cmdList(ctx, *dbPath)
 	case "build":
-		return cmdBuild(ctx, positional[1:], *all, *manifestPath, *contextDir, *dbPath, *registry)
+		return cmdBuild(ctx, positional[1:], *all, *manifestPath, *dbPath, buildOpts{
+			registry: *registry, contextDir: *contextDir,
+			baseRegistry: *baseRegistry, baseTag: *baseTag,
+		})
+	case "publish":
+		return cmdPublish(ctx, positional[1:], *all, *manifestPath, *registry, *prefix, *tag)
 	default:
 		fmt.Fprintf(os.Stderr, "spoond images: unknown command %q\n\n", positional[0])
 		usage(fs)
@@ -176,7 +209,7 @@ func Main(args []string) int {
 }
 
 func usage(fs *flag.FlagSet) {
-	fmt.Fprintf(os.Stderr, "usage: spoond images [-manifest path] [-context dir] [-db path] [-registry host:port] <command>\n\ncommands:\n  build <name>  build one image and turn it into an E2B template build\n  build --all   build every manifest entry with baked: true\n  list          print the image catalog\n\nflags:\n")
+	fmt.Fprintf(os.Stderr, "usage: spoond images [-manifest path] [-context dir] [-db path] [-registry host:port] <command>\n\ncommands:\n  build <name>  build one image and turn it into an E2B template build\n  build --all   build every manifest entry with baked: true\n  list          print the image catalog\n  publish <name> | --all\n                republish built images to --prefix as <prefix>/<name>:<tag>\n\nflags:\n")
 	fs.PrintDefaults()
 }
 
@@ -193,7 +226,7 @@ func loadManifest(path string) (manifest, error) {
 	return m, nil
 }
 
-func cmdBuild(ctx context.Context, names []string, all bool, manifestPath, contextDir, dbPath, registry string) int {
+func cmdBuild(ctx context.Context, names []string, all bool, manifestPath, dbPath string, opts buildOpts) int {
 	if !all && len(names) == 0 {
 		fmt.Fprintln(os.Stderr, "spoond images: build needs a name or --all")
 		return 2
@@ -261,12 +294,25 @@ func cmdBuild(ctx context.Context, names []string, all bool, manifestPath, conte
 
 	fmt.Fprintf(os.Stderr, "spoond images: build timeout is %s (SPOOND_BUILD_TIMEOUT)\n", buildTimeout)
 	for _, img := range targets {
-		if err := buildOne(ctx, db, sub, img, presets, registry, contextDir, os.Stdout); err != nil {
+		if err := buildOne(ctx, db, sub, img, presets, opts, os.Stdout); err != nil {
 			fmt.Fprintf(os.Stderr, "spoond images: %s: %v\n", img.Name, err)
 			return 1
 		}
 	}
 	return 0
+}
+
+// buildOpts are the docker-facing build options: the registry to push
+// to, the build context, and where to pull a prebuilt base image from
+// (R5) instead of building it — baseRegistry empty builds.
+type buildOpts struct {
+	registry   string
+	contextDir string
+	// baseRegistry, when set, replaces docker build with a pull of
+	// <baseRegistry>/<name>:<baseTag> (default latest) re-tagged to the
+	// registry ref; a failed pull falls back to the local build.
+	baseRegistry string
+	baseTag      string
 }
 
 // templateBuildSize measures a template build's directory under the
@@ -371,6 +417,24 @@ func resolveBase(ctx context.Context, db *store.DB, img manifestImage) (manifest
 	return img, flags, nil
 }
 
+// pullBase pulls <baseRegistry>/<name>:<baseTag> and re-tags it to ref
+// (the registry tag the rest of buildOne pushes). It reports whether the
+// image was pulled, and a fatal error (the tag failed). A failed pull is
+// not fatal: it prints one line and the caller falls back to the local
+// docker build — the published tags may not cover this image (or
+// version) yet.
+func pullBase(ctx context.Context, name, baseRegistry, baseTag, ref string, stdout io.Writer) (bool, error) {
+	from := baseRegistry + "/" + name + ":" + baseTag
+	if _, err := runCapture(ctx, stdout, "docker", "pull", from); err != nil {
+		fmt.Fprintf(stdout, "spoond images: %s: no image at %s, building locally\n", name, from)
+		return false, nil
+	}
+	if err := runCmd(ctx, stdout, "docker", "tag", from, ref); err != nil {
+		return false, fmt.Errorf("docker tag: %w", err)
+	}
+	return true, nil
+}
+
 // warmPresets resolves an image's warm_sizes against the presets. An
 // unknown name, or a preset whose memory is below the image's effective
 // minimum, is an error, so a bad manifest entry fails before any build.
@@ -394,11 +458,11 @@ func warmPresets(img manifestImage, presets []sizes.Preset) ([]sizes.Preset, err
 // E2B template build at the image's default size and one more per warm
 // size, recording everything in the catalog. On failure the build row is
 // marked failed and the image row keeps describing the last good build.
-func buildOne(ctx context.Context, db *store.DB, sub substrate.Substrate, img manifestImage, presets []sizes.Preset, registry, contextDir string, stdout io.Writer) error {
+func buildOne(ctx context.Context, db *store.DB, sub substrate.Substrate, img manifestImage, presets []sizes.Preset, opts buildOpts, stdout io.Writer) error {
 	if img.Dockerfile == "" {
 		return errors.New("manifest entry has no dockerfile")
 	}
-	ref := registry + "/" + img.Name + ":latest"
+	ref := opts.registry + "/" + img.Name + ":latest"
 
 	img, buildArgs, err := resolveBase(ctx, db, img)
 	if err != nil {
@@ -409,12 +473,28 @@ func buildOne(ctx context.Context, db *store.DB, sub substrate.Substrate, img ma
 		return err
 	}
 
-	// Build and push with docker, streaming the output.
-	args := []string{"build", "--pull"}
-	args = append(args, buildArgs...)
-	args = append(args, "-f", filepath.Join(contextDir, img.Dockerfile), "-t", ref, contextDir)
-	if err := runCmd(ctx, stdout, "docker", args...); err != nil {
-		return fmt.Errorf("docker build: %w", err)
+	// With --base-registry the image comes from the publish prefix (R5):
+	// pull the published tag, re-tag it to the registry ref, and skip
+	// the local docker build. resolveBase already ran above: it inherits
+	// the entry's base-image shape and env, and its build args are used
+	// only by the local build this may fall back to.
+	pulled := false
+	if opts.baseRegistry != "" {
+		var err error
+		pulled, err = pullBase(ctx, img.Name, opts.baseRegistry, opts.baseTag, ref, stdout)
+		if err != nil {
+			return err
+		}
+	}
+	if !pulled {
+		// Build locally: docker build with the manifest's build args,
+		// streaming the output.
+		args := []string{"build", "--pull"}
+		args = append(args, buildArgs...)
+		args = append(args, "-f", filepath.Join(opts.contextDir, img.Dockerfile), "-t", ref, opts.contextDir)
+		if err := runCmd(ctx, stdout, "docker", args...); err != nil {
+			return fmt.Errorf("docker build: %w", err)
+		}
 	}
 	if err := runCmd(ctx, stdout, "docker", "push", ref); err != nil {
 		return fmt.Errorf("docker push: %w", err)

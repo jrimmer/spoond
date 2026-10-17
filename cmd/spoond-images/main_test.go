@@ -86,6 +86,10 @@ func setup(t *testing.T, sub *stubSubstrate) *store.DB {
 	runOut = func(ctx context.Context, name string, args ...string) (string, error) {
 		return "localhost:5000/py-base@sha256:" + strings.Repeat("ab", 32), nil
 	}
+	runCapture = func(ctx context.Context, stdout io.Writer, name string, args ...string) (string, error) {
+		cmdLog = append(cmdLog, name+" "+strings.Join(args, " "))
+		return "", nil
+	}
 	newSubstrate = func() (substrate.Substrate, error) { return sub, nil }
 	db, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
@@ -108,7 +112,7 @@ func TestBuildOneSuccess(t *testing.T) {
 	ctx := context.Background()
 
 	out := &bytes.Buffer{}
-	if err := buildOne(ctx, db, sub, testImage, sizes.Default(), "localhost:5000", "images", out); err != nil {
+	if err := buildOne(ctx, db, sub, testImage, sizes.Default(), buildOpts{registry: "localhost:5000", contextDir: "images"}, out); err != nil {
 		t.Fatalf("buildOne: %v", err)
 	}
 
@@ -186,7 +190,7 @@ func TestTemplateBuildSizeAtWriteTime(t *testing.T) {
 	db := setup(t, sub)
 	ctx := context.Background()
 
-	if err := buildOne(ctx, db, sub, testImage, sizes.Default(), "localhost:5000", "images", &bytes.Buffer{}); err != nil {
+	if err := buildOne(ctx, db, sub, testImage, sizes.Default(), buildOpts{registry: "localhost:5000", contextDir: "images"}, &bytes.Buffer{}); err != nil {
 		t.Fatalf("buildOne: %v", err)
 	}
 
@@ -228,7 +232,7 @@ func TestBuildOneFailureKeepsImageRow(t *testing.T) {
 	}
 
 	sub.err = errors.New("template build failed: last logs:\nstep 3 died")
-	err := buildOne(ctx, db, sub, testImage, sizes.Default(), "localhost:5000", "images", &bytes.Buffer{})
+	err := buildOne(ctx, db, sub, testImage, sizes.Default(), buildOpts{registry: "localhost:5000", contextDir: "images"}, &bytes.Buffer{})
 	if err == nil {
 		t.Fatal("buildOne succeeded, want failure")
 	}
@@ -267,7 +271,7 @@ func TestBuildOneFailureUpdateDetached(t *testing.T) {
 	ctx, c := context.WithCancel(context.Background())
 	cancel = c
 
-	if err := buildOne(ctx, db, sub, testImage, sizes.Default(), "localhost:5000", "images", &bytes.Buffer{}); err == nil {
+	if err := buildOne(ctx, db, sub, testImage, sizes.Default(), buildOpts{registry: "localhost:5000", contextDir: "images"}, &bytes.Buffer{}); err == nil {
 		t.Fatal("buildOne succeeded, want a cancelled build to fail")
 	}
 
@@ -290,7 +294,7 @@ func TestTemplateIDStableAcrossBuilds(t *testing.T) {
 	db := setup(t, sub)
 	ctx := context.Background()
 
-	if err := buildOne(ctx, db, sub, testImage, sizes.Default(), "localhost:5000", "images", &bytes.Buffer{}); err != nil {
+	if err := buildOne(ctx, db, sub, testImage, sizes.Default(), buildOpts{registry: "localhost:5000", contextDir: "images"}, &bytes.Buffer{}); err != nil {
 		t.Fatalf("first buildOne: %v", err)
 	}
 	firstTID := sub.req.TemplateID
@@ -302,7 +306,7 @@ func TestTemplateIDStableAcrossBuilds(t *testing.T) {
 		t.Fatalf("GetImage 1: %v", err)
 	}
 
-	if err := buildOne(ctx, db, sub, testImage, sizes.Default(), "localhost:5000", "images", &bytes.Buffer{}); err != nil {
+	if err := buildOne(ctx, db, sub, testImage, sizes.Default(), buildOpts{registry: "localhost:5000", contextDir: "images"}, &bytes.Buffer{}); err != nil {
 		t.Fatalf("second buildOne: %v", err)
 	}
 	if sub.req.TemplateID != firstTID {
@@ -326,7 +330,7 @@ func TestBuildOneNoDockerfile(t *testing.T) {
 	db := setup(t, sub)
 	img := testImage
 	img.Dockerfile = ""
-	if err := buildOne(context.Background(), db, sub, img, sizes.Default(), "localhost:5000", "images", &bytes.Buffer{}); err == nil {
+	if err := buildOne(context.Background(), db, sub, img, sizes.Default(), buildOpts{registry: "localhost:5000", contextDir: "images"}, &bytes.Buffer{}); err == nil {
 		t.Fatal("buildOne succeeded without a dockerfile, want error")
 	}
 }
@@ -338,7 +342,7 @@ func TestBuildOneFromBase(t *testing.T) {
 	sub := &stubSubstrate{res: substrate.BuildResult{DiskSizeMB: 5000}}
 	db := setup(t, sub)
 	ctx := context.Background()
-	if err := buildOne(ctx, db, sub, testImage, sizes.Default(), "localhost:5000", "images", &bytes.Buffer{}); err != nil {
+	if err := buildOne(ctx, db, sub, testImage, sizes.Default(), buildOpts{registry: "localhost:5000", contextDir: "images"}, &bytes.Buffer{}); err != nil {
 		t.Fatalf("base build: %v", err)
 	}
 	cmdLog = nil
@@ -348,7 +352,7 @@ func TestBuildOneFromBase(t *testing.T) {
 		Env:       map[string]string{"HOME": "/root"},
 		BuildArgs: map[string]string{"WARM": "true", "A": "1"},
 	}
-	if err := buildOne(ctx, db, sub, layer, sizes.Default(), "localhost:5000", "images", &bytes.Buffer{}); err != nil {
+	if err := buildOne(ctx, db, sub, layer, sizes.Default(), buildOpts{registry: "localhost:5000", contextDir: "images"}, &bytes.Buffer{}); err != nil {
 		t.Fatalf("layer build: %v", err)
 	}
 	want := "docker build --pull --build-arg A=1 --build-arg BASE=" + wantDigest +
@@ -414,7 +418,7 @@ func TestBuildOnePruneCommands(t *testing.T) {
 	db := setup(t, sub)
 	t.Setenv("IMAGE_BUILD_CACHE_KEEP", "4GB")
 
-	if err := buildOne(context.Background(), db, sub, testImage, sizes.Default(), "localhost:5000", "images", &bytes.Buffer{}); err != nil {
+	if err := buildOne(context.Background(), db, sub, testImage, sizes.Default(), buildOpts{registry: "localhost:5000", contextDir: "images"}, &bytes.Buffer{}); err != nil {
 		t.Fatalf("buildOne: %v", err)
 	}
 	var prunes []string
@@ -447,7 +451,7 @@ func TestBuildOnePushedRefRemoved(t *testing.T) {
 		cmdLog = append(cmdLog, name+" "+strings.Join(args, " "))
 		return wantDigest, nil
 	}
-	if err := buildOne(context.Background(), db, sub, testImage, sizes.Default(), "localhost:5000", "images", &bytes.Buffer{}); err != nil {
+	if err := buildOne(context.Background(), db, sub, testImage, sizes.Default(), buildOpts{registry: "localhost:5000", contextDir: "images"}, &bytes.Buffer{}); err != nil {
 		t.Fatalf("buildOne: %v", err)
 	}
 	var got []string
@@ -491,7 +495,7 @@ func TestBuildOneRmFailureBestEffort(t *testing.T) {
 	// The digest read succeeds (runOut above answers a digest), only the
 	// rm fails.
 	out := &bytes.Buffer{}
-	err := buildOne(context.Background(), db, sub, testImage, sizes.Default(), "localhost:5000", "images", out)
+	err := buildOne(context.Background(), db, sub, testImage, sizes.Default(), buildOpts{registry: "localhost:5000", contextDir: "images"}, out)
 	if err != nil {
 		t.Fatalf("buildOne: %v", err)
 	}
@@ -525,7 +529,7 @@ func TestBuildOnePruneFailureBestEffort(t *testing.T) {
 	}
 
 	out := &bytes.Buffer{}
-	if err := buildOne(context.Background(), db, sub, testImage, sizes.Default(), "localhost:5000", "images", out); err != nil {
+	if err := buildOne(context.Background(), db, sub, testImage, sizes.Default(), buildOpts{registry: "localhost:5000", contextDir: "images"}, out); err != nil {
 		t.Fatalf("buildOne: %v", err)
 	}
 	if n := len(cmdLog); n != 8 {
@@ -559,7 +563,7 @@ func TestBuildOneWarmSizes(t *testing.T) {
 	img.WarmSizes = []string{"medium", "large"}
 
 	out := &bytes.Buffer{}
-	if err := buildOne(ctx, db, sub, img, sizes.Default(), "localhost:5000", "images", out); err != nil {
+	if err := buildOne(ctx, db, sub, img, sizes.Default(), buildOpts{registry: "localhost:5000", contextDir: "images"}, out); err != nil {
 		t.Fatalf("buildOne: %v", err)
 	}
 	row, err := db.GetImage(ctx, "py-base")
@@ -610,7 +614,7 @@ func TestBuildOneWarmSizes(t *testing.T) {
 	// new build.
 	img.WarmSizes = []string{"large"}
 	sub.reqs = nil
-	if err := buildOne(ctx, db, sub, img, sizes.Default(), "localhost:5000", "images", &bytes.Buffer{}); err != nil {
+	if err := buildOne(ctx, db, sub, img, sizes.Default(), buildOpts{registry: "localhost:5000", contextDir: "images"}, &bytes.Buffer{}); err != nil {
 		t.Fatalf("rebuild: %v", err)
 	}
 	warm, err = db.ListImageSizes(ctx, "py-base")
@@ -641,7 +645,7 @@ func TestBuildOneWarmSizeRejected(t *testing.T) {
 			img := testImage
 			img.MinMemoryMB = tc.minMB
 			img.WarmSizes = tc.warm
-			err := buildOne(context.Background(), db, sub, img, sizes.Default(), "localhost:5000", "images", &bytes.Buffer{})
+			err := buildOne(context.Background(), db, sub, img, sizes.Default(), buildOpts{registry: "localhost:5000", contextDir: "images"}, &bytes.Buffer{})
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("err = %v, want %q", err, tc.want)
 			}
@@ -662,12 +666,12 @@ func TestBuildOneFromBaseInheritsSizes(t *testing.T) {
 	base := testImage
 	base.MinMemoryMB = 768
 	base.WarmSizes = []string{"large"}
-	if err := buildOne(ctx, db, sub, base, sizes.Default(), "localhost:5000", "images", &bytes.Buffer{}); err != nil {
+	if err := buildOne(ctx, db, sub, base, sizes.Default(), buildOpts{registry: "localhost:5000", contextDir: "images"}, &bytes.Buffer{}); err != nil {
 		t.Fatalf("base build: %v", err)
 	}
 
 	layer := manifestImage{Name: "py-base-worker", Baked: true, Dockerfile: "worker.dockerfile", From: "py-base"}
-	if err := buildOne(ctx, db, sub, layer, sizes.Default(), "localhost:5000", "images", &bytes.Buffer{}); err != nil {
+	if err := buildOne(ctx, db, sub, layer, sizes.Default(), buildOpts{registry: "localhost:5000", contextDir: "images"}, &bytes.Buffer{}); err != nil {
 		t.Fatalf("layer build: %v", err)
 	}
 	row, err := db.GetImage(ctx, "py-base-worker")
@@ -683,7 +687,7 @@ func TestBuildOneFromBaseInheritsSizes(t *testing.T) {
 	}
 
 	layer.WarmSizes = []string{}
-	if err := buildOne(ctx, db, sub, layer, sizes.Default(), "localhost:5000", "images", &bytes.Buffer{}); err != nil {
+	if err := buildOne(ctx, db, sub, layer, sizes.Default(), buildOpts{registry: "localhost:5000", contextDir: "images"}, &bytes.Buffer{}); err != nil {
 		t.Fatalf("layer rebuild: %v", err)
 	}
 	if warm, _ := db.ListImageSizes(ctx, "py-base-worker"); len(warm) != 0 {
@@ -711,7 +715,8 @@ func TestCmdBuildUnknownWarmSize(t *testing.T) {
 		t.Fatalf("write manifest: %v", err)
 	}
 	dbPath := filepath.Join(dir, "never.db")
-	if code := cmdBuild(context.Background(), []string{"py-base"}, false, manifestPath, "images", dbPath, "localhost:5000"); code != 1 {
+	if code := cmdBuild(context.Background(), []string{"py-base"}, false, manifestPath, dbPath,
+		buildOpts{registry: "localhost:5000", contextDir: "images"}); code != 1 {
 		t.Fatalf("exit code %d, want 1", code)
 	}
 	if len(cmdLog) != 0 {
@@ -727,11 +732,207 @@ func TestBuildOneFromUnknownBase(t *testing.T) {
 	sub := &stubSubstrate{}
 	db := setup(t, sub)
 	layer := manifestImage{Name: "x-worker", Dockerfile: "worker.dockerfile", From: "nope"}
-	err := buildOne(context.Background(), db, sub, layer, sizes.Default(), "localhost:5000", "images", &bytes.Buffer{})
+	err := buildOne(context.Background(), db, sub, layer, sizes.Default(), buildOpts{registry: "localhost:5000", contextDir: "images"}, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "base image nope is not in the catalog") {
 		t.Fatalf("err = %v", err)
 	}
 	if len(cmdLog) != 0 {
 		t.Fatalf("docker ran: %v", cmdLog)
+	}
+}
+
+// publish runs over a temp manifest and a recording runCapture, with
+// docker failures set per image name ("none" by default).
+type publishHarness struct {
+	manifestPath string
+	errs         map[string]string // image name -> docker error text
+}
+
+func newPublishHarness(t *testing.T, imagesYAML string) *publishHarness {
+	t.Helper()
+	setup(t, &stubSubstrate{})
+	dir := t.TempDir()
+	manifestPath := filepath.Join(dir, "manifest.yaml")
+	if err := os.WriteFile(manifestPath, []byte(imagesYAML), 0o644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	h := &publishHarness{manifestPath: manifestPath}
+	runCapture = func(ctx context.Context, stdout io.Writer, name string, args ...string) (string, error) {
+		cmdLog = append(cmdLog, name+" "+strings.Join(args, " "))
+		for _, a := range args {
+			if img, ok := strings.CutPrefix(a, "localhost:5000/"); ok {
+				img, _, _ := strings.Cut(img, ":")
+				if msg := h.errs[img]; msg != "" {
+					return msg, errors.New("exit status 1")
+				}
+			}
+		}
+		return "", nil
+	}
+	return h
+}
+
+// TestPublishTwoImages: publish runs pull, tag, push and the
+// best-effort rm in order, with exactly the right refs, for every image
+// named.
+func TestPublishTwoImages(t *testing.T) {
+	h := newPublishHarness(t, `images:
+  - name: py-base
+    baked: true
+  - name: go-base
+    baked: true
+  - name: rust-base
+    baked: false
+`)
+	code := cmdPublish(context.Background(), []string{"py-base", "go-base"}, false,
+		h.manifestPath, "localhost:5000", "ghcr.io/jrimmer/spoond-images", "v4.0.0")
+	if code != 0 {
+		t.Fatalf("exit code %d, want 0", code)
+	}
+	want := []string{
+		"docker pull localhost:5000/py-base:latest",
+		"docker tag localhost:5000/py-base:latest ghcr.io/jrimmer/spoond-images/py-base:v4.0.0",
+		"docker push ghcr.io/jrimmer/spoond-images/py-base:v4.0.0",
+		"docker image rm ghcr.io/jrimmer/spoond-images/py-base:v4.0.0 localhost:5000/py-base:latest",
+		"docker pull localhost:5000/go-base:latest",
+		"docker tag localhost:5000/go-base:latest ghcr.io/jrimmer/spoond-images/go-base:v4.0.0",
+		"docker push ghcr.io/jrimmer/spoond-images/go-base:v4.0.0",
+		"docker image rm ghcr.io/jrimmer/spoond-images/go-base:v4.0.0 localhost:5000/go-base:latest",
+	}
+	if !slices.Equal(cmdLog, want) {
+		t.Fatalf("commands = %v, want %v", cmdLog, want)
+	}
+}
+
+// TestPublishAllBakedOnly: --all publishes every baked: true entry and
+// skips the rest (baked: false rust-base).
+func TestPublishAllBakedOnly(t *testing.T) {
+	h := newPublishHarness(t, `images:
+  - name: py-base
+    baked: true
+  - name: rust-base
+    baked: false
+  - name: go-base
+    baked: true
+`)
+	code := cmdPublish(context.Background(), nil, true, h.manifestPath, "localhost:5000", "example.com/base", "v1")
+	if code != 0 {
+		t.Fatalf("exit code %d, want 0", code)
+	}
+	for _, c := range cmdLog {
+		if strings.Contains(c, "rust-base") {
+			t.Fatalf("published non-baked rust-base: %v", cmdLog)
+		}
+	}
+	if n := strings.Count(strings.Join(cmdLog, "\n"), "docker pull "); n != 2 {
+		t.Fatalf("pulls = %d, want 2 (py-base, go-base): %v", n, cmdLog)
+	}
+}
+
+// TestPublishMissingImageContinues: an image missing from the local
+// registry fails that image alone with a pointer at `spoond images
+// build <name>`, the rest still publish, and the exit code is 1.
+func TestPublishMissingImageContinues(t *testing.T) {
+	h := newPublishHarness(t, `images:
+  - name: py-base
+    baked: true
+  - name: go-base
+    baked: true
+  - name: elixir-base
+    baked: true
+`)
+	h.errs = map[string]string{"go-base": "Error response from daemon: manifest unknown"}
+	code := cmdPublish(context.Background(), nil, true, h.manifestPath, "localhost:5000", "example.com/base", "v1")
+	if code != 1 {
+		t.Fatalf("exit code %d, want 1 (a failed publish must fail the run)", code)
+	}
+	// py-base and elixir-base still publish; go-base stops at the pull.
+	var pulls, pushes, goBaseCmds int
+	for _, c := range cmdLog {
+		switch {
+		case strings.HasPrefix(c, "docker pull "):
+			pulls++
+		case strings.HasPrefix(c, "docker push "):
+			pushes++
+		}
+		if strings.Contains(c, "go-base") {
+			goBaseCmds++
+		}
+	}
+	if pulls != 3 || pushes != 2 {
+		t.Fatalf("pulls = %d, pushes = %d over %v, want 3 and 2", pulls, pushes, cmdLog)
+	}
+	if goBaseCmds != 1 {
+		t.Fatalf("go-base ran %d commands, want 1 (the failing pull): %v", goBaseCmds, cmdLog)
+	}
+	// The failure names the missing image and how to make it exist.
+	err := publishOne(context.Background(), "go-base", "localhost:5000", "example.com/base", "v1", io.Discard)
+	if err == nil || !strings.Contains(err.Error(),
+		"build go-base first (spoond images build go-base)") {
+		t.Fatalf("err = %v, want the build-first hint", err)
+	}
+}
+
+// TestPublishPushAuthErrorSaysLogin: a push rejected as unauthenticated
+// tells the operator to `docker login` the registry host first.
+func TestPublishPushAuthErrorSaysLogin(t *testing.T) {
+	h := newPublishHarness(t, `images:
+  - name: py-base
+    baked: true
+`)
+	code := cmdPublish(context.Background(), []string{"py-base"}, false,
+		h.manifestPath, "localhost:5000", "ghcr.io/jrimmer/spoond-images", "v4.0.0")
+	if code != 0 {
+		t.Fatalf("exit code %d, want 0", code)
+	}
+	// Now fail the push with an auth error: the run fails, no rm runs,
+	// and the hint names the registry host to log in to.
+	runCapture = func(ctx context.Context, stdout io.Writer, name string, args ...string) (string, error) {
+		cmdLog = append(cmdLog, name+" "+strings.Join(args, " "))
+		if len(args) > 0 && args[0] == "push" {
+			return "unauthorized: authentication required", errors.New("exit status 1")
+		}
+		return "", nil
+	}
+	cmdLog = nil
+	code = cmdPublish(context.Background(), []string{"py-base"}, false,
+		h.manifestPath, "localhost:5000", "ghcr.io/jrimmer/spoond-images", "v4.0.0")
+	if code != 1 {
+		t.Fatalf("exit code %d, want 1", code)
+	}
+	for _, c := range cmdLog {
+		if strings.HasPrefix(c, "docker image rm") {
+			t.Fatalf("rm ran after a failed push: %v", cmdLog)
+		}
+	}
+	err := publishOne(context.Background(), "py-base", "localhost:5000",
+		"ghcr.io/jrimmer/spoond-images", "v4.0.0", io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "docker login ghcr.io first") {
+		t.Fatalf("err = %v, want a docker login hint", err)
+	}
+}
+
+// TestPublishNeedsPrefix: publish without --prefix, without a tag, or
+// without a name is a usage error, and an unknown image name is refused
+// before any docker command.
+func TestPublishNeedsPrefix(t *testing.T) {
+	h := newPublishHarness(t, `images:
+  - name: py-base
+    baked: true
+`)
+	if code := cmdPublish(context.Background(), []string{"py-base"}, false, h.manifestPath, "localhost:5000", "", "v1"); code != 2 {
+		t.Fatalf("missing --prefix: exit %d, want 2", code)
+	}
+	if code := cmdPublish(context.Background(), []string{"py-base"}, false, h.manifestPath, "localhost:5000", "example.com/base", ""); code != 2 {
+		t.Fatalf("empty --tag: exit %d, want 2", code)
+	}
+	if code := cmdPublish(context.Background(), nil, false, h.manifestPath, "localhost:5000", "example.com/base", "v1"); code != 2 {
+		t.Fatalf("no name or --all: exit %d, want 2", code)
+	}
+	if code := cmdPublish(context.Background(), []string{"nope"}, false, h.manifestPath, "localhost:5000", "example.com/base", "v1"); code != 1 {
+		t.Fatalf("unknown name: exit %d, want 1", code)
+	}
+	if len(cmdLog) != 0 {
+		t.Fatalf("docker ran on a usage error: %v", cmdLog)
 	}
 }
