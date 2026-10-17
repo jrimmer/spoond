@@ -14,6 +14,8 @@ summarised from README "Status".
 
 - **README: a dashboard screenshot, and a shorter dashboard section**
   that says what the dashboard shows rather than how each panel is drawn.
+- **README: Status names the current release only**; the release history
+  lives here and on the releases page.
 
 ## [3.9.1] - 2026-10-14
 
