@@ -228,6 +228,38 @@ images:
       snapshot date, which moves Rust and Qt together (ARCH_SNAPSHOT
       build arg). No rustup: Arch's rust package, offline-safe.
 
+  - name: rust-gpui-base
+    capability: rust-gpui
+    labels: [rust-gpui]
+    description: "rust-qt-base plus what gpui 0.2.2 (Zed's GUI crate) needs on Linux: libxcb, libxkbcommon(-x11), wayland, wayland-protocols, Vulkan loader and headers, Mesa lavapipe (software Vulkan)"
+    baked: true
+    dockerfile: rust-gpui-base.dockerfile
+    from: rust-qt-base
+    # Larger than rust-qt-base: a cold gpui release build (521 crates,
+    # with an HTTP stack and image codecs) needs about 5 GB of target dir
+    # and took 94 s on 20 cores. 4 vCPU keeps a cold build in minutes,
+    # 8 GiB covers rustc and the link at that width, and 24 GiB holds
+    # target/, the cargo registry and sccache with headroom.
+    vcpu: 4
+    memory_mb: 8192
+    disk_mb: 24576
+    warm_sizes: []
+    env:
+      PATH: /root/.cargo/bin:/usr/lib/qt6/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
+    notes: |
+      Built on rust-qt-base (from:), so it inherits that image's Arch
+      snapshot, Rust 1.99.0 and env (CARGO_HOME, mold, sccache, lean
+      debuginfo); only PATH is restated here. Build rust-qt-base first:
+      the layer is built on its current digest. Rebuild this image after
+      rebuilding rust-qt-base to pick up the new snapshot.
+      gpui 0.2.2 links libxcb, libxkbcommon and libxkbcommon-x11, and
+      dlopens libvulkan and libwayland-client; it renders only through
+      Vulkan (blade), so headless window tests use lavapipe
+      (vulkan-swrast) under xvfb-run. Tests that use gpui's TestPlatform
+      need no display. No alsa-lib: nothing in gpui's tree uses ALSA.
+      Its crates.io release pins libc below 0.2.190 (xattr 0.2.3), so
+      projects keep a Cargo.lock and build with --locked.
+
   - name: scylla
     capability: cql-database
     labels: []
