@@ -867,6 +867,7 @@ func TestAdmitResumeLeavesFloorFreeNearFloor(t *testing.T) {
 	}
 }
 
+// TestAdmitRefreshesNearFloor: spoond-154 — inside the node cache's TTL
 // (15 s), an admission whose request plus the floor sits within
 // nearFloorMarginMiB of the cached free value refreshes the NodeInfo and
 // is judged on the fresh reading: the fake's free pages dropped between
