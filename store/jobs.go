@@ -73,6 +73,15 @@ var jobDroppedColumn = map[string][2]string{
 	"stderr": {"stderr_dropped_bytes", "stderr_dropped_newlines"},
 }
 
+// JobStore is the jobs surface of the DB, narrowed so callers (and the
+// tests) can wrap it: every job route takes the methods it needs from
+// an interface value instead of *DB.
+type JobStore interface {
+	// the background-job surface (this file)
+	InsertJob(ctx context.Context, j JobRow) error
+	UpdateJobSkipped(ctx context.Context, jobID, stream string, dropped, newlines int64) error
+}
+
 // JobReasonTimedOut is the lease_jobs.reason recorded when the max
 // runtime, not the command, ended a job. It is also the label the API
 // and the job_exited event use (spoond-wb5).
@@ -456,3 +465,5 @@ func scanJob(scan func(dest ...any) error) (JobRow, error) {
 	r.EndedAt = parseTime(endedAt)
 	return r, nil
 }
+
+var _ JobStore = (*DB)(nil)

@@ -121,6 +121,9 @@ func (s *Server) handleJobsList(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleJobGet answers GET .../jobs/{job}: the record plus the last
+// 64 KiB of stdout and stderr, naming what the output cap (spoond-hwto)
+// has dropped as "skipped" beside it. With ?wait=<seconds> it long-polls
+// until the job is no longer running or the wait ends.
 func (s *Server) handleJobGet(w http.ResponseWriter, r *http.Request) {
 	lease := s.jobsTarget(w, r)
 	if lease == nil {
@@ -224,7 +227,11 @@ func (s *Server) waitJob(r *http.Request, lease *Lease, row store.JobRow, wait i
 // record is resolved before any resume, so deleting a finished job
 // cannot wake a suspended lease for nothing. The guest cleanup is
 // best-effort: a lease paused mid-delete may put the files back on its
-// next resume, and they go with the record's retention as before.
+// next resume, and with the record gone nothing prunes them again — they
+// then live until the lease itself is released (or the owner deletes
+// them the same way once the lease is running again). The 204 answers
+// for the record; a cleanup that could not reach the guest is logged,
+// not failed, matching the prune path.
 func (s *Server) handleJobDelete(w http.ResponseWriter, r *http.Request) {
 	lease := s.jobsTarget(w, r)
 	if lease == nil {

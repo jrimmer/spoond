@@ -353,14 +353,6 @@ func jobCapCountNewlines(data []byte) int64 {
 	return n
 }
 
-// maxInt64 returns the larger of two values.
-func maxInt64(a, b int64) int64 {
-	if a > b {
-		return a
-	}
-	return b
-}
-
 // jobRowDropped is the row's recorded dropped front of one stream.
 func jobRowDropped(job store.JobRow, stream string) int64 {
 	if stream == "stdout" {
@@ -483,14 +475,14 @@ func (s *Service) capJobStream(ctx context.Context, sandboxID, jobID, stream str
 		s.log.Printf("jobs: %s: %s output cap: counters end mid-line; the pass is skipped", jobID, stream)
 		return
 	}
-	next := string(pre) + jobCapLine(target, dropped+planned, target)
+	next := string(pre) + jobCapLine(target, newlines+planned, target)
 	if werr := s.sub.WriteFile(ctx, sandboxID, jobCapPath(jobID, stream), []byte(next), 0o600); werr != nil {
 		// The drop is already punched, so the record is the only view
 		// left: a failure here says so and the counters catch up there.
 		s.log.Printf("jobs: %s: %s output cap: write counters: %v", jobID, stream, werr)
 		return
 	}
-	if uerr := s.db.UpdateJobSkipped(ctx, jobID, stream, target, newlines+planned); uerr != nil {
+	if uerr := s.dbJobs.UpdateJobSkipped(ctx, jobID, stream, target, newlines+planned); uerr != nil {
 		s.log.Printf("jobs: %s: %s output cap: record skipped: %v", jobID, stream, uerr)
 	}
 }
@@ -1562,6 +1554,13 @@ func (s *Service) readJobRange(ctx context.Context, sandboxID, jobID, stream str
 		// would surface as unavailable.
 		var pre []byte
 		pre, err = s.sub.ReadFile(ctx, sandboxID, path, int64(offset+limit))
+		if errors.Is(err, substrate.ErrTooLarge) {
+			// The stream outgrew this substrate's whole-file read cap: a
+			// tail of it cannot be served without the range reader, so
+			// degrade to empty rather than an error the caller would
+			// surface as unavailable, the way the pre-cap code did.
+			return nil, start, skip, nil
+		}
 		if err == nil && offset < len(pre) {
 			end := offset + limit
 			if end > len(pre) {

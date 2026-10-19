@@ -653,6 +653,9 @@ type Service struct {
 	// db persists leases, shares, the pool and the sandbox catalog
 	// (U05/U08). Required.
 	db    *store.DB
+	// dbJobs is the narrowed jobs surface db serves; tests swap it (the
+	// *store.DB, or a failing wrapper) wholesale.
+	dbJobs store.JobStore
 	store *Store
 	// tokens maps a consumer token to its consumer id (legacy mode).
 	tokens map[string]string
@@ -1103,6 +1106,7 @@ func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string,
 	svc := &Service{
 		sub:                       sub,
 		db:                        db,
+		dbJobs:                    db,
 		store:                     newStore(),
 		tokens:                    tokens,
 		cfg:                       cfg,

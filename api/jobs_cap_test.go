@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jrimmer/spoond/v3/store"
 	"github.com/jrimmer/spoond/v3/substrate"
 	"github.com/jrimmer/spoond/v3/substrate/fake"
 )
@@ -534,6 +535,54 @@ func TestJobCapSidecarFormat(t *testing.T) {
 		t.Fatalf("sidecar dropped %d, not block-aligned", dropped)
 	}
 
+	// Store-write failure (recovery) test: a pass whose sidecar lands
+	// but whose row write fails must have the next pass recover the
+	// row's counters to the sidecar's live line exactly (the sidecar is
+	// the crash-recovery source when the row is behind).
+	//
+	// The row write of pass 2 fails. Pass 2 grows the file to 13000
+	// bytes, whose target is the floor 4 KiB boundary under
+	// (13000 - 4106) = 8192: the punch takes [4096, 8192), whose 4096
+	// bytes hold another 2048 newlines, so the front holds 4096.
+	// The second pass's record write fails, so the sidecar (which the
+	// same pass wrote first) is ahead of the row: exactly the
+	// crash-recovery state the sidecar exists to serve.
+	var inner store.JobStore = svc.dbJobs
+	fdb := &failingJobStore{JobStore: inner, method: "UpdateJobSkipped", nth: 2, err: errStoreBoom}
+	svc.dbJobs = fdb
+	writeStream(t, sub, sandbox, jobID, "stdout", strings.Repeat("a\n", 4500)+strings.Repeat("b\n", 2000))
+	svc.reconcileJobs(context.Background())
+	svc.dbJobs = inner
+	row, err = db.GetJob(context.Background(), jobID)
+	if err != nil {
+		t.Fatalf("get job after failed pass: %v", err)
+	}
+	// The row write of the pass failed whole: both counters stay at pass
+	// 1's values (8192/4096 is what the later recovery pass brings, not
+	// the failed write).
+	if row.StdoutDroppedBytes != 4096 || row.StdoutDroppedNewlines != 2048 {
+		t.Fatalf("failed pass left row dropped=%d newlines=%d, want 4096/2048", row.StdoutDroppedBytes, row.StdoutDroppedNewlines)
+	}
+	lines = strings.Split(strings.TrimRight(sidecarRaw(t, sub, sandbox, jobID, "stdout"), "\n"), "\n")
+	sd, sn, sOK := jobCapSidecarOf2(lines[len(lines)-1])
+	if !sOK || sd != 8192 {
+		t.Fatalf("failed pass left no live sidecar line: %q", lines)
+	}
+	if sn != 4096 {
+		t.Fatalf("sidecar newlines %d, want the punched front's 4096", sn)
+	}
+
+	// The next pass lands the counters (nothing more to punch: the file
+	// sits inside its kept region and the target has not moved).
+	svc.reconcileJobs(context.Background())
+	row, err = db.GetJob(context.Background(), jobID)
+	if err != nil {
+		t.Fatalf("get job after recovery: %v", err)
+	}
+	if row.StdoutDroppedBytes != 8192 || row.StdoutDroppedNewlines != 4096 {
+		t.Fatalf("recovery pass left row dropped=%d newlines=%d, want 8192/4096", row.StdoutDroppedBytes, row.StdoutDroppedNewlines)
+	}
+
 	// Garbage reads as not-ok (the row falls back).
 	for bad := range map[string]bool{"nonsense": true, "-1 0 0": true, "600 0 600 extra": true} {
 		if _, _, ok := jobCapSidecarOf2(bad); ok {
@@ -577,4 +626,40 @@ func TestJobOutputCapExitedStreamsUncapped(t *testing.T) {
 	if info.Size != 200 {
 		t.Fatalf("exited stream shrank to %d bytes", info.Size)
 	}
+}
+
+// sidecarRaw reads one stream's cap sidecar file whole (a test helper):
+// "" when the file is missing.
+func sidecarRaw(t *testing.T, sub *testSub, sandboxID, jobID, stream string) string {
+	t.Helper()
+	raw, err := sub.ReadFile(context.Background(), sandboxID, jobCapPath(jobID, stream), maxJobCapFile)
+	if err != nil {
+		return ""
+	}
+	return string(raw)
+}
+
+// errStoreBoom is the injected store failure of the cap tests.
+var errStoreBoom = errors.New("injected store failure")
+
+// failingJobStore wraps a *store.DB for one call of one of its job
+// methods (a test helper): the named method's nth call (1-based; 0 =
+// every call) fails with err, everything else passes through. The
+// embedded JobStore serves every method the wrapper does not override.
+type failingJobStore struct {
+	store.JobStore
+	method string
+	nth    int
+	n      int
+	err    error
+}
+
+func (f *failingJobStore) UpdateJobSkipped(ctx context.Context, jobID, stream string, dropped, newlines int64) error {
+	if f.method == "UpdateJobSkipped" && f.err != nil {
+		f.n++
+		if f.nth == 0 || f.nth == f.n {
+			return f.err
+		}
+	}
+	return f.JobStore.UpdateJobSkipped(ctx, jobID, stream, dropped, newlines)
 }
