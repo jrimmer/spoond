@@ -918,7 +918,7 @@ func Main(args []string) int {
 	if n := envIntOr("LLM_MAX_CONCURRENT_PER_USER", 0); n > 0 {
 		srv.SetLLMMaxConcurrent(n)
 	}
-	// Per-owner activity knobs (scout#20): the host defaults for the
+	// Per-owner activity knobs: the host defaults for the
 	// exec/stream and guest-dial concurrency caps. Every owner without
 	// a per-identity override (identity store data, set via POST
 	// /api/users/{id}/quota) counts against these. The NewServer

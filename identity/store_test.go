@@ -285,7 +285,7 @@ func TestLoadIgnoresRemovedQuotaFields(t *testing.T) {
 	}
 }
 
-// TestSetLimits (scout#20): SetExecLimit and SetDialLimit store the
+// TestSetLimits: SetExecLimit and SetDialLimit store the
 // per-identity concurrency overrides, 0 clears (the host default
 // applies again), a negative value is refused, an unknown user is an
 // error, and the values survive a store reload.
@@ -293,7 +293,7 @@ func TestSetLimits(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "users.json")
 	s, _ := NewStore(file)
-	u, _ := s.AddUser("scout", KindAgent, nil, "tok")
+	u, _ := s.AddUser("bob", KindAgent, nil, "tok")
 	if err := s.SetExecLimit(u.ID, 12); err != nil {
 		t.Fatal(err)
 	}

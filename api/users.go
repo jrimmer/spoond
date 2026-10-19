@@ -20,7 +20,7 @@ type UserView struct {
 	CreatedAt    string        `json:"created_at"`
 	MaxTTL       int           `json:"max_ttl"`
 	// ExecConcurrency and GuestDial are the owner's per-identity
-	// concurrency overrides (scout#20): the cap on concurrent
+	// concurrency overrides: the cap on concurrent
 	// exec/stream operations and on open guest-port dials. 0 (unset)
 	// means the host defaults apply (EXEC_CONCURRENCY_MAX,
 	// GUEST_DIAL_MAX).
@@ -226,7 +226,7 @@ var deprecatedQuotaFields = []string{"max_leases", "guaranteed_mib", "max_mib", 
 
 // handleUsersQuota updates a user's quota (admin only; T4/#31). Only
 // max_ttl is left, plus the per-identity concurrency overrides
-// (scout#20): exec_concurrency sets that user's concurrent exec/stream
+// : exec_concurrency sets that user's concurrent exec/stream
 // cap and guest_dial the concurrent guest-port-dial cap, overriding the
 // host defaults (EXEC_CONCURRENCY_MAX, GUEST_DIAL_MAX) for that
 // identity alone. 0 or an omitted field means unset, the host default

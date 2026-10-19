@@ -429,7 +429,7 @@ var Specs = []Spec{
 	{"E2B_TEMPLATE_STORAGE_PATH", TypeString, Backend, false},
 	{"E2B_TOKEN_SEED_FILE", TypeString, Backend, false}, // seed file path: a path, not the secret itself
 	{"EVENTS_TOKEN", TypeString, Backend, true},
-	// Per-owner concurrent exec/stream cap (scout#20); a positive value
+	// Per-owner concurrent exec/stream cap; a positive value
 	// is the host default every identity without an override counts
 	// against.
 	{"EXEC_CONCURRENCY_MAX", TypeInt, Backend, false},
@@ -448,7 +448,7 @@ var Specs = []Spec{
 	{"GIVE_BACK", TypeString, Backend, false},
 	// A whole number of MiB, 0 = no margin.
 	{"GIVE_BACK_MARGIN_MIB", TypeInt, Backend, false},
-	// Per-owner concurrent guest-port-dial cap (scout#20); a positive
+	// Per-owner concurrent guest-port-dial cap; a positive
 	// value is the host default every identity without an override
 	// counts against.
 	{"GUEST_DIAL_MAX", TypeInt, Backend, false},

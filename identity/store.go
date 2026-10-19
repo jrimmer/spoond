@@ -107,7 +107,7 @@ type User struct {
 	// in 3.0 (fair shares, FS4); a users file written before still loads
 	// (unknown JSON fields are ignored) and the next save drops them.
 	MaxTTL int `json:"max_ttl"` // max lease TTL seconds (0 = global max applies)
-	// Per-identity concurrency overrides (scout#20): the owner's own cap
+	// Per-identity concurrency overrides: the owner's own cap
 	// on concurrent exec/stream operations and on open guest-port dials.
 	// 0 (absent, or a users file written before the field) means the host
 	// default applies (EXEC_CONCURRENCY_MAX, GUEST_DIAL_MAX). Like the
@@ -575,7 +575,7 @@ func (s *Store) SetQuota(userID string, maxTTL int) error {
 }
 
 // SetExecLimit sets a user's per-identity concurrent exec/stream cap
-// (scout#20). 0 clears the override — the host default
+// . 0 clears the override — the host default
 // (EXEC_CONCURRENCY_MAX) applies again; negative values are refused.
 func (s *Store) SetExecLimit(userID string, n int) error {
 	if n < 0 {
@@ -592,7 +592,7 @@ func (s *Store) SetExecLimit(userID string, n int) error {
 }
 
 // SetDialLimit sets a user's per-identity concurrent guest-port-dial cap
-// (scout#20), the dial-side twin of SetExecLimit. 0 clears the override
+// , the dial-side twin of SetExecLimit. 0 clears the override
 // — the host default (GUEST_DIAL_MAX) applies again; negative values
 // are refused.
 func (s *Store) SetDialLimit(userID string, n int) error {
