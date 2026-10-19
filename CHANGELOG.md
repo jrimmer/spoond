@@ -10,6 +10,41 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Added
+
+- **Per-job retention and an output cap for background jobs
+  (spoond-hwto).** Three pieces on the background-exec surface:
+  - `DELETE /api/leases/{id}/jobs/{job}` removes a finished job's record
+    and its guest job directory, owner-checked (the lease's exec rules;
+    also an `http` share granted exec) and admins. `204` on success,
+    `409` while the job is still running (clean up by signalling it
+    first), `404` when the job is not on this lease. Running jobs are
+    never deleted behind the poller's back.
+  - The exec request gains `retention_secs`: how long this job's record
+    and guest files are kept after it finishes, in seconds. It shortens
+    the host's `JOB_RETENTION_SECS` (default 7 days), never lengthens
+    it, mirroring `max_runtime_secs`; the job record and the
+    capabilities doc name the effective window (`retention_secs`).
+  - The exec request gains `output_max_bytes` and reads of a job's
+    output gain the same idea host side (`JOB_OUTPUT_MAX_BYTES`, default
+    unlimited): once a job's stdout or stderr guest file grows past the
+    cap, the job poller punches the file's front out with
+    `fallocate --punch-hole` in the guest (block-aligned, the file's
+    size and later offsets unchanged) and only the tail is kept — a
+    chatty job can no longer fill the disk between polls. A request may
+    shorten the host cap, never lengthen it. A dropped front is
+    reported as `"skipped": {"bytes": N, "newlines": M}`: per stream in
+    the job record and `stdout_skipped`/`stderr_skipped` beside the
+    record view's outputs (plus a `stdout_offset`/`stderr_offset`
+    naming the first kept byte), and as `X-Output-Skipped` and
+    `X-Output-Offset` headers on the raw output endpoint; reads
+    (`?offset=`) keep absolute offsets — a read into the dropped front
+    returns the first kept bytes rather than an error. The counters only
+    ever rise, a substrate without hole-punching leaves streams
+    untruncated (nothing is reported dropped), and an exited job's
+    streams are never capped. The per-job request fields and the host
+    default are documented by effect in the README and `docs/api.md`.
+
 ### Removed
 
 - **The `/api/sandboxes` path alias (4.0, spoond-4-0-s10).** Every
