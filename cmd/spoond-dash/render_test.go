@@ -38,9 +38,9 @@ func sampleSnapshot() Snapshot {
 		FwConns: 9, AuthFails: 2, Throttled: 0, Capacity: 3, BuildFails: 1,
 		CPUPct: 37.5, Load1: 1.4, Cores: 16,
 		MemUsedPct: 49.3, MemTotalGiB: 19.7, MemUsedGiB: 9.7,
-		HugeUsedPct: 44.3, HugeFreeGiB: 23.9,
-		DiskUsedPct: 61.2, DiskFreeGiB: 121.5,
-		RootUsedPct: 41.0, RootFreeGiB: 30.2,
+		HugeUsedPct: 44.3, HugeFreeGiB: 23.9, HugeUsedGiB: 19.0, HugeTotalGiB: 42.9,
+		DiskUsedPct: 61.2, DiskFreeGiB: 121.5, DiskUsedGiB: 191.5, DiskTotalGiB: 313.0,
+		RootUsedPct: 41.0, RootFreeGiB: 30.2, RootUsedGiB: 21.0, RootTotalGiB: 51.2,
 		VCPUAlloc: 11, MemAllocGiB: 19.5,
 		IOAvail: true, IOSome10: 0.3, IOSome60: 0.2, IOFull10: 0.0, IOFull60: 0.0,
 		DiskDevice: "nvme0n1", DiskWriteMB: 12, DiskBusyPct: 18,
@@ -2544,5 +2544,40 @@ func TestPageMoreImagesLink(t *testing.T) {
 	// the row without any link machinery.
 	if strings.Contains(plain, "<a ") || strings.Contains(plain, `href=`) {
 		t.Fatalf("plain output must carry no link: %q", plain)
+	}
+}
+
+// TestHostMetersShowUsedOfTotal: hugepages and both disks read "used of
+// total", like memory, not "free".
+func TestHostMetersShowUsedOfTotal(t *testing.T) {
+	p := Draw(sampleSnapshot(), DefaultWidth, fixedNow, "h").Plain()
+	for _, want := range []string{"9.7 of 19.7 GiB", "19 of 43 GiB", "192 of 313 GiB", "21 of 51 GiB"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("host meters lack %q:\n%s", want, p)
+		}
+	}
+	if strings.Contains(p, "GiB free") {
+		t.Errorf("a host meter still reads \"GiB free\":\n%s", p)
+	}
+}
+
+func TestUsedOfGiB(t *testing.T) {
+	for _, c := range []struct {
+		used, total float64
+		want        string
+	}{
+		{9.7, 21.7, "9.7 of 21.7 GiB"},
+		{35.2, 104, "35.2 of 104 GiB"},
+		{2.4, 1612, "2.4 of 1612 GiB"},
+		{34.3, 182.6, "34.3 of 183 GiB"},
+		{19, 42.9, "19 of 43 GiB"},
+		{191.5, 313, "192 of 313 GiB"},
+	} {
+		if got := usedOfGiB(c.used, c.total); got != c.want {
+			t.Errorf("usedOfGiB(%v, %v) = %q, want %q", c.used, c.total, got, c.want)
+		}
+		if n := len(usedOfGiB(c.used, c.total)); n > meterValueW {
+			t.Errorf("usedOfGiB(%v, %v) is %d wide, want at most %d", c.used, c.total, n, meterValueW)
+		}
 	}
 }

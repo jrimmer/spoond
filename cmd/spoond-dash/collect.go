@@ -70,16 +70,20 @@ type Snapshot struct {
 	BuildFails int     `json:"buildFails"`
 
 	// Host.
-	CPUPct      float64 `json:"cpuPct"`
-	Load1       float64 `json:"load1"`
-	Cores       int     `json:"cores"`
-	MemUsedPct  float64 `json:"memUsedPct"`
-	MemTotalGiB float64 `json:"memTotalGiB"` // host memory outside the hugepage pool
-	MemUsedGiB  float64 `json:"memUsedGiB"`
-	HugeUsedPct float64 `json:"hugeUsedPct"`
-	HugeFreeGiB float64 `json:"hugeFreeGiB"`
-	DiskUsedPct float64 `json:"diskUsedPct"`
-	DiskFreeGiB float64 `json:"diskFreeGiB"`
+	CPUPct       float64 `json:"cpuPct"`
+	Load1        float64 `json:"load1"`
+	Cores        int     `json:"cores"`
+	MemUsedPct   float64 `json:"memUsedPct"`
+	MemTotalGiB  float64 `json:"memTotalGiB"` // host memory outside the hugepage pool
+	MemUsedGiB   float64 `json:"memUsedGiB"`
+	HugeUsedPct  float64 `json:"hugeUsedPct"`
+	HugeFreeGiB  float64 `json:"hugeFreeGiB"`
+	HugeUsedGiB  float64 `json:"hugeUsedGiB"` // taken pages, reserved-but-untouched included
+	HugeTotalGiB float64 `json:"hugeTotalGiB"`
+	DiskUsedPct  float64 `json:"diskUsedPct"`
+	DiskFreeGiB  float64 `json:"diskFreeGiB"`
+	DiskUsedGiB  float64 `json:"diskUsedGiB"`
+	DiskTotalGiB float64 `json:"diskTotalGiB"`
 	// DiskRoom is the snapshot disk's room (FS3b) from the backend's
 	// spoond_snapshot_disk_{reserved,usable}_bytes gauges. DiskRoomKnown
 	// is false when the scrape did not carry them; the line is then not
@@ -103,9 +107,11 @@ type Snapshot struct {
 	DiskBusyPct float64 `json:"diskBusyPct"`
 	// BackendUp is how long the spoond backend has run (from
 	// spoond_backend_start_time_seconds); 0 when /metrics does not say.
-	BackendUp   time.Duration `json:"-"`
-	RootUsedPct float64       `json:"rootUsedPct"` // the root filesystem, not the snapshot store
-	RootFreeGiB float64       `json:"rootFreeGiB"`
+	BackendUp    time.Duration `json:"-"`
+	RootUsedPct  float64       `json:"rootUsedPct"` // the root filesystem, not the snapshot store
+	RootFreeGiB  float64       `json:"rootFreeGiB"`
+	RootUsedGiB  float64       `json:"rootUsedGiB"`
+	RootTotalGiB float64       `json:"rootTotalGiB"`
 
 	Down int `json:"down"` // units not active
 
@@ -757,11 +763,15 @@ func (c *collector) fromHost(s *Snapshot) error {
 	if err := syscall.Statfs(c.cfg.StoragePath, &st); err == nil && st.Blocks > 0 {
 		s.DiskFreeGiB = round1(float64(st.Bavail) * float64(st.Bsize) / (1 << 30))
 		s.DiskUsedPct = round1(float64(st.Blocks-st.Bfree) / float64(st.Blocks) * 100)
+		s.DiskUsedGiB = round1(float64(st.Blocks-st.Bfree) * float64(st.Bsize) / (1 << 30))
+		s.DiskTotalGiB = round1(float64(st.Blocks) * float64(st.Bsize) / (1 << 30))
 		c.diskTotal = st.Blocks * uint64(st.Bsize)
 	}
 	if err := syscall.Statfs("/", &st); err == nil && st.Blocks > 0 {
 		s.RootFreeGiB = round1(float64(st.Bavail) * float64(st.Bsize) / (1 << 30))
 		s.RootUsedPct = round1(float64(st.Blocks-st.Bfree) / float64(st.Blocks) * 100)
+		s.RootUsedGiB = round1(float64(st.Blocks-st.Bfree) * float64(st.Bsize) / (1 << 30))
+		s.RootTotalGiB = round1(float64(st.Blocks) * float64(st.Bsize) / (1 << 30))
 	}
 	c.fromIO(s, now)
 	return nil
@@ -1054,6 +1064,8 @@ func memGauges(s *Snapshot, mem map[string]uint64) {
 		free := mem["HugePages_Free"] - min(mem["HugePages_Rsvd"], mem["HugePages_Free"])
 		s.HugeUsedPct = round1(float64(t-free) / float64(t) * 100)
 		s.HugeFreeGiB = round1(float64(free*pageKB) / (1 << 20))
+		s.HugeUsedGiB = round1(float64((t-free)*pageKB) / (1 << 20))
+		s.HugeTotalGiB = round1(float64(t*pageKB) / (1 << 20))
 	}
 }
 

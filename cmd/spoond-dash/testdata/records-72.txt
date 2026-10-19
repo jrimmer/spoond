@@ -15,9 +15,9 @@ SPOOND · spoond.example.com                              up 9m, 12:00:00
 │ i/o stall     ░░░░░░░░░░░░╎░░░                         0.0% stalled  │
 │ nvme0n1 busy  ██░░░░░░░░░░╎░░░                      18% · 12 MB/s w  │
 │ memory        ███████░░░░░╎░░░                      9.7 of 19.7 GiB  │
-│ hugepages     ███████░░░░░╎░░░                        23.9 GiB free  │
-│ snapshot disk █████████░░░╎░░░                       121.5 GiB free  │
-│ root disk     ██████░░░░░░╎░░░                        30.2 GiB free  │
+│ hugepages     ███████░░░░░╎░░░                         19 of 43 GiB  │
+│ snapshot disk █████████░░░╎░░░                       192 of 313 GiB  │
+│ root disk     ██████░░░░░░╎░░░                         21 of 51 GiB  │
 │ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ │
 │ vcpu alloc 11 / 16 · mem alloc 19.5 GiB                              │
 │ gc dry-run                                                           │

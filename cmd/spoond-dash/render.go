@@ -1483,10 +1483,10 @@ func hostPanelRows(s Snapshot) []hostRow {
 	}
 	rows = append(rows, ioHostRows(s)...)
 	return append(rows,
-		hostRow{label: "memory", pct: s.MemUsedPct, warn: 80, danger: 92, right: fmt.Sprintf("%.1f of %.1f GiB", s.MemUsedGiB, s.MemTotalGiB)},
-		hostRow{label: "hugepages", pct: s.HugeUsedPct, warn: 80, danger: 92, right: fmt.Sprintf("%.1f GiB free", s.HugeFreeGiB)},
-		hostRow{label: "snapshot disk", pct: s.DiskUsedPct, warn: 80, danger: 90, right: fmt.Sprintf("%.1f GiB free", s.DiskFreeGiB)},
-		hostRow{label: "root disk", pct: s.RootUsedPct, warn: 75, danger: 90, right: fmt.Sprintf("%.1f GiB free", s.RootFreeGiB)},
+		hostRow{label: "memory", pct: s.MemUsedPct, warn: 80, danger: 92, right: usedOfGiB(s.MemUsedGiB, s.MemTotalGiB)},
+		hostRow{label: "hugepages", pct: s.HugeUsedPct, warn: 80, danger: 92, right: usedOfGiB(s.HugeUsedGiB, s.HugeTotalGiB)},
+		hostRow{label: "snapshot disk", pct: s.DiskUsedPct, warn: 80, danger: 90, right: usedOfGiB(s.DiskUsedGiB, s.DiskTotalGiB)},
+		hostRow{label: "root disk", pct: s.RootUsedPct, warn: 75, danger: 90, right: usedOfGiB(s.RootUsedGiB, s.RootTotalGiB)},
 	)
 }
 
@@ -1512,10 +1512,10 @@ func (l *layout) hostRows() []hostRow {
 	}
 	rows = append(rows, ioHostRows(l.s)...)
 	return append(rows,
-		hostRow{label: "memory", pct: l.s.MemUsedPct, warn: 80, danger: 92, right: fmt.Sprintf("%.1f of %.1f GiB", l.s.MemUsedGiB, l.s.MemTotalGiB)},
-		hostRow{label: "hugepages", pct: l.s.HugeUsedPct, warn: 80, danger: 92, right: fmt.Sprintf("%.1f GiB free", l.s.HugeFreeGiB)},
-		hostRow{label: "snapshot disk", pct: l.s.DiskUsedPct, warn: 80, danger: 90, right: fmt.Sprintf("%.1f GiB free", l.s.DiskFreeGiB)},
-		hostRow{label: "root disk", pct: l.s.RootUsedPct, warn: 75, danger: 90, right: fmt.Sprintf("%.1f GiB free", l.s.RootFreeGiB)},
+		hostRow{label: "memory", pct: l.s.MemUsedPct, warn: 80, danger: 92, right: usedOfGiB(l.s.MemUsedGiB, l.s.MemTotalGiB)},
+		hostRow{label: "hugepages", pct: l.s.HugeUsedPct, warn: 80, danger: 92, right: usedOfGiB(l.s.HugeUsedGiB, l.s.HugeTotalGiB)},
+		hostRow{label: "snapshot disk", pct: l.s.DiskUsedPct, warn: 80, danger: 90, right: usedOfGiB(l.s.DiskUsedGiB, l.s.DiskTotalGiB)},
+		hostRow{label: "root disk", pct: l.s.RootUsedPct, warn: 75, danger: 90, right: usedOfGiB(l.s.RootUsedGiB, l.s.RootTotalGiB)},
 	)
 }
 
@@ -2663,3 +2663,25 @@ func clamp(v, lo, hi int) int {
 // recordsExclude is the layout's excluded owner names for the records
 // footer's "test leases not counted" clause.
 func (l *layout) recordsExclude() []string { return l.exclude }
+
+// meterValueW is the widest value text a host meter shows in full after
+// its bar ("9.7 of 19.7 GiB").
+const meterValueW = 15
+
+// usedOfGiB is a host meter's "used of total" text: one decimal, except
+// that numbers of 100 and over drop it, and numbers of 10 and over drop
+// it too when the text would still be wider than meterValueW
+// ("35.2 of 104 GiB", "2.4 of 1612 GiB", "192 of 313 GiB").
+func usedOfGiB(used, total float64) string {
+	num := func(v, whole float64) string {
+		if v >= whole {
+			return fmt.Sprintf("%.0f", v)
+		}
+		return fmt.Sprintf("%.1f", v)
+	}
+	out := num(used, 100) + " of " + num(total, 100) + " GiB"
+	if len(out) > meterValueW {
+		out = num(used, 10) + " of " + num(total, 10) + " GiB"
+	}
+	return out
+}
