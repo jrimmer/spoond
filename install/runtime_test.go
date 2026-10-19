@@ -1741,7 +1741,7 @@ func TestRuntimeContainerDevBuildSucceeds(t *testing.T) {
 	env.Opt.Container = true
 	env.Version = ""
 
-	items, text, err := runRuntime(t, env)
+	_, text, err := runRuntime(t, env)
 	if err != nil {
 		t.Fatalf("container dev-build run: %v\n%s", err, text)
 	}
