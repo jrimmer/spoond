@@ -664,15 +664,21 @@ func (f *failingJobStore) UpdateJobSkipped(ctx context.Context, jobID, stream st
 	return f.JobStore.UpdateJobSkipped(ctx, jobID, stream, dropped, newlines)
 }
 
-// TestJobOutputCapWrapperRunnerFiles (spoond-hwto): the cap works on the
-// real-wrapper runner's guest files too, not just the in-memory
-// filesystem: the front is zeroed in place (the file's size and the
-// kept bytes' offsets stay absolute), the row reports the drop, and a
-// read below it answers the first kept bytes.
-func TestJobOutputCapWrapperRunnerFiles(t *testing.T) {
+// TestJobOutputCapRunnerFiles (spoond-hwto): the cap works on the job
+// runner's host-backed files too, not just the in-memory filesystem: the
+// front is zeroed in place (the file's size and the kept bytes' offsets
+// stay absolute), the row reports the drop, and a read below it answers
+// the first kept bytes.
+func TestJobOutputCapRunnerFiles(t *testing.T) {
 	ts, svc, db, sub := newTestServerWithService(t)
 	id, _, sandbox := createJobLease(t, ts, svc)
-	useJobRunner(t, sub)
+	// Point the job files at a host directory (the runner's mapping)
+	// without running the real wrapper: the command is a fake process,
+	// so only the cap's file access is on the host path.
+	sub.Fake.EnableJobRunner(t.TempDir())
+	t.Cleanup(sub.Fake.StopAllJobs)
+	p := fake.NewProcess(1209)
+	installJobProcess(t, sub, p)
 
 	jobID, _ := startBackgroundJob(t, ts, id, map[string]any{
 		"cmd":              "sleep 900",
@@ -687,10 +693,10 @@ func TestJobOutputCapWrapperRunnerFiles(t *testing.T) {
 		t.Fatalf("get job: %v", err)
 	}
 	if row.StdoutDroppedBytes != 4096 {
-		t.Fatalf("wrapper-runner stream dropped %d, want 4096", row.StdoutDroppedBytes)
+		t.Fatalf("runner stream dropped %d, want 4096", row.StdoutDroppedBytes)
 	}
 	if row.StdoutDroppedNewlines != 2048 {
-		t.Fatalf("wrapper-runner stream dropped %d newlines, want 2048", row.StdoutDroppedNewlines)
+		t.Fatalf("runner stream dropped %d newlines, want 2048", row.StdoutDroppedNewlines)
 	}
 
 	// The host file keeps its size; the kept tail sits at its absolute
