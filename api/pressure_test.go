@@ -19,6 +19,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -818,7 +819,53 @@ func TestAdmitCapacityWithoutFloor(t *testing.T) {
 	}
 }
 
-// TestAdmitRefreshesNearFloor: spoond-154 — inside the node cache's TTL
+// TestAdmitResumeLeavesFloorFreeNearFloor: a take-back-paused lease
+// resumes through the holder's ordinary path (resumeForUse), which
+// re-passes admission with the floor as headroom (spoond-154's
+// floor-buffer rule). Near the floor that means refused: with free
+// below the lease's memory plus the floor, the resume answers capacity
+// and the lease stays paused with the floor still free (nothing
+// debited, no other lease taken back); exactly at memory + floor the
+// resume is granted, and the node's free hugepages once the VM holds
+// its pages are exactly the floor.
+func TestAdmitResumeLeavesFloorFreeNearFloor(t *testing.T) {
+	// One MiB short of the lease's 1024 plus the 2048 floor: the resume
+	// is refused and nothing moves.
+	svc, _, ctx, ls, _ := giveBackFixture(t, 1, 3070)
+	l := ls[0]
+	warmFairShares(svc, ctx) // the fixture's freeMiB is below; re-warm after the dynamic node install
+	if free, err := svc.cachedFreeHugepageMiB(ctx); err != nil || free != 3070 {
+		t.Fatalf("setup: cached free = %d, %v; want 3070", free, err)
+	}
+	if _, err := svc.resumeForUse(ctx, l); !errors.Is(err, substrate.ErrCapacity) {
+		t.Fatalf("resume at free 3070 (need 1024 + 2048) = %v, want a capacity refusal", err)
+	}
+	if !l.Suspended || l.State != "suspended" {
+		t.Fatalf("refused resume left the lease state %q suspended=%v, want still suspended", l.State, l.Suspended)
+	}
+	if free, err := svc.cachedFreeHugepageMiB(ctx); err != nil || free != 3070 {
+		t.Fatalf("cached free after the refused resume = %d, %v; want 3070 (nothing debited)", free, err)
+	}
+
+	// Exactly memory + floor: the resume is granted, and the node's free
+	// hugepages after the VM holds its pages are exactly the floor —
+	// admission started the VM only into its own memory, never into the
+	// floor's buffer.
+	svc2, _, ctx2, ls2, _ := giveBackFixture(t, 1, 3072)
+	l2 := ls2[0]
+	warmFairShares(svc2, ctx2)
+	if _, err := svc2.resumeForUse(ctx2, l2); err != nil {
+		t.Fatalf("resume at exactly 1024 + 2048 free: %v", err)
+	}
+	if l2.State != "running" || l2.Suspended {
+		t.Fatalf("resumed lease state = %q suspended=%v, want running", l2.State, l2.Suspended)
+	}
+	// The refreshed cache carries the debit: 3072 - 1024 = 2048, the
+	// floor, still free.
+	if free, err := svc2.cachedFreeHugepageMiB(ctx2); err != nil || free != 2048 {
+		t.Fatalf("cached free after the resume = %d, %v; want 2048 (the floor free after the lease's full size)", free, err)
+	}
+}
 // (15 s), an admission whose request plus the floor sits within
 // nearFloorMarginMiB of the cached free value refreshes the NodeInfo and
 // is judged on the fresh reading: the fake's free pages dropped between
