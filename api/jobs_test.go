@@ -1538,3 +1538,68 @@ func TestJobWatcherDoesNotRecordTimingOutExit(t *testing.T) {
 		t.Fatalf("finishJob after timing out: %v", err)
 	}
 }
+
+// TestJobRetentionShortensPrune (spoond-hwto): a job's own retention_secs
+// stores the effective host-or-shorter window on the record and the prune
+// honours it: a shortened job's row (and its guest files) goes before a
+// same-age record under the host window; a longer request falls back to
+// the host window; a negative request is refused with 400.
+func TestJobRetentionShortensPrune(t *testing.T) {
+	ts, svc, db, sub := newTestServerWithService(t)
+	id, _, _ := createJobLease(t, ts, svc)
+	svc.cfg.JobRetentionSecs = 604800
+
+	p := fake.NewProcess(1040)
+	installJobProcess(t, sub, p)
+	short, _ := startBackgroundJob(t, ts, id, map[string]any{"cmd": "sleep 1", "retention_secs": 60})
+	long, _ := startBackgroundJob(t, ts, id, map[string]any{"cmd": "sleep 2", "retention_secs": 99999999})
+	host, _ := startBackgroundJob(t, ts, id, map[string]any{"cmd": "sleep 3"})
+
+	row, err := db.GetJob(context.Background(), short)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if row.RetentionSecs != 60 {
+		t.Fatalf("shorter request: retention_secs = %d, want 60", row.RetentionSecs)
+	}
+	row, err = db.GetJob(context.Background(), long)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if row.RetentionSecs != 604800 {
+		t.Fatalf("longer request: retention_secs = %d, want the 604800 host window", row.RetentionSecs)
+	}
+	row, err = db.GetJob(context.Background(), host)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if row.RetentionSecs != 604800 {
+		t.Fatalf("unset request: retention_secs = %d, want the 604800 host window", row.RetentionSecs)
+	}
+
+	resp, _ := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/exec", "token-a", map[string]any{"cmd": "sleep 4", "retention_secs": -1})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("negative retention_secs = %d, want 400", resp.StatusCode)
+	}
+
+	// Finish all three and backdate their ends to the same instant, then
+	// prune with the service clock just past the shortened window but far
+	// inside the host window: only the shortened job goes.
+	ended := time.Now().Add(-time.Hour)
+	for _, jid := range []string{short, long, host} {
+		if _, err := db.UpdateJobExit(context.Background(), jid, 0, ended, ""); err != nil {
+			t.Fatalf("update exit %s: %v", jid, err)
+		}
+	}
+	svc.now = func() time.Time { return ended.Add(2 * time.Minute) }
+	t.Cleanup(func() { svc.now = time.Now })
+	svc.pruneJobs(context.Background())
+	if _, err := db.GetJob(context.Background(), short); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("shortened job survived its own 60 s window: %v", err)
+	}
+	for _, jid := range []string{long, host} {
+		if _, err := db.GetJob(context.Background(), jid); err != nil {
+			t.Fatalf("%s wrongly pruned: %v", jid, err)
+		}
+	}
+}

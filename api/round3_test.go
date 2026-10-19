@@ -100,6 +100,9 @@ func TestSweepExpiredSparesMigratedPinnedTLLLease(t *testing.T) {
 			`ALTER TABLE leases DROP COLUMN start_ms`,
 			`ALTER TABLE leases DROP COLUMN nap_since`,
 			`ALTER TABLE leases DROP COLUMN max_nap_secs`,
+			// 0030's column (spoond-hwto): the rewind reruns 0029 but must not
+			// leave retention_secs in place for 0030 to collide with.
+			`ALTER TABLE lease_jobs DROP COLUMN retention_secs`,
 			`DELETE FROM schema_migrations WHERE version >= 22`,
 		} {
 			if _, err := db21.Exec(stmt); err != nil {

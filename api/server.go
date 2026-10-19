@@ -2334,6 +2334,11 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		// for this job. It can never lengthen it; 0 or omitted uses the
 		// host cap. A negative value is rejected.
 		MaxRuntimeSecs int64 `json:"max_runtime_secs"`
+		// RetentionSecs (spoond-hwto) shortens the host's
+		// JOB_RETENTION_SECS for this job: the record and its guest files
+		// are pruned sooner. It can never lengthen the host window; 0 or
+		// omitted uses it. A negative value is rejected.
+		RetentionSecs int64 `json:"retention_secs"`
 		// Secrets (#80) are staged as /run/secrets/<name> files for this
 		// command only and removed afterwards. Values are kept in memory
 		// only, never stored, logged or returned.
@@ -2354,13 +2359,19 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "max_runtime_secs must be non-negative")
 		return
 	}
+	// retention_secs likewise only applies to a background job, but a
+	// negative value is rejected for both for the same reason (spoond-hwto).
+	if req.RetentionSecs < 0 {
+		writeError(w, http.StatusBadRequest, "retention_secs must be non-negative")
+		return
+	}
 	execSecrets, err := validateSecrets(req.Secrets)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if req.Background {
-		s.handleBackgroundExec(w, r, lease, owner, req.Cmd, req.Cwd, req.Env, execSecrets, req.MaxRuntimeSecs)
+		s.handleBackgroundExec(w, r, lease, owner, req.Cmd, req.Cwd, req.Env, execSecrets, req.MaxRuntimeSecs, req.RetentionSecs)
 		return
 	}
 	timeout := req.Timeout

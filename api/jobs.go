@@ -204,6 +204,25 @@ func (s *Service) jobRetention() time.Duration {
 	return time.Duration(secs) * time.Second
 }
 
+// effectiveJobRetention returns the retention a new job's record and
+// guest files are kept under (spoond-hwto): the host's JOB_RETENTION_SECS,
+// shortened by the job's own retention_secs when the request asked for
+// less. A request never extends the host window, so an oversized or unset
+// request keeps the host value exactly as effectiveJobRuntime does for
+// the max runtime.
+func (s *Service) effectiveJobRetention(requested int64) int64 {
+	host := s.jobRetention()
+	if host <= 0 {
+		return 0
+	}
+	hostSecs := int64(host / time.Second)
+	req := requested
+	if req > hostSecs || req <= 0 {
+		return hostSecs
+	}
+	return req
+}
+
 // maxJobRuntimeDuration is the largest representable time.Duration; a
 // request at or below it cannot overflow the seconds conversion.
 const maxJobRuntimeDuration = time.Duration(1<<63 - 1)
@@ -331,7 +350,7 @@ func (s *Service) releaseJobStart(leaseID string, l *jobStartLock) {
 // startJob starts a background exec. It returns the job id, start time
 // and the envd Process carrying the stream (the caller watches it), or
 // an error the caller maps onto an HTTP status.
-func (s *Service) startJob(ctx context.Context, lease *Lease, owner, cmd, cwd string, env map[string]string, secrets map[string]string, requestedMaxRuntimeSecs int64) (string, time.Time, substrate.Process, error) {
+func (s *Service) startJob(ctx context.Context, lease *Lease, owner, cmd, cwd string, env map[string]string, secrets map[string]string, requestedMaxRuntimeSecs, requestedRetentionSecs int64) (string, time.Time, substrate.Process, error) {
 	// The job outlives the HTTP request that asked for it. Detach the
 	// whole start from the request's cancellation so (a) the envd Start
 	// stream — the stream the watcher holds to notice the exit at once —
@@ -371,6 +390,11 @@ func (s *Service) startJob(ctx context.Context, lease *Lease, owner, cmd, cwd st
 			maxRuntimeSecs = lim
 		}
 	}
+	// The record's own retention window (spoond-hwto): the effective
+	// host-or-shorter value, so the prune reads the row without knowing
+	// the host config. retention_secs of 0 can only mean a legacy row:
+	// a job started by this backend always stamps a positive value.
+	retentionSecs := s.effectiveJobRetention(requestedRetentionSecs)
 
 	// Stage the job's secrets before the wrapper runs. The guest wrapper
 	// removes them at exit; the backend removes them on reconcile if the
@@ -437,6 +461,7 @@ func (s *Service) startJob(ctx context.Context, lease *Lease, owner, cmd, cwd st
 		StartedAt:      startedAt,
 		Generation:     lease.Generation,
 		MaxRuntimeSecs: maxRuntimeSecs,
+		RetentionSecs:  retentionSecs,
 	}); err != nil {
 		// The process is running but unrecorded. Do not leave it: a
 		// best-effort TERM and the (empty) record-free result.
@@ -1105,18 +1130,21 @@ func (s *Service) reconcileJobs(ctx context.Context) {
 	}
 }
 
-// pruneJobs removes exited job records past the retention window and
+// pruneJobs removes exited job records past their retention windows and
 // then their guest files, so /var/lib/spoond/jobs does not grow without
-// bound. Lost records have no guest files left to clean, but their rows
-// are swept on the same window (spoond-966 L3). Called from the sweeper.
+// bound. Each row's own window applies (spoond-hwto): a job that asked
+// for a shorter retention_secs than the host's JOB_RETENTION_SECS is
+// pruned — and its guest directory removed — earlier. Lost records have
+// no guest files left to clean, but their rows are swept on the host
+// window (spoond-966 L3). Called from the sweeper.
 func (s *Service) pruneJobs(ctx context.Context) {
-	cutoff := s.now().Add(-s.jobRetention())
-	expired, err := s.db.ListExpiredJobs(ctx, cutoff)
+	now := s.now()
+	expired, err := s.db.ListExpiredJobs(ctx, now, s.jobRetention())
 	if err != nil {
 		s.storeError("list_expired_jobs", "", err)
 		return
 	}
-	if _, err := s.db.PruneJobs(ctx, cutoff); err != nil {
+	if _, err := s.db.PruneJobs(ctx, now, s.jobRetention()); err != nil {
 		s.storeError("prune_jobs", "", err)
 		return
 	}
@@ -1125,7 +1153,7 @@ func (s *Service) pruneJobs(ctx context.Context) {
 			s.cleanupJobFiles(ctx, sandboxID, job.JobID)
 		}
 	}
-	if _, err := s.db.PruneLostJobs(ctx, cutoff); err != nil {
+	if _, err := s.db.PruneLostJobs(ctx, now.Add(-s.jobRetention())); err != nil {
 		s.storeError("prune_lost_jobs", "", err)
 	}
 }
