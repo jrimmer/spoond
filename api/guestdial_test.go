@@ -326,12 +326,23 @@ func TestGuestDialBadPort(t *testing.T) {
 func TestGuestDialDialFailureIsBadGateway(t *testing.T) {
 	ts, svc, _, _ := newTestServerWithService(t)
 
+	// A port that is provably closed: bind a wildcard listener to grab
+	// an ephemeral port nobody wants, then drop it. A hardcoded port
+	// cannot work here — on some hosts a service answers the port the
+	// test assumed was dead, and dialing it succeeds.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	ln.Close()
+
 	_, create := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "ttl": 300})
 	id := create["id"].(string)
 	// Nothing listens on the guest port: the substrate dial fails.
-	pointHostIP(t, svc, id, "127.0.0.1", 1)
+	pointHostIP(t, svc, id, "127.0.0.1", port)
 
-	if _, resp, err := dialGuest(t, ts, id, 12345, "token-a"); err == nil {
+	if _, resp, err := dialGuest(t, ts, id, port, "token-a"); err == nil {
 		t.Fatal("dial to a dead guest port succeeded, want 502")
 	} else if resp.StatusCode != http.StatusBadGateway {
 		t.Fatalf("dead-port dial = %d, want 502", resp.StatusCode)
