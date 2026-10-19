@@ -866,6 +866,7 @@ func TestAdmitResumeLeavesFloorFreeNearFloor(t *testing.T) {
 		t.Fatalf("cached free after the resume = %d, %v; want 2048 (the floor free after the lease's full size)", free, err)
 	}
 }
+
 // (15 s), an admission whose request plus the floor sits within
 // nearFloorMarginMiB of the cached free value refreshes the NodeInfo and
 // is judged on the fresh reading: the fake's free pages dropped between
