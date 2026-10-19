@@ -39,6 +39,22 @@ type JobRow struct {
 	// JOB_RETENTION_SECS, never lengthen it. 0 for a row written before
 	// this column existed: the prune falls back to the host window.
 	RetentionSecs int64
+	// OutputMaxBytes is the per-stream output cap recorded at start
+	// (spoond-hwto), in bytes: once a guest stdout or stderr file grows
+	// past it the job poller punches the front of the file out and only
+	// the tail is kept. 0 = no cap (the host default, unlimited), and
+	// for rows written before the column existed.
+	OutputMaxBytes int64
+	// StdoutDroppedBytes/StderrDroppedBytes are how many bytes of front
+	// the output cap has dropped from each stream file, and the
+	// ...DroppedNewlines how many newlines those bytes held, both
+	// absolute (the file's offsets stay absolute above them). Zero for
+	// a stream that has not been capped: the API omits "skipped"
+	// altogether until something is dropped.
+	StdoutDroppedBytes    int64
+	StdoutDroppedNewlines int64
+	StderrDroppedBytes    int64
+	StderrDroppedNewlines int64
 	// Reason records why a record left 'running' outside the guest's own
 	// rc file: "" for a normal exit, "timed_out" when the max runtime
 	// was spent.
@@ -47,7 +63,15 @@ type JobRow struct {
 
 const jobColumns = `job_id, lease_id, owner, cmd, cwd, state, exit_code,
 	started_at, ended_at, stderr_tail, generation, max_runtime_secs, reason,
-	retention_secs`
+	retention_secs, output_max_bytes, stdout_dropped_bytes, stdout_dropped_newlines,
+	stderr_dropped_bytes, stderr_dropped_newlines`
+
+// jobDroppedColumns selects one stream's dropped-front counter pair by
+// name, for the cap's update.
+var jobDroppedColumn = map[string][2]string{
+	"stdout": {"stdout_dropped_bytes", "stdout_dropped_newlines"},
+	"stderr": {"stderr_dropped_bytes", "stderr_dropped_newlines"},
+}
 
 // JobReasonTimedOut is the lease_jobs.reason recorded when the max
 // runtime, not the command, ended a job. It is also the label the API
@@ -58,12 +82,34 @@ const JobReasonTimedOut = "timed_out"
 // "running" and exit_code nil.
 func (db *DB) InsertJob(ctx context.Context, j JobRow) error {
 	_, err := db.w.ExecContext(ctx, `
-INSERT INTO lease_jobs (`+jobColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+INSERT INTO lease_jobs (`+jobColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		j.JobID, j.LeaseID, j.Owner, j.Cmd, j.Cwd, j.State, j.ExitCode,
 		formatTime(j.StartedAt), formatTime(j.EndedAt), j.StderrTail, j.Generation,
-		j.MaxRuntimeSecs, j.Reason, j.RetentionSecs)
+		j.MaxRuntimeSecs, j.Reason, j.RetentionSecs, j.OutputMaxBytes,
+		j.StdoutDroppedBytes, j.StdoutDroppedNewlines,
+		j.StderrDroppedBytes, j.StderrDroppedNewlines)
 	if err != nil {
 		return fmt.Errorf("store: insert job %s: %w", j.JobID, err)
+	}
+	return nil
+}
+
+// UpdateJobSkipped raises one stream's dropped-front counters to
+// dropped/newlines (spoond-hwto). The cap can only drop more, so a
+// value below what the row already holds is ignored rather than written:
+// a guest file restored from a snapshot or replayed from an older
+// sidecar cannot shorten what the record reports.
+func (db *DB) UpdateJobSkipped(ctx context.Context, jobID, stream string, dropped, newlines int64) error {
+	cols, ok := jobDroppedColumn[stream]
+	if !ok {
+		return fmt.Errorf("store: update job skipped %s: unknown stream %q", jobID, stream)
+	}
+	_, err := db.w.ExecContext(ctx, `
+UPDATE lease_jobs SET `+cols[0]+` = MAX(`+cols[0]+`, ?), `+cols[1]+` = MAX(`+cols[1]+`, ?)
+WHERE job_id = ?`,
+		dropped, newlines, jobID)
+	if err != nil {
+		return fmt.Errorf("store: update job skipped %s: %w", jobID, err)
 	}
 	return nil
 }
@@ -393,7 +439,9 @@ func scanJob(scan func(dest ...any) error) (JobRow, error) {
 	var startedAt, endedAt string
 	err := scan(&r.JobID, &r.LeaseID, &r.Owner, &r.Cmd, &r.Cwd, &r.State,
 		&exitCode, &startedAt, &endedAt, &r.StderrTail, &r.Generation,
-		&r.MaxRuntimeSecs, &r.Reason, &r.RetentionSecs)
+		&r.MaxRuntimeSecs, &r.Reason, &r.RetentionSecs, &r.OutputMaxBytes,
+		&r.StdoutDroppedBytes, &r.StdoutDroppedNewlines,
+		&r.StderrDroppedBytes, &r.StderrDroppedNewlines)
 	if errors.Is(err, sql.ErrNoRows) {
 		return JobRow{}, ErrNotFound
 	}

@@ -2340,6 +2340,12 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		// are pruned sooner. It can never lengthen the host window; 0 or
 		// omitted uses it. A negative value is rejected.
 		RetentionSecs int64 `json:"retention_secs"`
+		// OutputMaxBytes (spoond-hwto) caps this job's per-stream output:
+		// once a guest stdout or stderr file grows past it, the job poller
+		// punches the file's front out and keeps the tail. It shortens the
+		// host's JOB_OUTPUT_MAX_BYTES (0 = unlimited), never lengthens it;
+		// 0 or omitted uses the host value. A negative value is rejected.
+		OutputMaxBytes int64 `json:"output_max_bytes"`
 		// Secrets (#80) are staged as /run/secrets/<name> files for this
 		// command only and removed afterwards. Values are kept in memory
 		// only, never stored, logged or returned.
@@ -2366,13 +2372,20 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "retention_secs must be non-negative")
 		return
 	}
+	// output_max_bytes follows its siblings (spoond-hwto): a negative
+	// value is refused even on a synchronous exec so a client cannot
+	// believe it capped anything.
+	if req.OutputMaxBytes < 0 {
+		writeError(w, http.StatusBadRequest, "output_max_bytes must be non-negative")
+		return
+	}
 	execSecrets, err := validateSecrets(req.Secrets)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if req.Background {
-		s.handleBackgroundExec(w, r, lease, owner, req.Cmd, req.Cwd, req.Env, execSecrets, req.MaxRuntimeSecs, req.RetentionSecs)
+		s.handleBackgroundExec(w, r, lease, owner, req.Cmd, req.Cwd, req.Env, execSecrets, req.MaxRuntimeSecs, req.RetentionSecs, req.OutputMaxBytes)
 		return
 	}
 	timeout := req.Timeout

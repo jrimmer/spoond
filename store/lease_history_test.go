@@ -148,9 +148,16 @@ func TestMigration29LeaseHistoryOnV28Database(t *testing.T) {
 		// Rewinding under migration 0030 (spoond-hwto) must also drop the
 		// column it adds and its version row: with 30 still recorded the
 		// reopened database would skip 0029 for good (29 <= 30) and the
-		// dropped start_ms would never come back.
+		// dropped start_ms would never come back. Migration 0031 (the
+		// output cap) is the same reason: 31 recorded would leave 29's
+		// start_ms dropped for good.
 		`ALTER TABLE lease_jobs DROP COLUMN retention_secs`,
-		`DELETE FROM schema_migrations WHERE version IN (29, 30)`,
+		`ALTER TABLE lease_jobs DROP COLUMN output_max_bytes`,
+		`ALTER TABLE lease_jobs DROP COLUMN stdout_dropped_bytes`,
+		`ALTER TABLE lease_jobs DROP COLUMN stdout_dropped_newlines`,
+		`ALTER TABLE lease_jobs DROP COLUMN stderr_dropped_bytes`,
+		`ALTER TABLE lease_jobs DROP COLUMN stderr_dropped_newlines`,
+		`DELETE FROM schema_migrations WHERE version IN (29, 30, 31)`,
 	} {
 		if _, err := db28.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)

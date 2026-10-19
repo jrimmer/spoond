@@ -57,6 +57,12 @@ const (
 	// jobEventStderrLines is how many stderr lines the job_exited detail
 	// carries.
 	jobEventStderrLines = 10
+	// jobPunchBlockBytes is the guest filesystem's block size (spoond-
+	// hwto): the punch target is rounded down to one, so the hole itself
+	// is block-aligned and a following extend never turns it back into
+	// data. 4 KiB, the common filesystem block size and the least the
+	// call reliably honours.
+	jobPunchBlockBytes = 4096
 )
 
 // DefaultMaxRunningJobsPerLease and DefaultJobRetentionSecs are the
@@ -65,6 +71,13 @@ const (
 	DefaultMaxRunningJobsPerLease = 16
 	DefaultJobRetentionSecs       = 604800 // 7 days
 )
+
+// DefaultJobOutputMaxBytes is the JOB_OUTPUT_MAX_BYTES default
+// (spoond-hwto): a job's streams are capped at nothing — the whole
+// output is kept, exactly as before the cap existed — and only a
+// request's own output_max_bytes (or an explicit host config) drops
+// anything.
+const DefaultJobOutputMaxBytes = 0
 
 // DefaultJobMaxRuntimeSecs is the JOB_MAX_RUNTIME default: a background
 // job may run for 24 h before it is killed (spoond-wb5).
@@ -160,6 +173,25 @@ type jobInfo struct {
 	// MaxRuntimeSecs is the effective cap the job ran under, in seconds,
 	// 0 when uncapped.
 	MaxRuntimeSecs int64 `json:"max_runtime_secs,omitempty"`
+	// RetentionSecs is the effective retention window, in seconds, the
+	// job's record and guest files are kept under (spoond-hwto): the
+	// host's JOB_RETENTION_SECS shortened by the job's own request.
+	RetentionSecs int64 `json:"retention_secs,omitempty"`
+	// Skipped names, per stream the output cap has dropped anything
+	// from (spoond-hwto), how many bytes — and how many newlines those
+	// bytes held — the record view's stdout/stderr read leaves out. A
+	// stream the cap has not touched is not named, so the view's shape
+	// is unchanged until something is dropped.
+	Skipped map[string]jobStreamSkipped `json:"skipped,omitempty"`
+}
+
+// jobStreamSkipped is one stream's dropped-front view (spoond-hwto): the
+// bytes the output cap dropped from the stream's file (and the newlines
+// those bytes held), so an absolute offset the record's caller reads
+// can name where the answer starts.
+type jobStreamSkipped struct {
+	Bytes    int64 `json:"bytes"`
+	Newlines int64 `json:"newlines"`
 }
 
 // jobInfoOf renders a store row for the API.
@@ -177,12 +209,40 @@ func jobInfoOf(r store.JobRow) jobInfo {
 		StderrTail:     r.StderrTail,
 		Reason:         r.Reason,
 		MaxRuntimeSecs: r.MaxRuntimeSecs,
+		RetentionSecs:  r.RetentionSecs,
+		Skipped:        jobSkippedView(r),
 	}
+}
+
+// jobSkippedView renders the record's dropped-front counters as the
+// API's skipped view (spoond-hwto): nil until any stream has dropped
+// anything, so the record view's shape is byte-identical to the
+// pre-cap one while nothing is dropped.
+func jobSkippedView(r store.JobRow) map[string]jobStreamSkipped {
+	var out map[string]jobStreamSkipped
+	if r.StdoutDroppedBytes > 0 {
+		out = map[string]jobStreamSkipped{"stdout": {r.StdoutDroppedBytes, r.StdoutDroppedNewlines}}
+	}
+	if r.StderrDroppedBytes > 0 {
+		if out == nil {
+			out = map[string]jobStreamSkipped{}
+		}
+		out["stderr"] = jobStreamSkipped{r.StderrDroppedBytes, r.StderrDroppedNewlines}
+	}
+	return out
 }
 
 // jobPath returns the guest path of one job file.
 func jobPath(jobID, name string) string {
 	return jobsDir + "/" + jobID + "/" + name
+}
+
+// jobCapPath returns the guest path of one stream's cap counters sidecar
+// (spoond-hwto). It lives in the same job directory as the stream, so
+// the job's own cleanup (and its retention prune) removes it with the
+// stream.
+func jobCapPath(jobID, stream string) string {
+	return jobPath(jobID, stream+".cap")
 }
 
 // maxRunningJobs returns the configured per-lease running-job cap, or
@@ -212,15 +272,274 @@ func (s *Service) jobRetention() time.Duration {
 // the max runtime.
 func (s *Service) effectiveJobRetention(requested int64) int64 {
 	host := s.jobRetention()
-	if host <= 0 {
-		return 0
-	}
 	hostSecs := int64(host / time.Second)
 	req := requested
 	if req > hostSecs || req <= 0 {
 		return hostSecs
 	}
 	return req
+}
+
+// maxJobCapFile bounds how much of a cap sidecar file (spoond-hwto) any
+// read or write takes. A pass that appends its line is bounded (one
+// line per pass, one pass per poll); the read's bound keeps a runaway
+// file from being pulled whole. At the bound the sidecar is left to the
+// next pass and the record's own counters (the row is authoritative
+// for reads anyway).
+const maxJobCapFile = 1 << 20
+
+// jobOutputMax returns the host's configured per-stream default output
+// cap (spoond-hwto). 0 = uncapped; a negative value is treated the same
+// way, so a deployment cannot disable the guard by typo.
+func (s *Service) jobOutputMax() int64 {
+	if s.cfg.JobOutputMaxBytes > 0 {
+		return s.cfg.JobOutputMaxBytes
+	}
+	return DefaultJobOutputMaxBytes
+}
+
+// effectiveJobOutputMax returns the per-stream output cap a new job's
+// streams run under (spoond-hwto): the host's JOB_OUTPUT_MAX_BYTES
+// (0 = unlimited), shortened by the job's own output_max_bytes when
+// the request asked for one. A request never lengthens the host cap,
+// the way effectiveJobRetention never extends the host window.
+func (s *Service) effectiveJobOutputMax(requested int64) int64 {
+	host := s.jobOutputMax()
+	if host > 0 && (requested <= 0 || requested > host) {
+		return host
+	}
+	return requested
+}
+
+// jobPunchHole holds the optional substrate extension the output cap
+// runs on (spoond-hwto): punching holes is how the poller drops the
+// front of an over-cap stream file while the command keeps appending.
+// The e2b substrate implements it with `fallocate --punch-hole` in the
+// guest; the fake emulates the same semantics in memory.
+type jobPunchHole interface {
+	PunchHole(ctx context.Context, sandboxID, path string, offset, length int64) error
+}
+
+// jobCapTarget is the drop plan's core (spoond-hwto): the absolute
+// offset the poller drops a stream file of `size` bytes to, when its
+// record has already dropped `dropped` and its kept window is `kept`
+// (the cap plus the block the target rounds into): the floor block
+// boundary at or below the byte that keeps exactly `kept` bytes, so the
+// kept region always holds at least the cap and the hole itself is
+// block-aligned. 0 means nothing to drop: the file is at or under the
+// window, or the target has not moved past what is already dropped.
+// Pure, so the cap tests pin the block math without a sandbox.
+func jobCapTarget(size, dropped, kept int64) int64 {
+	if kept <= 0 || size <= kept {
+		return 0
+	}
+	target := (size - kept) / jobPunchBlockBytes * jobPunchBlockBytes
+	if target <= dropped {
+		return 0
+	}
+	return target
+}
+
+// jobCapCountNewlines counts the newlines of a planned drop's bytes
+// (spoond-hwto), so the record can say how many lines a read of the
+// stream's front skips over.
+func jobCapCountNewlines(data []byte) int64 {
+	n := int64(0)
+	for _, b := range data {
+		if b == '\n' {
+			n++
+		}
+	}
+	return n
+}
+
+// maxInt64 returns the larger of two values.
+func maxInt64(a, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// jobRowDropped is the row's recorded dropped front of one stream.
+func jobRowDropped(job store.JobRow, stream string) int64 {
+	if stream == "stdout" {
+		return job.StdoutDroppedBytes
+	}
+	return job.StderrDroppedBytes
+}
+
+// jobStreamNewlines is the recorded newline count of one stream's
+// dropped front (0 for a stream that dropped nothing or a legacy row).
+func jobStreamNewlines(job store.JobRow, stream string) int64 {
+	if stream == "stdout" {
+		return job.StdoutDroppedNewlines
+	}
+	return job.StderrDroppedNewlines
+}
+
+// jobCapLine renders a cap sidecar line, newline included.
+func jobCapLine(dropped, newlines, kept int64) string {
+	return fmt.Sprintf("%d %d %d\n", dropped, newlines, kept)
+}
+
+// jobCapSidecarOf loads the live counters of a stream's cap sidecar.
+// ok is false when there is no live line (the file is missing, garbled
+// or unwritten), and the caller falls back to the record's own.
+func (s *Service) jobCapSidecarOf(ctx context.Context, sandboxID, jobID, stream string) (int64, int64, bool) {
+	data, err := s.sub.ReadFile(ctx, sandboxID, jobCapPath(jobID, stream), maxJobCapFile)
+	if err != nil || len(data) == 0 {
+		return 0, 0, false
+	}
+	if n := len(data); data[n-1] != '\n' {
+		return 0, 0, false
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	last := lines[len(lines)-1]
+	dropped, newlines, ok := jobCapSidecarOf2(last)
+	if !ok {
+		return 0, 0, false
+	}
+	return dropped, newlines, true
+}
+
+// jobCapSidecarOf2 is the pure body of jobCapSidecarOf: one sidecar
+// line parsed. ok is false for anything that is not a whole, sane
+// "<dropped> <newlines> <kept>" line; the caller then falls back to the
+// record's own counters.
+func jobCapSidecarOf2(line string) (dropped, newlines int64, ok bool) {
+	fields := strings.Fields(line)
+	if len(fields) != 3 {
+		return 0, 0, false
+	}
+	a, err1 := strconv.ParseInt(fields[0], 10, 64)
+	b, err2 := strconv.ParseInt(fields[1], 10, 64)
+	_, err3 := strconv.ParseInt(fields[2], 10, 64)
+	if err1 != nil || err2 != nil || err3 != nil || a < 0 || b < 0 {
+		return 0, 0, false
+	}
+	// kept is recorded as it was applied (kept = size - dropped at the
+	// pass); it is not validated beyond its parse: the record's counters
+	// are what reads trust.
+	return a, b, true
+}
+
+// capJobStream caps one guest stream file (spoond-hwto), the poller's
+// working step. dropped/newlines are what the record holds for the
+// stream now (the guest sidecar may be ahead); kept is the cap window
+// (the cap plus the block its target rounds into). The pass: plan the
+// block-aligned kept region from the file's size, count the planned
+// region's newlines from a range read of exactly that region, punch the
+// region out, then — and only then — make the drop visible by appending
+// the sidecar line and raising the record's counters. The punch runs
+// first, so a failure leaves no counter describing a drop that did not
+// happen; the next pass re-punches a crash-lost write. When the
+// substrate cannot punch holes the stream is left whole: truncating it
+// by any other means would shift the offsets every absolute-offset
+// reader holds, so the cap says so in the log and drops nothing.
+func (s *Service) capJobStream(ctx context.Context, sandboxID, jobID, stream string, dropped, newlines, kept int64) {
+	path := jobPath(jobID, stream)
+	info, err := s.sub.Stat(ctx, sandboxID, path)
+	if err != nil {
+		return // no stream file (yet); a later pass re-plans
+	}
+	if info.Size < dropped {
+		// The file was rolled back under the record (a snapshot
+		// restore): nothing is left to drop and the front is already
+		// gone; reads clamp to the record's own counters.
+		return
+	}
+	target := jobCapTarget(info.Size, dropped, kept)
+	if target <= dropped {
+		return
+	}
+	ph, ok := s.sub.(jobPunchHole)
+	if !ok {
+		s.log.Printf("jobs: %s: %s output cap: the guest does not support fallocate --punch-hole; the stream is left untruncated (its bytes are never served twice and nothing is reported dropped)", jobID, stream)
+		return
+	}
+	// Count the newlines the punched bytes hold, from a range read of
+	// exactly the region the pass is about to punch: the record gets
+	// the front's line count from the same bytes it removes.
+	data, rerr := s.readStreamRange(ctx, sandboxID, path, dropped, target-dropped)
+	if rerr != nil {
+		s.log.Printf("jobs: %s: %s output cap: count %d..%d: %v", jobID, stream, dropped, target, rerr)
+		return
+	}
+	planned := jobCapCountNewlines(data)
+	if perr := ph.PunchHole(ctx, sandboxID, path, dropped, target-dropped); perr != nil {
+		s.log.Printf("jobs: %s: %s output cap: punch %d..%d: %v", jobID, stream, dropped, target, perr)
+		return
+	}
+	// The sidecar's last live line must be whole before it is appended
+	// to; a torn tail line (a crashed old-style write) leaves the
+	// sidecar unusable and the record's counters authoritative.
+	pre, rerr2 := s.sub.ReadFile(ctx, sandboxID, jobCapPath(jobID, stream), maxJobCapFile)
+	if rerr2 != nil && !errors.Is(rerr2, substrate.ErrNotFound) {
+		s.log.Printf("jobs: %s: %s output cap: read counters: %v", jobID, stream, rerr2)
+		return
+	}
+	if n := len(pre); n > 0 && pre[n-1] != '\n' {
+		s.log.Printf("jobs: %s: %s output cap: counters end mid-line; the pass is skipped", jobID, stream)
+		return
+	}
+	next := string(pre) + jobCapLine(target, dropped+planned, target)
+	if werr := s.sub.WriteFile(ctx, sandboxID, jobCapPath(jobID, stream), []byte(next), 0o600); werr != nil {
+		// The drop is already punched, so the record is the only view
+		// left: a failure here says so and the counters catch up there.
+		s.log.Printf("jobs: %s: %s output cap: write counters: %v", jobID, stream, werr)
+		return
+	}
+	if uerr := s.db.UpdateJobSkipped(ctx, jobID, stream, target, newlines+planned); uerr != nil {
+		s.log.Printf("jobs: %s: %s output cap: record skipped: %v", jobID, stream, uerr)
+	}
+}
+
+// capJobStreams caps both streams of one job (spoond-hwto), the job
+// poller's working step.
+func (s *Service) capJobStreams(ctx context.Context, job store.JobRow, sandboxID string) {
+	kept := job.OutputMaxBytes + jobPunchBlockBytes
+	if kept <= jobPunchBlockBytes {
+		kept = s.jobOutputMax() + jobPunchBlockBytes
+	}
+	if kept <= jobPunchBlockBytes {
+		return
+	}
+	for _, stream := range []string{"stdout", "stderr"} {
+		dropped, newlines := jobRowDropped(job, stream), jobStreamNewlines(job, stream)
+		if d, _, ok := s.jobCapSidecarOf(ctx, sandboxID, job.JobID, stream); ok && d > dropped {
+			// The guest file's counters are ahead of the record's (a
+			// store write failed after a pass): continue from there, and
+			// the record rises as the pass lands.
+			dropped = d
+		}
+		s.capJobStream(ctx, sandboxID, job.JobID, stream, dropped, newlines, kept)
+	}
+}
+
+// readStreamRange reads a byte range of a guest file through the
+// optional range reader, falling back to a prefix read when the
+// substrate lacks it (a range of a job stream is small: the read is
+// only ever the planned drop's body). A missing file is an empty one.
+func (s *Service) readStreamRange(ctx context.Context, sandboxID, path string, offset, limit int64) ([]byte, error) {
+	if rr, ok := s.sub.(jobRangeReader); ok {
+		return rr.ReadFileRange(ctx, sandboxID, path, offset, limit)
+	}
+	data, err := s.sub.ReadFile(ctx, sandboxID, path, offset+limit)
+	if err != nil {
+		if errors.Is(err, substrate.ErrNotFound) || errors.Is(err, substrate.ErrTooLarge) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if offset >= int64(len(data)) {
+		return nil, nil
+	}
+	end := offset + limit
+	if end > int64(len(data)) {
+		end = int64(len(data))
+	}
+	return data[offset:end], nil
 }
 
 // maxJobRuntimeDuration is the largest representable time.Duration; a
@@ -350,7 +669,7 @@ func (s *Service) releaseJobStart(leaseID string, l *jobStartLock) {
 // startJob starts a background exec. It returns the job id, start time
 // and the envd Process carrying the stream (the caller watches it), or
 // an error the caller maps onto an HTTP status.
-func (s *Service) startJob(ctx context.Context, lease *Lease, owner, cmd, cwd string, env map[string]string, secrets map[string]string, requestedMaxRuntimeSecs, requestedRetentionSecs int64) (string, time.Time, substrate.Process, error) {
+func (s *Service) startJob(ctx context.Context, lease *Lease, owner, cmd, cwd string, env map[string]string, secrets map[string]string, requestedMaxRuntimeSecs, requestedRetentionSecs, requestedOutputMaxBytes int64) (string, time.Time, substrate.Process, error) {
 	// The job outlives the HTTP request that asked for it. Detach the
 	// whole start from the request's cancellation so (a) the envd Start
 	// stream — the stream the watcher holds to notice the exit at once —
@@ -395,6 +714,10 @@ func (s *Service) startJob(ctx context.Context, lease *Lease, owner, cmd, cwd st
 	// the host config. retention_secs of 0 can only mean a legacy row:
 	// a job started by this backend always stamps a positive value.
 	retentionSecs := s.effectiveJobRetention(requestedRetentionSecs)
+	// The streams' own output cap (spoond-hwto): the host default
+	// (JOB_OUTPUT_MAX_BYTES, 0 = unlimited) shortened by the request's
+	// output_max_bytes.
+	outputMax := s.effectiveJobOutputMax(requestedOutputMaxBytes)
 
 	// Stage the job's secrets before the wrapper runs. The guest wrapper
 	// removes them at exit; the backend removes them on reconcile if the
@@ -462,6 +785,7 @@ func (s *Service) startJob(ctx context.Context, lease *Lease, owner, cmd, cwd st
 		Generation:     lease.Generation,
 		MaxRuntimeSecs: maxRuntimeSecs,
 		RetentionSecs:  retentionSecs,
+		OutputMaxBytes: outputMax,
 	}); err != nil {
 		// The process is running but unrecorded. Do not leave it: a
 		// best-effort TERM and the (empty) record-free result.
@@ -525,7 +849,7 @@ func (s *Service) finishJobFromGuest(ctx context.Context, job store.JobRow, sand
 	if !done {
 		return
 	}
-	stderr, _ := s.readJobStderrTail(ctx, sandboxID, job.JobID, jobStderrTailBytes)
+	stderr, _ := s.readJobStderrTail(ctx, sandboxID, job.JobID, jobStderrTailBytes, job)
 	if err := s.finishJob(ctx, job, code, stderr, sandboxID, generation); err != nil {
 		s.log.Printf("jobs: %s: finish: %v", job.JobID, err)
 	}
@@ -875,7 +1199,7 @@ func (s *Service) killJobTimeout(ctx context.Context, job store.JobRow, sandboxI
 	if s.leaseBusyOrSuspended(job.LeaseID) {
 		return false
 	}
-	tail, _ := s.readJobStderrTail(ctx, sandboxID, job.JobID, jobStderrTailBytes)
+	tail, _ := s.readJobStderrTail(ctx, sandboxID, job.JobID, jobStderrTailBytes, job)
 	// A previous pass already killed the process but could not record the
 	// outcome: do not signal an already-gone process, just record again.
 	if !s.jobIsTimingOut(job.JobID) {
@@ -983,8 +1307,8 @@ func toValidUTF8(s string) string {
 // bytes are made valid UTF-8 (a tail read can start mid-rune and the
 // guest may write arbitrary bytes), so the stored tail and the emitted
 // detail are always valid text.
-func (s *Service) readJobStderrTail(ctx context.Context, sandboxID, jobID string, n int) (string, error) {
-	data, err := s.readJobRange(ctx, sandboxID, jobID, "stderr", -1, n)
+func (s *Service) readJobStderrTail(ctx context.Context, sandboxID, jobID string, n int, job store.JobRow) (string, error) {
+	data, _, _, err := s.readJobRange(ctx, sandboxID, jobID, "stderr", -1, n, job)
 	return toValidUTF8(string(data)), err
 }
 
@@ -1115,6 +1439,12 @@ func (s *Service) reconcileJobs(ctx context.Context) {
 			s.log.Printf("jobs: reconcile %s: read rc: %v", job.JobID, err)
 			continue
 		}
+		// The output cap runs only for a job still appending (spoond-hwto):
+		// an exited one cannot grow its files, and a finished stderr tail
+		// must not be re-punched behind the record's own tail copy.
+		if !done {
+			s.capJobStreams(ctx, job, sandboxID)
+		}
 		if !done {
 			// A running job in a live lease is activity for the idle
 			// rules, but the startup seed already counts it; only record
@@ -1123,7 +1453,7 @@ func (s *Service) reconcileJobs(ctx context.Context) {
 			s.markActive(job.LeaseID)
 			continue
 		}
-		stderr, _ := s.readJobStderrTail(ctx, sandboxID, job.JobID, jobStderrTailBytes)
+		stderr, _ := s.readJobStderrTail(ctx, sandboxID, job.JobID, jobStderrTailBytes, job)
 		if err := s.finishJob(ctx, job, code, stderr, sandboxID, generation); err != nil {
 			s.log.Printf("jobs: reconcile %s: finish: %v", job.JobID, err)
 		}
@@ -1158,11 +1488,14 @@ func (s *Service) pruneJobs(ctx context.Context) {
 	}
 }
 
-// readJobOutput reads the last n bytes of a job's stdout or stderr. The
-// bytes are made valid UTF-8 before they are emitted in the record view.
-func (s *Service) readJobOutput(ctx context.Context, sandboxID, jobID, stream string, n int) (string, error) {
-	data, err := s.readJobRange(ctx, sandboxID, jobID, stream, -1, n)
-	return toValidUTF8(string(data)), err
+// readJobOutput reads the last n bytes of a job's stdout or stderr for
+// the record view. The bytes are made valid UTF-8 before they are
+// emitted; the start and the skipped view (spoond-hwto) tell the view
+// where in the absolute offsets the answer sits and what the cap has
+// dropped in front of it.
+func (s *Service) readJobOutput(ctx context.Context, sandboxID, jobID, stream string, n int, job store.JobRow) (string, int64, jobStreamSkipped, error) {
+	data, start, skip, err := s.readJobRange(ctx, sandboxID, jobID, stream, -1, n, job)
+	return toValidUTF8(string(data)), start, skip, err
 }
 
 // jobRangeReader is the optional substrate extension the output
@@ -1174,44 +1507,76 @@ type jobRangeReader interface {
 
 // readJobRange reads a byte range of a job's stdout or stderr. offset
 // < 0 means the last limit bytes; otherwise it reads limit bytes from
-// offset. A missing file is empty output, not an error.
-func (s *Service) readJobRange(ctx context.Context, sandboxID, jobID, stream string, offset, limit int) ([]byte, error) {
+// offset. A missing file is empty output, not an error. When the record
+// carries a dropped front — the output cap (spoond-hwto) — bytes below
+// `dropped` are gone from the file: a read that would begin there is
+// clamped to the first kept byte (the offset the answer starts at, an
+// absolute one: after the punch the file's own offsets already sit
+// above the dropped front), and any byte the answer skips over is
+// summed into `skip` so the caller can say what a follower must not
+// assume contiguous.
+func (s *Service) readJobRange(ctx context.Context, sandboxID, jobID, stream string, offset, limit int, job store.JobRow) (data []byte, start int64, skip jobStreamSkipped, err error) {
 	path := jobPath(jobID, stream)
+	dropped := jobRowDropped(job, stream)
+	skipBytes := dropped
 	if offset < 0 {
-		info, err := s.sub.Stat(ctx, sandboxID, path)
-		if err != nil {
-			if errors.Is(err, substrate.ErrNotFound) {
-				return nil, nil
+		info, serr := s.sub.Stat(ctx, sandboxID, path)
+		if serr != nil {
+			if errors.Is(serr, substrate.ErrNotFound) {
+				return nil, 0, jobStreamSkipped{}, nil
 			}
-			return nil, err
+			return nil, 0, jobStreamSkipped{}, serr
 		}
+		// The tail read resolves at the file's present size (its file
+		// offsets are the response's absolute ones).
 		offset = int(info.Size) - limit
 		if offset < 0 {
 			offset = 0
 		}
-	}
-	if rr, ok := s.sub.(jobRangeReader); ok {
-		return rr.ReadFileRange(ctx, sandboxID, path, int64(offset), int64(limit))
-	}
-	// Fallback: read the prefix up to offset+limit and slice. Fine for
-	// substrates without the optional range read. A file larger than the
-	// requested prefix cannot be read whole, so a tail request degrades to
-	// empty rather than an error the caller would surface as unavailable.
-	data, err := s.sub.ReadFile(ctx, sandboxID, path, int64(offset+limit))
-	if err != nil {
-		if errors.Is(err, substrate.ErrNotFound) || errors.Is(err, substrate.ErrTooLarge) {
-			return nil, nil
+		if int64(offset) < dropped {
+			offset = int(dropped)
 		}
-		return nil, err
+	} else if int64(offset) < dropped {
+		// A read into the dropped front: not an error, it starts at the
+		// first kept byte.
+		offset = int(dropped)
 	}
-	if offset >= len(data) {
-		return nil, nil
+	// The offset read is file-relative — after the punch the file's own
+	// offsets ARE the absolute ones, so the first kept byte's offset is
+	// `dropped` itself.
+	skip = jobStreamSkipped{}
+	if skipBytes > 0 {
+		skip = jobStreamSkipped{
+			Bytes:    skipBytes,
+			Newlines: jobStreamNewlines(job, stream),
+		}
 	}
-	end := offset + limit
-	if end > len(data) {
-		end = len(data)
+	start = int64(offset)
+	if rr, ok := s.sub.(jobRangeReader); ok {
+		data, err = rr.ReadFileRange(ctx, sandboxID, path, int64(offset), int64(limit))
+	} else {
+		// Fallback: read the prefix up to offset+limit and slice. Fine
+		// for substrates without the optional range read. A file larger
+		// than the requested prefix cannot be read whole, so a tail
+		// request degrades to empty rather than an error the caller
+		// would surface as unavailable.
+		var pre []byte
+		pre, err = s.sub.ReadFile(ctx, sandboxID, path, int64(offset+limit))
+		if err == nil && offset < len(pre) {
+			end := offset + limit
+			if end > len(pre) {
+				end = len(pre)
+			}
+			data = pre[offset:end]
+		}
 	}
-	return data[offset:end], nil
+	if err != nil {
+		if errors.Is(err, substrate.ErrNotFound) {
+			return nil, start, skip, nil
+		}
+		return nil, start, skip, err
+	}
+	return data, start, skip, nil
 }
 
 // leaseJobsView returns a lease's running job count and its most recent

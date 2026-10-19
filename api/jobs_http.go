@@ -23,8 +23,8 @@ import (
 
 // handleBackgroundExec answers the exec request with "background": true:
 // start the job and 202 as soon as it is running.
-func (s *Server) handleBackgroundExec(w http.ResponseWriter, r *http.Request, lease *Lease, owner, cmd, cwd string, env map[string]string, secrets map[string]string, maxRuntimeSecs, retentionSecs int64) {
-	jobID, startedAt, proc, err := s.svc.startJob(r.Context(), lease, owner, cmd, cwd, env, secrets, maxRuntimeSecs, retentionSecs)
+func (s *Server) handleBackgroundExec(w http.ResponseWriter, r *http.Request, lease *Lease, owner, cmd, cwd string, env map[string]string, secrets map[string]string, maxRuntimeSecs, retentionSecs, outputMaxBytes int64) {
+	jobID, startedAt, proc, err := s.svc.startJob(r.Context(), lease, owner, cmd, cwd, env, secrets, maxRuntimeSecs, retentionSecs, outputMaxBytes)
 	if err != nil {
 		switch {
 		case errors.Is(err, errJobCap):
@@ -121,8 +121,6 @@ func (s *Server) handleJobsList(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleJobGet answers GET .../jobs/{job}: the record plus the last
-// 64 KiB of stdout and stderr. With ?wait=<seconds> it long-polls until
-// the job is no longer running or the wait ends.
 func (s *Server) handleJobGet(w http.ResponseWriter, r *http.Request) {
 	lease := s.jobsTarget(w, r)
 	if lease == nil {
@@ -141,20 +139,30 @@ func (s *Server) handleJobGet(w http.ResponseWriter, r *http.Request) {
 	// does not depend on the lease's state (a suspended lease's envd is
 	// gone and returns nothing to read).
 	resp["stdout"], resp["stderr"] = "", ""
-	if out, err := s.svc.readJobOutput(r.Context(), lease.SandboxID, row.JobID, "stdout", jobStdoutReadBytes); err == nil {
+	out, outStart, outSkip, err := s.svc.readJobOutput(r.Context(), lease.SandboxID, row.JobID, "stdout", jobStdoutReadBytes, row)
+	if err == nil {
 		resp["stdout"] = out
+		if outSkip.Bytes > 0 {
+			resp["stdout_offset"] = outStart
+			resp["stdout_skipped"] = outSkip
+		}
 	} else if errors.Is(err, substrate.ErrUnavailable) {
 		s.writeSubstrateUnavailable(w)
 		return
 	} else if !errors.Is(err, substrate.ErrNotFound) {
 		resp["stdout_error"] = "output unavailable"
 	}
-	if errText, err := s.svc.readJobOutput(r.Context(), lease.SandboxID, row.JobID, "stderr", jobStderrReadBytes); err == nil {
+	errText, errStart, errSkip, errRead := s.svc.readJobOutput(r.Context(), lease.SandboxID, row.JobID, "stderr", jobStderrReadBytes, row)
+	if errRead == nil {
 		resp["stderr"] = errText
-	} else if errors.Is(err, substrate.ErrUnavailable) {
+		if errSkip.Bytes > 0 {
+			resp["stderr_offset"] = errStart
+			resp["stderr_skipped"] = errSkip
+		}
+	} else if errors.Is(errRead, substrate.ErrUnavailable) {
 		s.writeSubstrateUnavailable(w)
 		return
-	} else if !errors.Is(err, substrate.ErrNotFound) {
+	} else if !errors.Is(errRead, substrate.ErrNotFound) {
 		resp["stderr_error"] = "output unavailable"
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -283,7 +291,7 @@ func (s *Server) handleJobOutput(w http.ResponseWriter, r *http.Request) {
 	if limit > jobOutputMaxLimit {
 		limit = jobOutputMaxLimit
 	}
-	data, err := s.svc.readJobRange(r.Context(), lease.SandboxID, row.JobID, stream, offset, limit)
+	data, start, skip, err := s.svc.readJobRange(r.Context(), lease.SandboxID, row.JobID, stream, offset, limit, row)
 	if err != nil {
 		if errors.Is(err, substrate.ErrUnavailable) {
 			s.writeSubstrateUnavailable(w)
@@ -299,6 +307,16 @@ func (s *Server) handleJobOutput(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
+	// The absolute byte offset the answer starts at: the request's
+	// offset when it lies past the cap's dropped front, else the first
+	// kept byte (never an error, but a follower must know where it is
+	// resuming from). Only sent once the cap has dropped something, so
+	// the uncapped shape is byte-identical to before (spoond-hwto).
+	if skip.Bytes > 0 {
+		w.Header().Set("X-Output-Offset", strconv.FormatInt(start, 10))
+		scrubbed, _ := json.Marshal(skip)
+		w.Header().Set("X-Output-Skipped", string(scrubbed))
+	}
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)

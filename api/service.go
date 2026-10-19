@@ -516,6 +516,12 @@ type ServiceConfig struct {
 	// job may ask for a shorter max_runtime_secs, never a longer one. 0
 	// = DefaultJobMaxRuntimeSecs; a negative value disables the cap.
 	JobMaxRuntimeSecs int64
+	// JobOutputMaxBytes is the host default output cap per background-job
+	// stream (spoond-hwto): once a guest stdout or stderr file grows past
+	// it, the job poller punches the front of the file out and only the
+	// tail is kept. 0 = unlimited (the default: no cap unless a job asks
+	// for its own output_max_bytes).
+	JobOutputMaxBytes int64
 	// MaxAdmitWaitSecs caps how long a create may wait for admission
 	// (#129 part 1). MAX_ADMIT_WAIT_SECS, default DefaultMaxAdmitWaitSecs;
 	// 0 disables waiting (the request field is accepted and ignored).
