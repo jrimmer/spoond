@@ -1603,3 +1603,77 @@ func TestJobRetentionShortensPrune(t *testing.T) {
 		}
 	}
 }
+
+// TestJobDelete (spoond-hwto): DELETE removes a finished job's record and
+// guest directory; a running job answers 409; an unknown job or another
+// owner's job answers 404; the owner gate matches the other job routes.
+func TestJobDelete(t *testing.T) {
+	ts, svc, db, sub := newTestServerWithService(t)
+	id, lease, sandbox := createJobLease(t, ts, svc)
+
+	p := fake.NewProcess(1050)
+	installJobProcess(t, sub, p)
+	done, _ := startBackgroundJob(t, ts, id, map[string]any{"cmd": "sleep 610"})
+	writeJobFile(t, sub, sandbox, done, "stdout", "kept\n")
+	writeJobFile(t, sub, sandbox, done, "rc", "0\n")
+	p.Push(substrate.ProcessEvent{Kind: substrate.EventExit, ExitCode: 0})
+	waitJobState(t, db, done, "exited", jobWatchTimeout)
+
+	// A finished job: 204, the row and the guest files are gone.
+	del := func(path, token string) *http.Response {
+		t.Helper()
+		req, _ := http.NewRequest("DELETE", ts.URL+path, nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("delete %s: %v", path, err)
+		}
+		defer resp.Body.Close()
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return resp
+	}
+	if resp := del("/api/leases/"+id+"/jobs/"+done, "token-a"); resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete finished job = %d, want 204", resp.StatusCode)
+	}
+	if _, err := db.GetJob(context.Background(), done); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("deleted record still in the store: %v", err)
+	}
+	if _, err := sub.Stat(context.Background(), sandbox, jobPath(done, "stdout")); !errors.Is(err, substrate.ErrNotFound) {
+		t.Fatalf("deleted job's guest files still present: %v", err)
+	}
+
+	// Repeating the delete: 404 (the record is gone).
+	if resp := del("/api/leases/"+id+"/jobs/"+done, "token-a"); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("re-delete = %d, want 404", resp.StatusCode)
+	}
+
+	// A running job: 409, and the record stays.
+	running, _ := startBackgroundJob(t, ts, id, map[string]any{"cmd": "sleep 611"})
+	if resp := del("/api/leases/"+id+"/jobs/"+running, "token-a"); resp.StatusCode != http.StatusConflict {
+		t.Fatalf("delete running job = %d, want 409", resp.StatusCode)
+	}
+	if _, err := db.GetJob(context.Background(), running); err != nil {
+		t.Fatalf("running record deleted: %v", err)
+	}
+
+	// An unknown job and another owner's job: 404.
+	if resp := del("/api/leases/"+id+"/jobs/j-nope", "token-a"); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("delete unknown job = %d, want 404", resp.StatusCode)
+	}
+	other, _, _ := createJobLeaseOther(t, ts)
+	if resp := del("/api/leases/"+other+"/jobs/"+running, "token-b"); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("cross-owner delete = %d, want 404", resp.StatusCode)
+	}
+	_ = lease
+}
+
+// createJobLeaseOther creates a lease for token-b (a different owner).
+func createJobLeaseOther(t *testing.T, ts *httptest.Server) (string, *Lease, string) {
+	t.Helper()
+	_, body := doReq(t, "POST", ts.URL+"/api/leases", "token-b", map[string]any{"image": "py-base", "ttl": 300})
+	id, _ := body["id"].(string)
+	if id == "" {
+		t.Fatalf("create lease: no id in %v", body)
+	}
+	return id, nil, ""
+}

@@ -239,6 +239,7 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	s.mux.HandleFunc("GET /api/leases/{id}/jobs/{job}", s.handleJobGet)
 	s.mux.HandleFunc("GET /api/leases/{id}/jobs/{job}/output", s.handleJobOutput)
 	s.mux.HandleFunc("POST /api/leases/{id}/jobs/{job}/signal", s.handleJobSignal)
+	s.mux.HandleFunc("DELETE /api/leases/{id}/jobs/{job}", s.handleJobDelete)
 	s.mux.HandleFunc("DELETE /api/leases/{id}", s.handleDelete)
 	s.mux.HandleFunc("POST /api/leases/{id}/keepalive", s.handleKeepAlive)
 	s.mux.HandleFunc("POST /api/leases/{id}/suspend", s.handleSuspend)

@@ -169,6 +169,7 @@ var endpointTable = []endpointSpec{
 	ep("GET", "/api/leases/{id}/jobs/{job}", "read one job"),
 	ep("GET", "/api/leases/{id}/jobs/{job}/output", "stream job output"),
 	ep("POST", "/api/leases/{id}/jobs/{job}/signal", "signal a job"),
+	ep("DELETE", "/api/leases/{id}/jobs/{job}", "delete a finished job"),
 	ep("DELETE", "/api/leases/{id}", "delete"),
 	ep("POST", "/api/leases/{id}/keepalive", "extend a persistent lease"),
 	ep("POST", "/api/leases/{id}/suspend", "snapshot + stop"),

@@ -209,6 +209,43 @@ func (s *Server) waitJob(r *http.Request, lease *Lease, row store.JobRow, wait i
 	}
 }
 
+// handleJobDelete answers DELETE .../jobs/{job} (spoond-hwto): the job
+// record is deleted and its guest directory removed, so an owner can
+// reclaim a chatty job's disk before the retention window. A running job
+// answers 409 (signal it first, like the other lifecycle paths); the
+// record is resolved before any resume, so deleting a finished job
+// cannot wake a suspended lease for nothing. The guest cleanup is
+// best-effort: a lease paused mid-delete may put the files back on its
+// next resume, and they go with the record's retention as before.
+func (s *Server) handleJobDelete(w http.ResponseWriter, r *http.Request) {
+	lease := s.jobsTarget(w, r)
+	if lease == nil {
+		return
+	}
+	s.svc.touch(lease.ID)
+	row, ok := s.jobTarget(w, r, lease)
+	if !ok {
+		return
+	}
+	if row.State == "running" {
+		writeError(w, http.StatusConflict, "job is running; signal it first")
+		return
+	}
+	// Remove the guest directory first, while the record still exists: a
+	// client that retries after a failure finds a removable record rather
+	// than an orphaned directory nothing points at any more. The lease
+	// here is live (jobsTarget checked), so files are reachable unless the
+	// sandbox is mid-operation; cleanupJobFiles logs what it could not
+	// remove and the row is still deleted below, matching the prune path.
+	s.svc.cleanupJobFiles(r.Context(), lease.SandboxID, row.JobID)
+	if _, err := s.svc.db.DeleteJob(r.Context(), row.JobID); err != nil {
+		s.svc.log.Printf("jobs: delete %s: %v", row.JobID, err)
+		writeError(w, http.StatusInternalServerError, "job delete failed")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // handleJobOutput answers GET .../jobs/{job}/output?stream=&offset=&limit=:
 // raw bytes from the chosen stream, so a client can follow output.
 func (s *Server) handleJobOutput(w http.ResponseWriter, r *http.Request) {
