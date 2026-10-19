@@ -326,7 +326,7 @@ func TestGuestDialBadPort(t *testing.T) {
 func TestGuestDialDialFailureIsBadGateway(t *testing.T) {
 	ts, svc, _, _ := newTestServerWithService(t)
 
-	// A port that is provably closed: bind a wildcard listener to grab
+	// A port that is provably closed: bind a loopback listener to grab
 	// an ephemeral port nobody wants, then drop it. A hardcoded port
 	// cannot work here — on some hosts a service answers the port the
 	// test assumed was dead, and dialing it succeeds.
