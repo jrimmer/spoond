@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -46,6 +47,15 @@ type Fake struct {
 	// process environment instead of echoing the argv. Tests enable it to
 	// pin that exec env reaches the command and never argv.
 	execRunner bool
+	// DisablePunchHole turns PunchHole off (it is on by default, like the
+	// e2b substrate's): a test sets it to pin the background-job output
+	// cap's behaviour on a substrate without hole-punching (spoond-hwto).
+	// Set it before the poll pass that would punch; the load in PunchHole
+	// takes f.mu, so the flag and the call cannot race.
+	DisablePunchHole atomic.Bool
+	// punchCalls counts served PunchHole calls (the cap tests pin that a
+	// pass spent or skipped one).
+	punchCalls int
 
 	execHandler func(sandboxID string, req substrate.ExecRequest) substrate.ExecResult
 	lastExec    substrate.ExecRequest
@@ -872,6 +882,42 @@ func (f *Fake) MakeDir(ctx context.Context, sandboxID, name string, mode os.File
 	return fs.mkdir(name, mode)
 }
 
+// PunchHole deallocates a byte range of a guest file without shifting
+// the offsets after it (the fake's answer to the guest's fallocate
+// --punch-hole, spoond-hwto): the memory filesystem zeroes (without
+// shrinking) the requested range of the in-memory file. Block-aligned
+// callers get exact semantics; the range is clamped to the file like
+// the kernel does. ErrNotFound when the sandbox or the file is unknown.
+func (f *Fake) PunchHole(ctx context.Context, sandboxID, name string, offset, length int64) error {
+	f.mu.Lock()
+	disabled := f.DisablePunchHole.Load()
+	f.mu.Unlock()
+	if disabled {
+		return fmt.Errorf("fake: PunchHole disabled")
+	}
+	if err := f.record("PunchHole", sandboxID); err != nil {
+		return err
+	}
+	if offset < 0 || length < 0 {
+		return fmt.Errorf("fake: PunchHole %s %s: %w", sandboxID, name, substrate.ErrInvalidOp)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.punchCalls++
+	fs := f.fileFS(sandboxID)
+	if fs == nil {
+		return fmt.Errorf("fake: PunchHole %s %s: %w", sandboxID, name, substrate.ErrNotFound)
+	}
+	return fs.punchHole(name, offset, length)
+}
+
+// PunchHoleCount returns how many PunchHole calls the fake has served.
+func (f *Fake) PunchHoleCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.punchCalls
+}
+
 func (f *Fake) Remove(ctx context.Context, sandboxID, name string, recursive bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -1026,6 +1072,41 @@ func (m *memFS) stat(name string) (substrate.FileInfo, error) {
 		}, nil
 	}
 	return substrate.FileInfo{}, fmt.Errorf("%w: %s", substrate.ErrNotFound, name)
+}
+
+// punchHole deallocates [offset, offset+length) of a guest file
+// without shifting the bytes after it: the fake zeroes the range
+// (the memory filesystem cannot return space), leaving the file's size
+// and every later byte's offset exactly where they were — the same
+// reads-after a real punch sees, so the cap's absolute-offset contract
+// is testable (spoond-hwto).
+func (m *memFS) punchHole(name string, offset, length int64) error {
+	name = cleanPath(name)
+	if _, ok := m.dirs[name]; ok {
+		return fmt.Errorf("%w: %s is a directory", substrate.ErrInvalidOp, name)
+	}
+	f, ok := m.files[name]
+	if !ok {
+		return fmt.Errorf("%w: %s", substrate.ErrNotFound, name)
+	}
+	size := int64(len(f.data))
+	from, to := offset, offset+length
+	if from > size {
+		from = size
+	}
+	if to > size {
+		to = size
+	}
+	if to <= from {
+		return nil
+	}
+	f.data = bytes.Clone(f.data)
+	zero := make([]byte, to-from)
+	// Data in a hole is undefined; zero is what an ext4 or F2FS read of
+	// one usually answers.
+	copy(f.data[from:to], zero)
+	m.files[name] = memFile{data: f.data, mode: f.mode, modTime: f.modTime}
+	return nil
 }
 
 func (m *memFS) mkdir(name string, mode os.FileMode) error {
