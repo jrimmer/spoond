@@ -10,6 +10,32 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+## [3.10.1] - 2026-10-18
+
+### Changed
+
+- **Dashboard: hugepages, snapshot disk and root disk read "used of
+  total"**, like memory ("35.2 of 104 GiB"), instead of "GiB free".
+  Numbers of 100 and over drop their decimal so the text fits beside
+  the bar.
+
+### Fixed
+
+- **Leases lost under hugepage exhaustion (spoond-90ia).** On
+  2026-10-17 two running leases faulted in memory faster than the 15 s
+  memory-floor check and died of hugepage exhaustion 4 s before the
+  next check would have paused one, after give-back had handed an 8 GiB
+  lease back and forth four times in 80 minutes. The floor loop now
+  checks every second while free memory sits under twice
+  `MEMORY_FLOOR_MIB`. Give-back stays quiet for 15 minutes after a floor
+  take-back (2 after an admission take-back, as before), counts memory
+  running leases were granted but have not touched yet as spoken for,
+  and holds a lease taken back again after a give-back for 15 minutes,
+  doubling with each re-take up to 4 hours (a lease that ran an hour
+  starts afresh).
+
+No API, schema or configuration change.
+
 ## [3.10.0] - 2026-10-17
 
 ### Added
