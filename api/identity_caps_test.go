@@ -1,6 +1,6 @@
 package api
 
-// Per-identity concurrency-cap tests (scout#20): the per-owner
+// Per-identity concurrency-cap tests: the per-owner
 // exec/stream cap and the guest-dial cap are host knobs
 // (EXEC_CONCURRENCY_MAX, GUEST_DIAL_MAX) with an optional per-identity
 // override stored on the identity (identity.User.ExecConcurrency /
@@ -17,7 +17,7 @@ import (
 	"github.com/jrimmer/spoond/v3/identity"
 )
 
-// capsServer bootstraps admin + two plain users (jason, scout) on one
+// capsServer bootstraps admin + two plain users (alice, bob) on one
 // server and returns the handler and the store. The first user is admin
 // (KTD-2); the store has no file, so the restart test builds its own.
 func capsServer(t *testing.T) (*Server, http.Handler, *identity.Store) {
@@ -35,7 +35,7 @@ func capsServer(t *testing.T) (*Server, http.Handler, *identity.Store) {
 	if rec, body := doUsersReq(t, h, "POST", "/api/users", "legacy-tok", `{"name":"admin","fingerprints":["SHA256:fp-a"],"token":"admin-tok"}`); rec.Code != http.StatusCreated {
 		t.Fatalf("bootstrap: %d %s", rec.Code, body)
 	}
-	for _, u := range []struct{ name, tok string }{{"jason", "jason-tok"}, {"scout", "scout-tok"}} {
+	for _, u := range []struct{ name, tok string }{{"alice", "alice-tok"}, {"bob", "bob-tok"}} {
 		if rec, body := doUsersReq(t, h, "POST", "/api/users", "admin-tok", `{"name":"`+u.name+`","fingerprints":["SHA256:fp-`+u.name+`"],"token":"`+u.tok+`"}`); rec.Code != http.StatusCreated {
 			t.Fatalf("create %s: %d %s", u.name, rec.Code, body)
 		}
@@ -65,10 +65,10 @@ func capsExec429(h http.Handler, tok string) int {
 // TestBusyCapDefaultUnchanged pins the built-in default: an owner with
 // no override holds exactly 8 concurrent exec/stream slots (the 9th
 // admits nothing) and the 429 message names exec/stream operations —
-// today's behaviour unchanged by the knob work (scout#20).
+// today's behaviour unchanged by the knob work.
 func TestBusyCapDefaultUnchanged(t *testing.T) {
 	srv, h, ids := capsServer(t)
-	u := ids.UserByName("jason")
+	u := ids.UserByName("alice")
 	if u == nil || u.ExecConcurrency != 0 {
 		t.Fatalf("fresh user carries an override: %+v", u)
 	}
@@ -84,11 +84,11 @@ func TestBusyCapDefaultUnchanged(t *testing.T) {
 	if srv.acquireBusy(u.ID) {
 		t.Fatal("9th slot admitted under the default cap of 8")
 	}
-	if got := capsExec429(h, "jason-tok"); got != http.StatusTooManyRequests {
+	if got := capsExec429(h, "alice-tok"); got != http.StatusTooManyRequests {
 		t.Fatalf("exec over the default cap = %d, want 429", got)
 	}
 	req := httptest.NewRequest("POST", "/api/leases/any/exec", strings.NewReader(`{"cmd":"echo hi"}`))
-	req.Header.Set("Authorization", "Bearer jason-tok")
+	req.Header.Set("Authorization", "Bearer alice-tok")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if got := rec.Body.String(); !strings.Contains(got, "too many concurrent exec/stream operations; try again shortly") {
@@ -101,8 +101,8 @@ func TestBusyCapDefaultUnchanged(t *testing.T) {
 // the host default while every other identity stays at the default.
 func TestExecCapOverrideRaisesOneIdentity(t *testing.T) {
 	srv, h, ids := capsServer(t)
-	jid := capsUserID(t, h, "jason-tok")
-	sid := capsUserID(t, h, "scout-tok")
+	jid := capsUserID(t, h, "alice-tok")
+	sid := capsUserID(t, h, "bob-tok")
 
 	rec, body := doUsersReq(t, h, "POST", "/api/users/"+jid+"/quota", "admin-tok", `{"exec_concurrency":10}`)
 	if rec.Code != http.StatusOK {
@@ -113,7 +113,7 @@ func TestExecCapOverrideRaisesOneIdentity(t *testing.T) {
 		t.Fatalf("exec_concurrency in user view = %v, want 10", body["user"].(map[string]any)["exec_concurrency"])
 	}
 
-	// jason holds 10 slots now (the default was 8).
+	// alice holds 10 slots now (the default was 8).
 	for i := 0; i < 10; i++ {
 		if !srv.acquireBusy(jid) {
 			t.Fatalf("overridden slot %d refused", i)
@@ -122,7 +122,7 @@ func TestExecCapOverrideRaisesOneIdentity(t *testing.T) {
 	if srv.acquireBusy(jid) {
 		t.Fatal("11th slot admitted under the override of 10")
 	}
-	// scout (no override) still holds exactly the default 8.
+	// bob (no override) still holds exactly the default 8.
 	for i := 0; i < 8; i++ {
 		if !srv.acquireBusy(sid) {
 			t.Fatalf("default-cap slot %d refused for the other identity", i)
@@ -132,14 +132,14 @@ func TestExecCapOverrideRaisesOneIdentity(t *testing.T) {
 		t.Fatal("the other identity's 9th slot admitted; the override must not leak")
 	}
 	// The HTTP path answers the 11th request with the unchanged 429.
-	if got := capsExec429(h, "jason-tok"); got != http.StatusTooManyRequests {
+	if got := capsExec429(h, "alice-tok"); got != http.StatusTooManyRequests {
 		t.Fatalf("exec over the override = %d, want 429", got)
 	}
 	// A negative value is refused.
 	if rec, _ := doUsersReq(t, h, "POST", "/api/users/"+jid+"/quota", "admin-tok", `{"exec_concurrency":-1}`); rec.Code != http.StatusBadRequest {
 		t.Fatalf("negative exec_concurrency = %d, want 400", rec.Code)
 	}
-	// 0 unsets: jason is back on the host default. The 10 slots they
+	// 0 unsets: alice is back on the host default. The 10 slots they
 	// still hold now exceed the restored default of 8, which the next
 	// admission correctly refuses (held slots are never retroactively
 	// taken away); the cleared value is the store's.
@@ -159,12 +159,12 @@ func TestExecCapOverrideRaisesOneIdentity(t *testing.T) {
 // other identities', and a negative is refused while 0 unsets.
 func TestGuestDialCapDefaultAndOverride(t *testing.T) {
 	srv, h, ids := capsServer(t)
-	jid := capsUserID(t, h, "jason-tok")
+	jid := capsUserID(t, h, "alice-tok")
 
 	if got := srv.dialMax; got != 16 {
 		t.Fatalf("built-in dialMax = %d, want 16", got)
 	}
-	if u := ids.UserByName("scout"); u.GuestDial != 0 {
+	if u := ids.UserByName("bob"); u.GuestDial != 0 {
 		t.Fatalf("fresh user carries a dial override: %+v", u)
 	}
 	rec, body := doUsersReq(t, h, "POST", "/api/users/"+jid+"/quota", "admin-tok", `{"guest_dial":20}`)
@@ -183,8 +183,8 @@ func TestGuestDialCapDefaultAndOverride(t *testing.T) {
 	if srv.acquireDial(jid) {
 		t.Fatal("21st dial admitted under the override of 20")
 	}
-	// scout, no override: exactly 16.
-	sid := capsUserID(t, h, "scout-tok")
+	// bob, no override: exactly 16.
+	sid := capsUserID(t, h, "bob-tok")
 	for i := 0; i < 16; i++ {
 		if !srv.acquireDial(sid) {
 			t.Fatalf("default dial slot %d refused for the other identity", i)
@@ -228,15 +228,15 @@ func TestDialRoute429MessageAndOverride(t *testing.T) {
 	if rec, body := doUsersReq(t, h, "POST", "/api/users", "legacy-tok", `{"name":"admin","fingerprints":["SHA256:fp-a"],"token":"admin-tok"}`); rec.Code != http.StatusCreated {
 		t.Fatalf("bootstrap: %d %s", rec.Code, body)
 	}
-	if rec, body := doUsersReq(t, h, "POST", "/api/users", "admin-tok", `{"name":"scout","fingerprints":["SHA256:fp-s"],"token":"scout-tok"}`); rec.Code != http.StatusCreated {
-		t.Fatalf("create scout: %d %s", rec.Code, body)
+	if rec, body := doUsersReq(t, h, "POST", "/api/users", "admin-tok", `{"name":"bob","fingerprints":["SHA256:fp-s"],"token":"bob-tok"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("create bob: %d %s", rec.Code, body)
 	}
-	sid := capsUserID(t, h, "scout-tok")
+	sid := capsUserID(t, h, "bob-tok")
 	if rec, _ := doUsersReq(t, h, "POST", "/api/users/"+sid+"/quota", "admin-tok", `{"guest_dial":24}`); rec.Code != http.StatusOK {
 		t.Fatal("set guest_dial override")
 	}
 
-	_, create := doReq(t, "POST", ts.URL+"/api/leases", "scout-tok", map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
+	_, create := doReq(t, "POST", ts.URL+"/api/leases", "bob-tok", map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
 	id := create["id"].(string)
 	host, echoPort := newEchoServer(t)
 	pointHostIP(t, svc, id, host, echoPort)
@@ -246,13 +246,13 @@ func TestDialRoute429MessageAndOverride(t *testing.T) {
 	// unchanged message and a counted "refused" metric.
 	var open []*websocket.Conn
 	for i := 0; i < 24; i++ {
-		ws, resp, err := dialGuest(t, ts, id, echoPort, "scout-tok")
+		ws, resp, err := dialGuest(t, ts, id, echoPort, "bob-tok")
 		if err != nil {
 			t.Fatalf("overridden dial %d: %v (status %v)", i, err, resp)
 		}
 		open = append(open, ws)
 	}
-	if _, resp, err := dialGuest(t, ts, id, echoPort, "scout-tok"); err == nil {
+	if _, resp, err := dialGuest(t, ts, id, echoPort, "bob-tok"); err == nil {
 		t.Fatal("25th dial admitted; the override is 24")
 	} else if resp.StatusCode != http.StatusTooManyRequests {
 		t.Fatalf("25th dial = %d, want 429", resp.StatusCode)
@@ -281,9 +281,9 @@ func TestCapsOverrideSurvivesRestart(t *testing.T) {
 	if rec, body := doUsersReq(t, h, "POST", "/api/users", "legacy-tok", `{"name":"admin","fingerprints":["SHA256:fp-a"],"token":"admin-tok"}`); rec.Code != http.StatusCreated {
 		t.Fatalf("bootstrap: %d %s", rec.Code, body)
 	}
-	rec2, body := doUsersReq(t, h, "POST", "/api/users", "admin-tok", `{"name":"scout","fingerprints":["SHA256:fp-s"],"token":"scout-tok"}`)
+	rec2, body := doUsersReq(t, h, "POST", "/api/users", "admin-tok", `{"name":"bob","fingerprints":["SHA256:fp-s"],"token":"bob-tok"}`)
 	if rec2.Code != http.StatusCreated {
-		t.Fatalf("create scout: %d %s", rec2.Code, rec2.Body.String())
+		t.Fatalf("create bob: %d %s", rec2.Code, rec2.Body.String())
 	}
 	sid := body["user"].(map[string]any)["id"].(string)
 	if rec3, out := doUsersReq(t, h, "POST", "/api/users/"+sid+"/quota", "admin-tok", `{"exec_concurrency":12,"guest_dial":24}`); rec3.Code != http.StatusOK {
@@ -372,8 +372,8 @@ func TestHostDefaultKnobs(t *testing.T) {
 // unknown user is 404.
 func TestCapsAdminOnly(t *testing.T) {
 	_, h, ids := capsServer(t)
-	jid := capsUserID(t, h, "jason-tok")
-	if rec, _ := doUsersReq(t, h, "POST", "/api/users/"+jid+"/quota", "scout-tok", `{"exec_concurrency":99}`); rec.Code != http.StatusForbidden {
+	jid := capsUserID(t, h, "alice-tok")
+	if rec, _ := doUsersReq(t, h, "POST", "/api/users/"+jid+"/quota", "bob-tok", `{"exec_concurrency":99}`); rec.Code != http.StatusForbidden {
 		t.Fatalf("non-admin override set = %d, want 403", rec.Code)
 	}
 	if u := ids.UserByID(jid); u.ExecConcurrency != 0 {

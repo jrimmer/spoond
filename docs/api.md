@@ -2524,7 +2524,7 @@ U1).
 `used_mib` is the user's current memory charge — the sum of `memory_mb`
 over their running leases (suspended ones hold no hugepages).
 `exec_concurrency` and `guest_dial` are the user's per-identity
-concurrency overrides (scout#20); `0` (the default) means the host
+concurrency overrides; `0` (the default) means the host
 caps apply (`EXEC_CONCURRENCY_MAX`, `GUEST_DIAL_MAX`).
 `max_leases`, `guaranteed_mib`, `max_mib` and `max_kept_bytes` are no
 longer returned (3.0). `share` is the
@@ -2677,7 +2677,7 @@ would hide the leftover rows; retry once the store is readable
 
 Request `{"max_ttl": S}` — the user's lease TTL ceiling in seconds
 (`0` = the global maximum applies; negative is `400`). Two more fields
-set that identity's concurrency caps (scout#20):
+set that identity's concurrency caps:
 `{"exec_concurrency": N, "guest_dial": M}` raise the user's own cap on
 concurrent exec/stream operations and on open guest-port dials above
 the host defaults (`EXEC_CONCURRENCY_MAX`, `GUEST_DIAL_MAX`); `0` or an
@@ -2704,7 +2704,7 @@ curl -fsS -X POST "$SPOOND_URL/api/users/$UID/quota" \
 ```
 
 To raise one identity's concurrency caps instead (agent clients that
-hold one stream per working thread at the 8 default, scout#20):
+hold one stream per working thread at the 8 default):
 
 ```sh
 curl -fsS -X POST "$SPOOND_URL/api/users/$UID/quota" \

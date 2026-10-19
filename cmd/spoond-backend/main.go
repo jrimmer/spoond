@@ -922,7 +922,7 @@ func Main(args []string) int {
 	// /llm/ for identity users WITHOUT an LLM key unless the operator
 	// explicitly opts into the pre-U8 capability model.
 	srv.SetLLMRequireKey(os.Getenv("LLM_OPEN_LEGACY") == "")
-	// Per-owner activity knobs (scout#20): the host defaults for the
+	// Per-owner activity knobs: the host defaults for the
 	// exec/stream and guest-dial concurrency caps. Every owner without
 	// a per-identity override (identity store data, set via POST
 	// /api/users/{id}/quota) counts against these. The NewServer

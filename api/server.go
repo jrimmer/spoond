@@ -108,9 +108,9 @@ type Server struct {
 // acquireBusy reserves an exec/stream slot for owner. Returns false when
 // the per-owner cap is already reached (caller should 429). The cap is
 // the owner's identity override (identity.User.ExecConcurrency) when one
-// is set, the host default (busyMax, EXEC_CONCURRENCY_MAX) otherwise —
-// both read under the same lock the count goes by, so a racing override
-// change cannot push the count past what this admission allows.
+// is set, the host default (busyMax, EXEC_CONCURRENCY_MAX) otherwise.
+// The limit is read before busyMu is taken, so a request racing an
+// override change is judged by the limit in force when it arrived.
 func (s *Server) acquireBusy(owner string) bool {
 	limit := s.busyMax
 	if s.svc != nil && s.svc.identities != nil {
