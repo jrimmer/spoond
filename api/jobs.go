@@ -429,7 +429,7 @@ func jobCapSidecarOf2(line string) (dropped, newlines int64, ok bool) {
 // substrate cannot punch holes the stream is left whole: truncating it
 // by any other means would shift the offsets every absolute-offset
 // reader holds, so the cap says so in the log and drops nothing.
-func (s *Service) capJobStream(ctx context.Context, sandboxID, jobID, stream string, dropped, newlines, kept int64) {
+func (s *Service) capJobStream(ctx context.Context, sandboxID, jobID, stream string, dropped, newlines, kept, rowDropped, rowNewlines int64) {
 	path := jobPath(jobID, stream)
 	info, err := s.sub.Stat(ctx, sandboxID, path)
 	if err != nil {
@@ -443,6 +443,15 @@ func (s *Service) capJobStream(ctx context.Context, sandboxID, jobID, stream str
 	}
 	target := jobCapTarget(info.Size, dropped, kept)
 	if target <= dropped {
+		// No punch is planned, but the guest's live counters can still
+		// be ahead of the record (a pass whose sidecar write landed and
+		// whose record write did not). Land them now: the front is
+		// already gone, and the record must not stay behind it.
+		if dropped > rowDropped || newlines > rowNewlines {
+			if uerr := s.dbJobs.UpdateJobSkipped(ctx, jobID, stream, dropped, newlines); uerr != nil {
+				s.log.Printf("jobs: %s: %s output cap: record skipped: %v", jobID, stream, uerr)
+			}
+		}
 		return
 	}
 	ph, ok := s.sub.(jobPunchHole)
@@ -498,14 +507,19 @@ func (s *Service) capJobStreams(ctx context.Context, job store.JobRow, sandboxID
 		return
 	}
 	for _, stream := range []string{"stdout", "stderr"} {
-		dropped, newlines := jobRowDropped(job, stream), jobStreamNewlines(job, stream)
-		if d, _, ok := s.jobCapSidecarOf(ctx, sandboxID, job.JobID, stream); ok && d > dropped {
+		rowDropped, rowNewlines := jobRowDropped(job, stream), jobStreamNewlines(job, stream)
+		dropped, newlines := rowDropped, rowNewlines
+		if d, n, ok := s.jobCapSidecarOf(ctx, sandboxID, job.JobID, stream); ok && d > dropped {
 			// The guest file's counters are ahead of the record's (a
-			// store write failed after a pass): continue from there, and
-			// the record rises as the pass lands.
+			// store write failed after a pass): continue from there —
+			// the newline count too, so the next pass counts the front's
+			// lines from the live total rather than the stale record.
 			dropped = d
+			if n > newlines {
+				newlines = n
+			}
 		}
-		s.capJobStream(ctx, sandboxID, job.JobID, stream, dropped, newlines, kept)
+		s.capJobStream(ctx, sandboxID, job.JobID, stream, dropped, newlines, kept, rowDropped, rowNewlines)
 	}
 }
 

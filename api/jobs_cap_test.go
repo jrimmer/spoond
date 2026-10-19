@@ -548,7 +548,7 @@ func TestJobCapSidecarFormat(t *testing.T) {
 	// same pass wrote first) is ahead of the row: exactly the
 	// crash-recovery state the sidecar exists to serve.
 	var inner store.JobStore = svc.dbJobs
-	fdb := &failingJobStore{JobStore: inner, method: "UpdateJobSkipped", nth: 2, err: errStoreBoom}
+	fdb := &failingJobStore{JobStore: inner, method: "UpdateJobSkipped", nth: 1, err: errStoreBoom}
 	svc.dbJobs = fdb
 	writeStream(t, sub, sandbox, jobID, "stdout", strings.Repeat("a\n", 4500)+strings.Repeat("b\n", 2000))
 	svc.reconcileJobs(context.Background())
