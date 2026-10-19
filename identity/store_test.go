@@ -284,3 +284,64 @@ func TestLoadIgnoresRemovedQuotaFields(t *testing.T) {
 		}
 	}
 }
+
+// TestSetLimits (scout#20): SetExecLimit and SetDialLimit store the
+// per-identity concurrency overrides, 0 clears (the host default
+// applies again), a negative value is refused, an unknown user is an
+// error, and the values survive a store reload.
+func TestSetLimits(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "users.json")
+	s, _ := NewStore(file)
+	u, _ := s.AddUser("scout", KindAgent, nil, "tok")
+	if err := s.SetExecLimit(u.ID, 12); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetDialLimit(u.ID, 24); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.UserByID(u.ID); got.ExecConcurrency != 12 || got.GuestDial != 24 {
+		t.Fatalf("limits = exec %d, dial %d, want 12 and 24", got.ExecConcurrency, got.GuestDial)
+	}
+	// zero clears
+	if err := s.SetExecLimit(u.ID, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetDialLimit(u.ID, 0); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.UserByID(u.ID); got.ExecConcurrency != 0 || got.GuestDial != 0 {
+		t.Fatalf("cleared limits = exec %d, dial %d, want 0 and 0", got.ExecConcurrency, got.GuestDial)
+	}
+	// negative is refused (and stores nothing)
+	if err := s.SetExecLimit(u.ID, -1); err == nil {
+		t.Fatal("expected error for a negative exec limit")
+	}
+	if err := s.SetDialLimit(u.ID, -1); err == nil {
+		t.Fatal("expected error for a negative dial limit")
+	}
+	if got := s.UserByID(u.ID); got.ExecConcurrency != 0 || got.GuestDial != 0 {
+		t.Fatalf("refused limits were stored: exec %d dial %d", got.ExecConcurrency, got.GuestDial)
+	}
+	// unknown user
+	if err := s.SetExecLimit("u-nope", 1); err == nil {
+		t.Fatal("expected error for unknown user")
+	}
+	if err := s.SetDialLimit("u-nope", 1); err == nil {
+		t.Fatal("expected error for unknown user")
+	}
+	// persistence round-trip (a restarted backend's users file)
+	if err := s.SetExecLimit(u.ID, 12); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetDialLimit(u.ID, 24); err != nil {
+		t.Fatal(err)
+	}
+	s2, err := NewStore(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := s2.UserByID(u.ID); got.ExecConcurrency != 12 || got.GuestDial != 24 {
+		t.Fatalf("persisted limits = exec %d, dial %d, want 12 and 24", got.ExecConcurrency, got.GuestDial)
+	}
+}
