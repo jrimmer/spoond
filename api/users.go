@@ -226,15 +226,16 @@ var deprecatedQuotaFields = []string{"max_leases", "guaranteed_mib", "max_mib", 
 
 // handleUsersQuota updates a user's quota (admin only; T4/#31). Only
 // max_ttl is left, plus the per-identity concurrency overrides
-// (scout#20): exec_concurrency raises that user's concurrent
-// exec/stream cap and guest_dial the concurrent guest-port-dial cap
-// above the host defaults (EXEC_CONCURRENCY_MAX, GUEST_DIAL_MAX) — 0 or
-// an omitted field means unset, the host default applies, and a
-// negative value is 400. The per-owner caps max_leases, guaranteed_mib,
-// max_mib and max_kept_bytes were removed in 3.0 (fair shares, FS4):
-// a request may still send them, they are accepted and ignored, and
-// when any is set (non-zero) the response carries Deprecation: true and
-// a Warning naming them, so an old client learns without breaking.
+// (scout#20): exec_concurrency sets that user's concurrent exec/stream
+// cap and guest_dial the concurrent guest-port-dial cap, overriding the
+// host defaults (EXEC_CONCURRENCY_MAX, GUEST_DIAL_MAX) for that
+// identity alone. 0 or an omitted field means unset, the host default
+// applies, and a negative value is 400. The per-owner caps max_leases,
+// guaranteed_mib, max_mib and max_kept_bytes were removed in 3.0 (fair
+// shares, FS4): a request may still send them, they are accepted and
+// ignored, and when any is set (non-zero) the response carries
+// Deprecation: true and a Warning naming them, so an old client learns
+// without breaking.
 func (s *Server) handleUsersQuota(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
@@ -257,20 +258,23 @@ func (s *Server) handleUsersQuota(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	// The concurrency overrides read the same spellings as max_ttl: a
-	// non-integer is 400, a negative is 400, 0 (and an omitted field)
-	// means the host default again.
+	// non-integer is 400, a negative is 400, and 0 (like an omitted
+	// field) clears the override back to the host default.
 	var execCap, dialCap int
+	execSet, dialSet := false, false
 	if v, ok := raw["exec_concurrency"]; ok {
 		if err := json.Unmarshal(v, &execCap); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid exec_concurrency: "+err.Error())
 			return
 		}
+		execSet = true
 	}
 	if v, ok := raw["guest_dial"]; ok {
 		if err := json.Unmarshal(v, &dialCap); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid guest_dial: "+err.Error())
 			return
 		}
+		dialSet = true
 	}
 	if maxTTL < 0 || execCap < 0 || dialCap < 0 {
 		writeError(w, http.StatusBadRequest, "quota values must be >= 0")
@@ -287,15 +291,16 @@ func (s *Server) handleUsersQuota(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Unknown user is answered by the SetQuota refusal above; these two
-	// only run for a user that exists, so the user view below reflects
-	// every field the request set.
-	if execCap > 0 {
+	// only run when the request sent the field (a clearing 0 included),
+	// so the user view below reflects every field the request sent and
+	// 0 restores the host default for that identity.
+	if execSet {
 		if err := s.svc.identities.SetExecLimit(id, execCap); err != nil {
 			writeError(w, http.StatusNotFound, err.Error())
 			return
 		}
 	}
-	if dialCap > 0 {
+	if dialSet {
 		if err := s.svc.identities.SetDialLimit(id, dialCap); err != nil {
 			writeError(w, http.StatusNotFound, err.Error())
 			return
