@@ -1,8 +1,11 @@
-// Give-back tests (spoond-aeo6): a tick at or above the floor resumes
-// one lease spoond's take-back paused, longest-paused first, once its
-// memory plus the floor plus the margin is free, no create waits for
-// admission and no take-back ran in the last two minutes. A lease the
-// caller paused is never given back.
+// Give-back tests (spoond-aeo6, spoond-90ia): a tick at or above the
+// floor resumes one lease spoond's take-back paused, longest-paused
+// first, once its memory plus the floor plus the margin is free after
+// the running leases fault in what they were granted, no create waits
+// for admission, no take-back ran in the last two minutes and no floor
+// take-back in the last fifteen. A lease taken back again after a
+// give-back is held, the hold doubling per re-take. A lease the caller
+// paused is never given back.
 //
 // The fixtures reuse the pressure tests' dynamic node: free MiB =
 // (totalPages - baseUsed - live sandboxes x pagesPerLease) x 2, and a
@@ -20,9 +23,9 @@ import (
 )
 
 // giveBackFixture grants n "mid" leases to one owner, takes them all
-// back (oldest first, one second apart), and leaves the node reading
-// freeMiB free with every lease paused. The clock starts three minutes
-// after the last take-back, past the quiet period.
+// back by the floor (oldest first, one second apart), and leaves the
+// node reading freeMiB free with every lease paused. The clock starts
+// sixteen minutes after the last take-back, past the floor quiet period.
 func giveBackFixture(t *testing.T, n, freeMiB int) (*Service, *testSub, context.Context, []*Lease, *time.Time) {
 	t.Helper()
 	svc, sub, ctx := newPressureService(t)
@@ -48,7 +51,7 @@ func giveBackFixture(t *testing.T, n, freeMiB int) (*Service, *testSub, context.
 	installDynamicNode(t, svc, sub, 4096, uint64(4096-freeMiB/2), 512)
 	svc.cfg.MemoryFloorMiB = 2048
 	warmFairShares(svc, ctx)
-	now = now.Add(3 * time.Minute)
+	now = now.Add(16 * time.Minute)
 	return svc, sub, ctx, ls, &now
 }
 
@@ -99,20 +102,97 @@ func TestGiveBackNeedsRoom(t *testing.T) {
 	}
 }
 
-// TestGiveBackQuietAfterTakeBack: within two minutes of a take-back
-// nothing is given back, room or not.
+// TestGiveBackQuietAfterTakeBack: within fifteen minutes of a floor
+// take-back nothing is given back, room or not.
 func TestGiveBackQuietAfterTakeBack(t *testing.T) {
 	svc, _, ctx, ls, now := giveBackFixture(t, 1, 8192)
-	*now = now.Add(-2 * time.Minute) // one minute after the take-back
+	*now = now.Add(-15 * time.Minute) // one minute after the take-back
 	svc.pressureCheck(ctx)
 	if !ls[0].Suspended {
-		t.Fatal("lease given back inside the quiet period")
+		t.Fatal("lease given back one minute after a floor take-back")
+	}
+	*now = now.Add(13 * time.Minute) // fourteen minutes after
+	svc.pressureCheck(ctx)
+	if !ls[0].Suspended {
+		t.Fatal("lease given back inside the floor quiet period")
 	}
 	*now = now.Add(2 * time.Minute)
 	svc.pressureCheck(ctx)
 	if ls[0].Suspended {
-		t.Fatal("lease not given back after the quiet period")
+		t.Fatal("lease not given back after the floor quiet period")
 	}
+}
+
+// TestGiveBackQuietAfterAdmissionTakeBack: an admission take-back keeps
+// give-back quiet for two minutes only.
+func TestGiveBackQuietAfterAdmissionTakeBack(t *testing.T) {
+	svc, _, ctx, ls, now := giveBackFixture(t, 1, 8192)
+	svc.noteTakeBack(false)
+	*now = now.Add(time.Minute)
+	svc.pressureCheck(ctx)
+	if !ls[0].Suspended {
+		t.Fatal("lease given back one minute after an admission take-back")
+	}
+	*now = now.Add(2 * time.Minute)
+	svc.pressureCheck(ctx)
+	if ls[0].Suspended {
+		t.Fatal("lease not given back three minutes after an admission take-back")
+	}
+}
+
+// TestGiveBackCountsUnfaultedMemory: a running 4096 MiB lease that has
+// faulted in only 1024 MiB can still take 3072 more, so give-back
+// counts that as spoken for: with 7168 MiB free the 1024 MiB lease fits
+// with the default margin (7168 - 3072 = 1024 + 2048 + 1024) and not
+// with one MiB more, although free memory alone would pass.
+func TestGiveBackCountsUnfaultedMemory(t *testing.T) {
+	svc, _, ctx, ls, _ := giveBackFixture(t, 1, 8192)
+	carol := preemptOwner(t, svc, "carol")
+	if _, err := svc.grantLease(ctx, leaseRequest{owner: carol, image: "big4", ttl: time.Hour, persistent: true}); err != nil {
+		t.Fatalf("grant big4: %v", err)
+	}
+	svc.cfg.GiveBackMarginMiB = 1025
+	svc.pressureCheck(ctx)
+	if !ls[0].Suspended {
+		t.Fatal("lease given back into memory a running lease has not faulted in yet")
+	}
+	svc.cfg.GiveBackMarginMiB = 0 // the default, 1024
+	svc.pressureCheck(ctx)
+	if ls[0].Suspended {
+		t.Fatal("lease not given back with room after the unfaulted memory")
+	}
+}
+
+// TestGiveBackHoldsRetakenLease: a lease taken back again after a
+// give-back is held 15 minutes, then 30 after the next re-take; one
+// that ran an hour after its give-back starts at 15 again.
+func TestGiveBackHoldsRetakenLease(t *testing.T) {
+	svc, _, ctx, ls, now := giveBackFixture(t, 1, 8192)
+	l := ls[0]
+	retake := func() {
+		t.Helper()
+		if err := svc.takeBackPause(ctx, l, "u-carol", 2); err != nil {
+			t.Fatalf("re-take: %v", err)
+		}
+	}
+	giveBackAfter := func(wait time.Duration, want bool) {
+		t.Helper()
+		*now = now.Add(wait)
+		svc.pressureCheck(ctx)
+		if got := !l.Suspended; got != want {
+			t.Fatalf("after %s: given back = %v, want %v", wait, got, want)
+		}
+	}
+	giveBackAfter(0, true)
+	retake() // re-take 1: held 15 min
+	giveBackAfter(3*time.Minute, false)
+	giveBackAfter(13*time.Minute, true)
+	retake() // re-take 2: held 30 min
+	giveBackAfter(16*time.Minute, false)
+	giveBackAfter(15*time.Minute, true)
+	*now = now.Add(time.Hour)
+	retake() // ran an hour: held 15 min again
+	giveBackAfter(16*time.Minute, true)
 }
 
 // TestGiveBackWaitsForQueuedCreates: a create waiting for admission

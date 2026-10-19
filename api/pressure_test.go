@@ -817,3 +817,25 @@ func TestAdmitCapacityWithoutFloor(t *testing.T) {
 		t.Fatalf("headroom for a returning lease = %d, want 6144", got)
 	}
 }
+
+// TestPressureFastIntervalNearFloor: under twice the floor the loop
+// checks every pressureFastInterval; with more room, or no usable
+// reading, at the normal interval (spoond-90ia).
+func TestPressureFastIntervalNearFloor(t *testing.T) {
+	svc, sub, ctx, _, _ := giveBackFixture(t, 1, 3072) // 3072 < 2 x 2048
+	svc.pressureCheck(ctx)
+	if got := svc.pressureNextInterval(); got != pressureFastInterval {
+		t.Fatalf("next interval near the floor = %s, want %s", got, pressureFastInterval)
+	}
+	installDynamicNode(t, svc, sub, 4096, 0, 512) // 8192 MiB free
+	svc.pressureCheck(ctx)
+	if got := svc.pressureNextInterval(); got != pressureInterval {
+		t.Fatalf("next interval with room = %s, want %s", got, pressureInterval)
+	}
+	svc.pressureNear.Store(true)
+	sub.SetNodeInfo(substrate.NodeInfo{Status: "draining", HugepagesTotal: 4096, HugepageSizeBytes: 2 << 20}, nil)
+	svc.pressureCheck(ctx)
+	if got := svc.pressureNextInterval(); got != pressureInterval {
+		t.Fatalf("next interval on a bad reading = %s, want %s", got, pressureInterval)
+	}
+}

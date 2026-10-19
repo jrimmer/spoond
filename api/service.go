@@ -223,6 +223,16 @@ type Lease struct {
 	TakeBackAt    time.Time `json:"-"`
 	TakeBackFor   string    `json:"-"`
 	TakeBackRatio float64   `json:"-"`
+	// givenBackAt, giveBackRetakes and giveBackHoldUntil are give-back's
+	// per-lease back-off (spoond-90ia): givenBackAt is when give-back last
+	// resumed the lease, giveBackRetakes how often it was taken back again
+	// after a give-back, and giveBackHoldUntil when the latest re-take's
+	// hold (giveBackHoldBase doubling per re-take, capped at
+	// giveBackHoldMax) ends. Guarded by store.mu; not persisted (a restart
+	// starts the back-off afresh, as it does the quiet periods).
+	givenBackAt       time.Time
+	giveBackRetakes   int
+	giveBackHoldUntil time.Time
 	// SnapshotName and SnapshotVersion name the named-snapshot version
 	// the lease started from, for the "snapshot" object in the API
 	// (A3). They are not persisted; a lease loaded from the store looks
@@ -729,6 +739,15 @@ type Service struct {
 	// checks MEMORY_FLOOR_MIB (api/pressure.go). A field so tests can
 	// shrink it.
 	pressureCheckInterval time.Duration
+	// pressureFastInterval is the loop's interval while the last reading
+	// was near the floor (under twice MEMORY_FLOOR_MIB): VMs faulting in
+	// memory can eat the floor's headroom inside one 15 s interval
+	// (spoond-90ia). A field so tests can shrink it.
+	pressureFastInterval time.Duration
+	// pressureNear is set by each pressureCheck that got a good reading:
+	// whether free memory sat under twice the floor. The loop picks
+	// pressureFastInterval while it is set.
+	pressureNear atomic.Bool
 	// orphanMu guards orphanSandboxIDs: sandbox ids a lost or released
 	// lease's substrate Delete could not stop, kept so the periodic orphan
 	// sweep retries them. A released lease's row and in-memory entry are
@@ -824,6 +843,10 @@ type Service struct {
 	// (admission or floor): give-back stays quiet for giveBackQuiet
 	// after it. Written by every takeBackPause.
 	lastTakeBackAt atomic.Int64
+	// lastFloorTakeBackAt is the UnixNano of the last take-back the
+	// low-memory floor made: give-back stays quiet for giveBackFloorQuiet
+	// after it (a floor breach means running VMs are still faulting in).
+	lastFloorTakeBackAt atomic.Int64
 	// giveBackSkip holds the leases whose give-back resume failed, until
 	// when they are passed over. Used only by the low-memory loop.
 	giveBackSkip map[string]time.Time
@@ -1092,6 +1115,7 @@ func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string,
 		undrainReadyPoll:          time.Second,
 		orphanSweepInterval:       defaultOrphanSweepInterval,
 		pressureCheckInterval:     pressureInterval,
+		pressureFastInterval:      pressureFastInterval,
 		orphanSandboxIDs:          map[string]struct{}{},
 		orphanSweep:               newOrphanSweepState(),
 		usageSampleInterval:       defaultUsageSampleInterval,
