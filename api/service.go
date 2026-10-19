@@ -474,7 +474,7 @@ type ServiceConfig struct {
 	MemoryOvercommit     float64
 	PinnedIdleNoticeDays int
 	// MemoryFloorMiB is MEMORY_FLOOR_MIB (spoond-l3lq): the free hugepage
-	// memory the backend keeps on the box, checked every 15 s by the
+	// memory the backend keeps on the box, checked every second by the
 	// low-memory loop (api/pressure.go). Below the floor it pauses one
 	// lease through pressureVictim (the least recently used unpinned
 	// lease of the owner furthest over their fair slice — pinned leases
