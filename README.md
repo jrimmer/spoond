@@ -318,7 +318,7 @@ The settings you are most likely to change:
 | Waiting and idling | `MAX_ADMIT_WAIT_SECS`, `IDLE_SUSPEND_DEFAULT_SECS`, `SATURATION_IO_FULL_PCT` (20), `SATURATION_CPU_SOME_PCT` (75) |
 | Paused leases | `PAUSED_RELEASE_DAYS` (30), `PINNED_IDLE_NOTICE_DAYS` (7) |
 | Snapshots | `MAX_KEPT_PER_LEASE` (4), `MAX_NAMED_SNAPSHOTS`, `SNAPSHOT_KEEP_VERSIONS`, `SNAPSHOT_WRITE_CONCURRENCY` |
-| Jobs and exec | `MAX_RUNNING_JOBS_PER_LEASE`, `JOB_RETENTION_SECS`, `JOB_MAX_RUNTIME`, `MAX_EXEC_BODY_BYTES` |
+| Jobs and exec | `MAX_RUNNING_JOBS_PER_LEASE`, `JOB_RETENTION_SECS`, `JOB_MAX_RUNTIME`, `MAX_EXEC_BODY_BYTES`, `EXEC_CONCURRENCY_MAX` (8; per-owner concurrent exec/stream ops — an agent client holding one stream per working thread runs that many at once), `GUEST_DIAL_MAX` (16; per-owner concurrent open guest-port dials). Both are per-identity overridable: an identity's `exec_concurrency` / `guest_dial` (set by an admin via `POST /api/users/{id}/quota`, stored with the user) replaces the host default for that identity alone; unset keeps the host default |
 | CI runner | `RUNNER_ADMIT_WAIT_SECS`, `RUNNER_JOB_TIMEOUT` (6h) |
 | Drain and recovery | `DRAIN_SNAPSHOT_CONCURRENCY`, `UNDRAIN_*`, `RECOVERY_RETRY_*`, `ROOTFS_PROBE_SECS`, `SWEEP_TIMEOUT`, `E2B_CREATE_TIMEOUT` and the other per-call E2B limits |
 | Housekeeping and testing | `ORPHAN_REAP` (`dryrun`), `CRASH_TEST` |
