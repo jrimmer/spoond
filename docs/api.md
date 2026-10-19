@@ -862,7 +862,9 @@ flight. `410` if it is
 sandbox no longer exists on the substrate; `413` when the JSON body is
 larger than `MAX_EXEC_BODY_BYTES` (default 8 MiB, leaving room for a
 large `cmd` and `env` next to the 64 KiB secrets cap); `429` when
-the per-owner concurrent exec/stream cap is reached. (Exec does not wait for or take the lease's lifecycle lock; its concurrency
+the per-owner concurrent exec/stream cap is reached — the host default
+`EXEC_CONCURRENCY_MAX` (8) or the owner's identity override
+(`exec_concurrency`, set via the quota route). (Exec does not wait for or take the lease's lifecycle lock; its concurrency
 guard is the per-owner cap, which yields `429`. A busy lease shows up only
 as the `409` below.)
 
@@ -1186,8 +1188,10 @@ lease cannot resume on use (a dial is work, #145 D2), `409 lease_busy`
 while its pause or another resume is in flight; `410` with
 `code: lease_lost`
 for a lost
-lease (see [Lost leases](#lost-leases)), `429` when the owner's 16
-concurrent dials are already open, `502` when the lease has no running
+lease (see [Lost leases](#lost-leases)), `429` when the owner's
+concurrent dials are already at their cap — the host default
+`GUEST_DIAL_MAX` (16) or the owner's identity override (`guest_dial`),
+`502` when the lease has no running
 sandbox or the guest port refuses the connection.
 
 ### `POST /api/leases/{id}/keepalive` — extend a persistent lease
@@ -2518,6 +2522,9 @@ used_bytes, paused_bytes, kept_bytes, named_bytes}, ratio}, "leases":
 U1).
 `used_mib` is the user's current memory charge — the sum of `memory_mb`
 over their running leases (suspended ones hold no hugepages).
+`exec_concurrency` and `guest_dial` are the user's per-identity
+concurrency overrides (scout#20); `0` (the default) means the host
+caps apply (`EXEC_CONCURRENCY_MAX`, `GUEST_DIAL_MAX`).
 `max_leases`, `guaranteed_mib`, `max_mib` and `max_kept_bytes` are no
 longer returned (3.0). `share` is the
 caller's fair-share slice and usage; see
@@ -2665,11 +2672,17 @@ the delete answers `500` with `read state: …` rather than a `404` that
 would hide the leftover rows; retry once the store is readable
 (spoond-y0jj T2).
 
-### `POST /api/users/{id}/quota` — set the TTL cap (admin only)
+### `POST /api/users/{id}/quota` — set the TTL cap and the concurrency overrides (admin only)
 
 Request `{"max_ttl": S}` — the user's lease TTL ceiling in seconds
-(`0` = the global maximum applies; negative is `400`). Response
-`{"user": {…}}` as `GET /api/users`.
+(`0` = the global maximum applies; negative is `400`). Two more fields
+set that identity's concurrency caps (scout#20):
+`{"exec_concurrency": N, "guest_dial": M}` raise the user's own cap on
+concurrent exec/stream operations and on open guest-port dials above
+the host defaults (`EXEC_CONCURRENCY_MAX`, `GUEST_DIAL_MAX`); `0` or an
+omitted field means unset — the host default applies — and a negative
+value is `400`. Any field the request sends is applied; the others are
+left alone. Response `{"user": {…}}` as `GET /api/users`.
 
 **Deprecated fields.** `max_leases`, `guaranteed_mib`, `max_mib` and
 `max_kept_bytes` were removed in 3.0 (fair shares): every active owner
@@ -2687,6 +2700,15 @@ Warning: 299 - "max_leases, guaranteed_mib, max_mib and max_kept_bytes are ignor
 curl -fsS -X POST "$SPOOND_URL/api/users/$UID/quota" \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"max_ttl":3600}'
+```
+
+To raise one identity's concurrency caps instead (agent clients that
+hold one stream per working thread at the 8 default, scout#20):
+
+```sh
+curl -fsS -X POST "$SPOOND_URL/api/users/$UID/quota" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"exec_concurrency":32}'
 ```
 
 The user's memory charge is `used_mib` on `GET /api/users/me`.

@@ -231,7 +231,7 @@ var endpointTable = []endpointSpec{
 	ep("GET", "/api/identity-status", "identity store availability"),
 	ep("GET", "/api/users/{id}/", "names a user's tokens (GET /api/users/{id}/tokens)"),
 	ep("POST", "/api/users", "create a user"),
-	epAdmin("POST", "/api/users/{id}/quota", "set the TTL cap (admin only)"),
+	epAdmin("POST", "/api/users/{id}/quota", "set the TTL cap and the per-identity concurrency overrides (admin only)"),
 	ep("POST", "/api/users/{id}/llm-key", "set/rotate/revoke a user's LLM gateway key"),
 	ep("POST", "/api/users/{id}/tokens", "mint a named API token"),
 	ep("DELETE", "/api/users/{id}/tokens/{token_id}", "revoke a token"),

@@ -172,6 +172,8 @@ with provisioning instructions. The pre-2.0 `FORKD_*` names still work
 | `RECOVERY_RETRY_WINDOW` | `30m` | how long a lease may stay in recovery since its first failed attempt, whatever the failure kind, including a substrate capacity refusal waiting for room (a Go duration or seconds; spoond-dxq) |
 | `MAX_EXEC_TIMEOUT_SECS` | `300` | ceiling on one exec/stream call's `timeout` (raise it for compile-heavy CI steps) |
 | `MAX_EXEC_BODY_BYTES` | `8388608` (8 MiB) | cap on the JSON body of a POST exec and on every message of a `/stream` WebSocket; a bigger body is `413` (and a bigger stream frame closes with code `1009`). The guest's own argv limit is ~128 KiB per string |
+| `EXEC_CONCURRENCY_MAX` | `8` | per-owner cap on concurrent exec/stream operations; the 9th and later waiters get `429` (scout#20). A per-identity override (`exec_concurrency` on `POST /api/users/{id}/quota`, stored with the identity) replaces it for that user alone; `0` there means this default |
+| `GUEST_DIAL_MAX` | `16` | per-owner cap on concurrent open guest-port dials (`GET /api/leases/{id}/ports/{port}/dial`); past it a dial gets `429` (scout#20). A per-identity override (`guest_dial` on `POST /api/users/{id}/quota`) replaces it for that user alone; `0` there means this default |
 | `ASSETS_DIR` | *(empty)* | serve static assets (the shelley binary) to guests at `/assets/<file>` on the proxy listener |
 | `LLM_UPSTREAM_URL` | *(empty)* | OpenAI-compatible LLM API base for the per-lease LLM gateway |
 | `LLM_UPSTREAM_KEY` | *(empty)* | server-side key for that upstream (never sent into sandboxes) |
