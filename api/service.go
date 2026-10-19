@@ -652,11 +652,11 @@ type Service struct {
 	sub substrate.Substrate
 	// db persists leases, shares, the pool and the sandbox catalog
 	// (U05/U08). Required.
-	db    *store.DB
+	db *store.DB
 	// dbJobs is the narrowed jobs surface db serves; tests swap it (the
 	// *store.DB, or a failing wrapper) wholesale.
 	dbJobs store.JobStore
-	store *Store
+	store  *Store
 	// tokens maps a consumer token to its consumer id (legacy mode).
 	tokens map[string]string
 	// ownerDeleteMu guards deletedOwners (spoond-q4j): the owners whose
