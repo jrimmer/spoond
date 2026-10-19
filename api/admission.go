@@ -18,14 +18,12 @@ import (
 const nodeInfoCacheTTL = 15 * time.Second
 
 // nearFloorMarginMiB is the slack under which a cached free reading is
-// no longer trusted (spoond-154): when cached free minus the box's
-// in-flight admissions sits within a request plus the floor plus this
-// margin of a fresh refresh's worth of the node's movement, the cached
-// value cannot be told apart from a floor breach, so the request's
-// admission reads the node fresh. Two floors in MiB: a VM faulting in
-// memory can move free pages by more than a floor between two checks
-// (8.4 GiB to 0.1 GiB in under 15 s in production), so a cache window
-// wide enough to spare round trips is wider than that fall.
+// no longer trusted (spoond-154): when the cached free sits under
+// request + MEMORY_FLOOR_MIB + this margin, it cannot be told apart
+// from a floor breach, so the request's admission refreshes the
+// NodeInfo instead of trusting the cache window. A whole floor in MiB:
+// a VM faulting memory in can move free pages by more than the floor
+// between two reads (8.4 GiB to 0.1 GiB in under 15 s in production).
 const nearFloorMarginMiB = 2048
 
 // freeHugepageMiB reports the node's free hugepage memory in MiB, from
@@ -53,16 +51,16 @@ func (s *Service) freeHugepageMiBLocked(ctx context.Context) (uint64, error) {
 // near-floor refresh (spoond-154): inside nodeInfoCacheTTL's window the
 // cached reading can be minutes stale exactly where staleness matters —
 // when a request plus the floor could pass or fail on the cached value
-// alone. When the cached free, less the in-flight admissions' debits,
-// sits under request + floor + margin, it refreshes the NodeInfo from
-// the substrate first (ignoring the TTL): the next admission's answer
-// is built on a reading no older than the round trip, the same shape
-// the floor loop's own fresh read gives the pause it takes. Away from
-// that edge it is freeHugepageMiBLocked exactly: the cache's one round
-// trip per window still holds. A failed refresh keeps the cached value —
-// staleness beats a wrong refusal, as above — and errors only when
-// nothing has ever been cached. The caller holds nodeInfoMu across the
-// read and its debit.
+// alone. When the cached free sits under request + floor +
+// nearFloorMarginMiB, it refreshes the NodeInfo from the substrate
+// first (ignoring the TTL): the admission's answer is built on a
+// reading no older than the round trip, the same shape the floor loop's
+// own fresh read gives the pause it takes. Away from that edge it is
+// freeHugepageMiBLocked exactly: the cache's one round trip per window
+// still holds. A failed refresh keeps the cached value — staleness
+// beats a wrong refusal, as above; the error only ever comes from
+// freeHugepageMiBLocked with nothing ever cached. The caller holds
+// nodeInfoMu across the read and its debit.
 func (s *Service) freeHugepageMiBForRequestLocked(ctx context.Context, memoryMB int) (uint64, error) {
 	free, err := s.freeHugepageMiBLocked(ctx)
 	if err != nil {
