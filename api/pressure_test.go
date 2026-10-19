@@ -818,24 +818,25 @@ func TestAdmitCapacityWithoutFloor(t *testing.T) {
 	}
 }
 
-// TestPressureFastIntervalNearFloor: under twice the floor the loop
-// checks every pressureFastInterval; with more room, or no usable
-// reading, at the normal interval (spoond-90ia).
-func TestPressureFastIntervalNearFloor(t *testing.T) {
+// TestPressureChecksEverySecond: the loop's pressureInterval is one
+// second — its normal cadence is a 1 s check with free memory far above
+// the floor (spoond-154), not the old 15 s — while the near-floor fast
+// interval stays a second too (spoond-90ia).
+func TestPressureChecksEverySecond(t *testing.T) {
+	if pressureInterval != time.Second {
+		t.Fatalf("pressureInterval = %s, want 1s (spoond-154)", pressureInterval)
+	}
+	if pressureFastInterval != time.Second {
+		t.Fatalf("pressureFastInterval = %s, want 1s", pressureFastInterval)
+	}
 	svc, sub, ctx, _, _ := giveBackFixture(t, 1, 3072) // 3072 < 2 x 2048
 	svc.pressureCheck(ctx)
-	if got := svc.pressureNextInterval(); got != pressureFastInterval {
-		t.Fatalf("next interval near the floor = %s, want %s", got, pressureFastInterval)
+	if got := svc.pressureNextInterval(); got != time.Second {
+		t.Fatalf("next interval near the floor = %s, want 1s", got)
 	}
-	installDynamicNode(t, svc, sub, 4096, 0, 512) // 8192 MiB free
+	installDynamicNode(t, svc, sub, 4096, 0, 512) // 8192 MiB free, far above the floor
 	svc.pressureCheck(ctx)
-	if got := svc.pressureNextInterval(); got != pressureInterval {
-		t.Fatalf("next interval with room = %s, want %s", got, pressureInterval)
-	}
-	svc.pressureNear.Store(true)
-	sub.SetNodeInfo(substrate.NodeInfo{Status: "draining", HugepagesTotal: 4096, HugepageSizeBytes: 2 << 20}, nil)
-	svc.pressureCheck(ctx)
-	if got := svc.pressureNextInterval(); got != pressureInterval {
-		t.Fatalf("next interval on a bad reading = %s, want %s", got, pressureInterval)
+	if got := svc.pressureNextInterval(); got != time.Second {
+		t.Fatalf("next interval far above the floor = %s, want 1s (a whole second at every distance)", got)
 	}
 }

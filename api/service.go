@@ -740,9 +740,10 @@ type Service struct {
 	// shrink it.
 	pressureCheckInterval time.Duration
 	// pressureFastInterval is the loop's interval while the last reading
-	// was near the floor (under twice MEMORY_FLOOR_MIB): VMs faulting in
-	// memory can eat the floor's headroom inside one 15 s interval
-	// (spoond-90ia). A field so tests can shrink it.
+	// was near the floor (under twice MEMORY_FLOOR_MIB) (spoond-90ia).
+	// The normal interval is every second now too (spoond-154), so the
+	// two are the same duration; the field stays for the near-floor
+	// distinction. A field so tests can shrink it.
 	pressureFastInterval time.Duration
 	// pressureNear is set by each pressureCheck that got a good reading:
 	// whether free memory sat under twice the floor. The loop picks
@@ -1929,7 +1930,7 @@ func (s *Service) Start(ctx context.Context) {
 	// Usage history (#140 U4): one usage_samples row per owner every
 	// sample interval, old rows pruned past the retention window.
 	go s.runUsageHistoryLoop(ctx)
-	// Low-memory take-back (MEMORY_FLOOR_MIB, spoond-l3lq): every 15 s
+	// Low-memory take-back (MEMORY_FLOOR_MIB, spoond-l3lq): every second
 	// keep the free hugepages at or above the floor by pausing one lease
 	// through the ordinary take-back rules.
 	go s.pressureLoop(ctx)
