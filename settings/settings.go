@@ -101,6 +101,7 @@ var Known = []string{
 	"E2B_TEMPLATE_STORAGE_PATH",
 	"E2B_TOKEN_SEED_FILE",
 	"EVENTS_TOKEN",
+	"EXEC_CONCURRENCY_MAX",
 	"EXEC_TIMEOUT_SECS",
 	"FORGEJO_ADMIN_TOKEN",
 	"FORGEJO_URL",
@@ -114,6 +115,7 @@ var Known = []string{
 	"GC_LOST_GRACE_PERSISTENT",
 	"GIVE_BACK",
 	"GIVE_BACK_MARGIN_MIB",
+	"GUEST_DIAL_MAX",
 	"HOST_API_PORT",
 	"HOST_GUEST_SERVICE_ADDR",
 	"HOST_GUEST_SERVICE_PORT",
@@ -427,6 +429,10 @@ var Specs = []Spec{
 	{"E2B_TEMPLATE_STORAGE_PATH", TypeString, Backend, false},
 	{"E2B_TOKEN_SEED_FILE", TypeString, Backend, false}, // seed file path: a path, not the secret itself
 	{"EVENTS_TOKEN", TypeString, Backend, true},
+	// Per-owner concurrent exec/stream cap (scout#20); a positive value
+	// is the host default every identity without an override counts
+	// against.
+	{"EXEC_CONCURRENCY_MAX", TypeInt, Backend, false},
 	{"EXEC_TIMEOUT_SECS", TypeInt, Runner, false},
 	{"FORGEJO_ADMIN_TOKEN", TypeString, Runner, true},
 	{"FORGEJO_URL", TypeURL, Runner, false},
@@ -442,6 +448,10 @@ var Specs = []Spec{
 	{"GIVE_BACK", TypeString, Backend, false},
 	// A whole number of MiB, 0 = no margin.
 	{"GIVE_BACK_MARGIN_MIB", TypeInt, Backend, false},
+	// Per-owner concurrent guest-port-dial cap (scout#20); a positive
+	// value is the host default every identity without an override
+	// counts against.
+	{"GUEST_DIAL_MAX", TypeInt, Backend, false},
 	{"HOST_API_PORT", TypeInt, Backend, false},
 	{"HOST_GUEST_SERVICE_ADDR", TypeString, Backend, false}, // a bare host or IP: the code builds <addr>/32 CIDRs from it
 	{"HOST_GUEST_SERVICE_PORT", TypeInt, Backend, false},
