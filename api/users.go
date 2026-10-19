@@ -19,6 +19,13 @@ type UserView struct {
 	Fingerprints []string      `json:"fingerprints"`
 	CreatedAt    string        `json:"created_at"`
 	MaxTTL       int           `json:"max_ttl"`
+	// ExecConcurrency and GuestDial are the owner's per-identity
+	// concurrency overrides (scout#20): the cap on concurrent
+	// exec/stream operations and on open guest-port dials. 0 (unset)
+	// means the host defaults apply (EXEC_CONCURRENCY_MAX,
+	// GUEST_DIAL_MAX).
+	ExecConcurrency int `json:"exec_concurrency"`
+	GuestDial       int `json:"guest_dial"`
 	// UsedMiB is the user's current memory charge (#128): the sum of
 	// memory_mb over their RUNNING leases (suspended ones hold no
 	// hugepages and are not charged).
@@ -29,14 +36,16 @@ type UserView struct {
 // running-lease memory charge in MiB (#128); the Service computes it.
 func toUserView(u *identity.User, usedMiB int) UserView {
 	return UserView{
-		ID:           u.ID,
-		Name:         u.Name,
-		Kind:         u.Kind,
-		Admin:        u.Admin,
-		Fingerprints: u.Fingerprints,
-		CreatedAt:    u.CreatedAt,
-		MaxTTL:       u.MaxTTL,
-		UsedMiB:      usedMiB,
+		ID:              u.ID,
+		Name:            u.Name,
+		Kind:            u.Kind,
+		Admin:           u.Admin,
+		Fingerprints:    u.Fingerprints,
+		CreatedAt:       u.CreatedAt,
+		MaxTTL:          u.MaxTTL,
+		ExecConcurrency: u.ExecConcurrency,
+		GuestDial:       u.GuestDial,
+		UsedMiB:         usedMiB,
 	}
 }
 
@@ -216,7 +225,12 @@ const deprecatedQuotaWarning = `299 - "max_leases, guaranteed_mib, max_mib and m
 var deprecatedQuotaFields = []string{"max_leases", "guaranteed_mib", "max_mib", "max_kept_bytes"}
 
 // handleUsersQuota updates a user's quota (admin only; T4/#31). Only
-// max_ttl is left. The per-owner caps max_leases, guaranteed_mib,
+// max_ttl is left, plus the per-identity concurrency overrides
+// (scout#20): exec_concurrency raises that user's concurrent
+// exec/stream cap and guest_dial the concurrent guest-port-dial cap
+// above the host defaults (EXEC_CONCURRENCY_MAX, GUEST_DIAL_MAX) — 0 or
+// an omitted field means unset, the host default applies, and a
+// negative value is 400. The per-owner caps max_leases, guaranteed_mib,
 // max_mib and max_kept_bytes were removed in 3.0 (fair shares, FS4):
 // a request may still send them, they are accepted and ignored, and
 // when any is set (non-zero) the response carries Deprecation: true and
@@ -242,7 +256,23 @@ func (s *Server) handleUsersQuota(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if maxTTL < 0 {
+	// The concurrency overrides read the same spellings as max_ttl: a
+	// non-integer is 400, a negative is 400, 0 (and an omitted field)
+	// means the host default again.
+	var execCap, dialCap int
+	if v, ok := raw["exec_concurrency"]; ok {
+		if err := json.Unmarshal(v, &execCap); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid exec_concurrency: "+err.Error())
+			return
+		}
+	}
+	if v, ok := raw["guest_dial"]; ok {
+		if err := json.Unmarshal(v, &dialCap); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid guest_dial: "+err.Error())
+			return
+		}
+	}
+	if maxTTL < 0 || execCap < 0 || dialCap < 0 {
 		writeError(w, http.StatusBadRequest, "quota values must be >= 0")
 		return
 	}
@@ -255,6 +285,21 @@ func (s *Server) handleUsersQuota(w http.ResponseWriter, r *http.Request) {
 	if err := s.svc.identities.SetQuota(id, maxTTL); err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
+	}
+	// Unknown user is answered by the SetQuota refusal above; these two
+	// only run for a user that exists, so the user view below reflects
+	// every field the request set.
+	if execCap > 0 {
+		if err := s.svc.identities.SetExecLimit(id, execCap); err != nil {
+			writeError(w, http.StatusNotFound, err.Error())
+			return
+		}
+	}
+	if dialCap > 0 {
+		if err := s.svc.identities.SetDialLimit(id, dialCap); err != nil {
+			writeError(w, http.StatusNotFound, err.Error())
+			return
+		}
 	}
 	if deprecated {
 		w.Header().Set("Deprecation", "true")

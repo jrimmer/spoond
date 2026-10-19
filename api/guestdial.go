@@ -25,17 +25,28 @@ import (
 // maxExecTimeout) so tests can shrink it.
 var guestDialIdleTimeout = 10 * time.Minute
 
-// guestDialLimit caps one owner's concurrent dials. Dials are cheap but
-// unbounded sockets are not: this is the same shape as the exec/stream
-// busy cap, at its own limit.
+// guestDialLimit is the built-in per-owner dial cap, the default behind
+// GUEST_DIAL_MAX. The Server's effective host cap is dialMax (set at
+// construction by hostGuestDialMax, overridable by SetDialMax in
+// tests); a user with a per-identity override counts against that
+// instead (identity.User.GuestDial). Kept as a named constant because
+// tests and readers still spell the default with it.
 const guestDialLimit = 16
 
 // acquireDial reserves a dial slot for owner. Returns false when the
-// per-owner cap is already reached (the handler answers 429).
+// per-owner cap is already reached (the handler answers 429). The cap
+// is the owner's identity override (identity.User.GuestDial) when one
+// is set, the host default (dialMax, GUEST_DIAL_MAX) otherwise.
 func (s *Server) acquireDial(owner string) bool {
+	limit := s.dialMax
+	if s.svc != nil && s.svc.identities != nil {
+		if u := s.svc.identities.UserByID(owner); u != nil && u.GuestDial > 0 {
+			limit = u.GuestDial
+		}
+	}
 	s.dialMu.Lock()
 	defer s.dialMu.Unlock()
-	if s.dialCount[owner] >= guestDialLimit {
+	if s.dialCount[owner] >= limit {
 		return false
 	}
 	s.dialCount[owner]++

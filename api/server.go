@@ -81,6 +81,9 @@ type Server struct {
 	// busy (security review #37 rescan F9) caps concurrent exec/stream
 	// operations per owner so a tenant can't saturate the controller
 	// with in-flight activity (quota covers lease count, not activity).
+	// busyMax is the HOST default (EXEC_CONCURRENCY_MAX); a user with a
+	// per-identity override (identity.User.ExecConcurrency) counts
+	// against that instead, resolved per request in acquireBusy.
 	busyMu    sync.Mutex
 	busyCount map[string]int
 	busyMax   int
@@ -91,17 +94,31 @@ type Server struct {
 
 	// dials (2.2, #113) caps concurrent guest port dials per owner, in
 	// its own pool: dialing a guest port is not exec/stream activity and
-	// the two caps must not eat each other's slots.
+	// the two caps must not eat each other's slots. dialMax is the HOST
+	// default (GUEST_DIAL_MAX); a user with a per-identity override
+	// (identity.User.GuestDial) counts against that instead, resolved
+	// per request in acquireDial.
 	dialMu    sync.Mutex
 	dialCount map[string]int
+	dialMax   int
 }
 
 // acquireBusy reserves an exec/stream slot for owner. Returns false when
-// the per-owner cap is already reached (caller should 429).
+// the per-owner cap is already reached (caller should 429). The cap is
+// the owner's identity override (identity.User.ExecConcurrency) when one
+// is set, the host default (busyMax, EXEC_CONCURRENCY_MAX) otherwise —
+// both read under the same lock the count goes by, so a racing override
+// change cannot push the count past what this admission allows.
 func (s *Server) acquireBusy(owner string) bool {
+	limit := s.busyMax
+	if s.svc != nil && s.svc.identities != nil {
+		if u := s.svc.identities.UserByID(owner); u != nil && u.ExecConcurrency > 0 {
+			limit = u.ExecConcurrency
+		}
+	}
 	s.busyMu.Lock()
 	defer s.busyMu.Unlock()
-	if s.busyCount[owner] >= s.busyMax {
+	if s.busyCount[owner] >= limit {
 		return false
 	}
 	s.busyCount[owner]++
@@ -197,8 +214,8 @@ func NewServer(svc *Service, reg *ImageRegistry) *Server {
 // exe.dev catalog model ids to upstream ids.
 func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRouterKey, defaultModel string, modelMap map[string]string) *Server {
 	s := &Server{svc: svc, reg: reg, mux: http.NewServeMux(), authFails: newAuthFailLimiter(),
-		busyCount: map[string]int{}, busyMax: 8, fileXfer: make(chan struct{}, maxFileTransfers),
-		dialCount: map[string]int{}, metrics: metrics.NewBackendMetrics(),
+		busyCount: map[string]int{}, busyMax: hostExecConcurrencyMax(), fileXfer: make(chan struct{}, maxFileTransfers),
+		dialCount: map[string]int{}, dialMax: hostGuestDialMax(), metrics: metrics.NewBackendMetrics(),
 		startedAt: time.Now()}
 	// The guest heartbeat lives only on the guest-service listener
 	// (ProxyHandler); the lease id in the path is the capability.
@@ -386,6 +403,51 @@ func (s *Server) SetHeartbeatMetrics(m *metrics.BackendMetrics) {
 func (s *Server) SetLLMMaxConcurrent(n int) {
 	if s.llm != nil {
 		s.llm.maxConcurrent = n
+	}
+}
+
+// hostExecConcurrencyMax is the host's per-owner cap on concurrent
+// exec/stream operations (security review #37 rescan F9),
+// EXEC_CONCURRENCY_MAX; the built-in default 8 keeps the pre-knob
+// behaviour. An owner's identity override, when its user carries one,
+// replaces this value for that owner alone.
+func hostExecConcurrencyMax() int {
+	if v := os.Getenv("EXEC_CONCURRENCY_MAX"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 8
+}
+
+// hostGuestDialMax is the host's per-owner cap on concurrent open guest
+// port dials (2.2, #113), GUEST_DIAL_MAX; the built-in default 16 keeps
+// the pre-knob behaviour. An owner's identity override, when its user
+// carries one, replaces this value for that owner alone.
+func hostGuestDialMax() int {
+	if v := os.Getenv("GUEST_DIAL_MAX"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 16
+}
+
+// SetBusyMax overrides the host's exec/stream cap (EXEC_CONCURRENCY_MAX
+// tests and callers who build a Server outside NewServer); 0 or less
+// keeps what the server already holds. Production wiring reads the env
+// in NewServerWithLLM.
+func (s *Server) SetBusyMax(n int) {
+	if n > 0 {
+		s.busyMax = n
+	}
+}
+
+// SetDialMax overrides the host's guest-dial cap (GUEST_DIAL_MAX); the
+// SetBusyMax rules apply.
+func (s *Server) SetDialMax(n int) {
+	if n > 0 {
+		s.dialMax = n
 	}
 }
 
