@@ -42,6 +42,20 @@ summarised from README "Status".
 
 ### Changed
 
+- **The memory-floor loop checks every second (spoond-154).** Running
+  VMs fault memory back in at any moment, and free hugepages fell from
+  8.4 GiB to 0.1 GiB in under 15 s in production — faster than the
+  former 15 s check. `MEMORY_FLOOR_MIB`'s tick is now 1 s at every
+  distance from the floor (the near-floor fast interval of 3.10.1,
+  everywhere); the `memory_floor` alert still repeats at most once per
+  10 minutes. Admissions near the floor also read the node fresh: a
+  request whose need sits within two floors of the 15 s admission
+  cache's free value refreshes the node reading instead of trusting it,
+  so a VM faulting memory in between two reads cannot get an
+  admission through on the stale figure. Resumes and give-back were
+  re-checked and already leave the floor free after the lease's full
+  size.
+
 - **README: a dashboard screenshot, and a shorter dashboard section**
   that says what the dashboard shows rather than how each panel is drawn.
 - **README: Status names the current release only**; the release history
