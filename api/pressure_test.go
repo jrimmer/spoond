@@ -818,6 +818,78 @@ func TestAdmitCapacityWithoutFloor(t *testing.T) {
 	}
 }
 
+// TestAdmitRefreshesNearFloor: spoond-154 — inside the node cache's TTL
+// (15 s), an admission whose request plus the floor sits within
+// nearFloorMarginMiB of the cached free value refreshes the NodeInfo and
+// is judged on the fresh reading: the fake's free pages dropped between
+// the two reads (a VM faulted its memory back in), and the cached value
+// would have admitted what the node no longer has. Away from that edge
+// the cache behaves as before — a request comfortably above it does not
+// make a second call the cached reading already answers.
+func TestAdmitRefreshesNearFloor(t *testing.T) {
+	svc, sub, ctx := newPressureService(t)
+	alice := preemptOwner(t, svc, "alice")
+	svc.cfg.MemoryFloorMiB = 2048
+
+	// The node reads 4096 MiB free; the fake's nodeInfoFn is replaced so
+	// the NEXT read reports the collapse to 512 MiB free — inside the
+	// cache's 15 s window, the shape a fast drop has.
+	sub.SetNodeInfo(substrate.NodeInfo{
+		Status: "healthy", HugepagesTotal: 4096, HugepageSizeBytes: 2 << 20, HugepagesUsed: 2048,
+	}, nil)
+	warmFairShares(svc, ctx) // fills the cache (and the fair snapshot)
+	if free, err := svc.cachedFreeHugepageMiB(ctx); err != nil || free != 4096 {
+		t.Fatalf("setup: cached free = %d, %v; want 4096", free, err)
+	}
+	sub.SetNodeInfo(substrate.NodeInfo{
+		Status: "healthy", HugepagesTotal: 4096, HugepageSizeBytes: 2 << 20, HugepagesUsed: 3584,
+	}, nil)
+
+	// The 1024 MiB request plus the 2048 floor passes the old cache
+	// (4096 >= 3072) but not the fresh value (512). Without spoond-154's
+	// near-floor refresh freeHugepageMiBForRequestLocked would never have
+	// called the substrate again within the TTL and the create would
+	// wrongly be granted.
+	nCalls := len(sub.CallLog())
+	_, err := svc.grantLease(ctx, leaseRequest{owner: alice, image: "mid", ttl: time.Hour, persistent: true})
+	if err == nil || !strings.Contains(err.Error(), "capacity") {
+		t.Fatalf("1024 MiB request inside the cache window = %v, want a capacity refusal on the fresh reading", err)
+	}
+	node := 0
+	for _, c := range sub.CallLog()[nCalls:] {
+		if c == "NodeInfo" {
+			node++
+		}
+	}
+	if node < 2 {
+		t.Fatalf("%d NodeInfo reads during the near-floor grant, want at least 2 (the cache was fresh; the near-floor refresh re-read the substrate inside the TTL)", node)
+	}
+
+	// The same shape with the box away from the floor's edge: a request
+	// whose headroom need is met with plenty to spare trusts the cached
+	// reading and makes no refresh call for it.
+	svc2, sub2, ctx2 := newPressureService(t)
+	bob := preemptOwner(t, svc2, "bob")
+	svc2.cfg.MemoryFloorMiB = 2048
+	sub2.SetNodeInfo(substrate.NodeInfo{
+		Status: "healthy", HugepagesTotal: 1 << 22, HugepageSizeBytes: 2 << 20, HugepagesUsed: 0,
+	}, nil) // free 8192 MiB of an 8 GiB pool: far above the 1024 + 2048 + 2048 edge
+	warmFairShares(svc2, ctx2)
+	callsBefore := len(sub2.CallLog())
+	if _, err := svc2.grantLease(ctx2, leaseRequest{owner: bob, image: "mid", ttl: time.Hour, persistent: true}); err != nil {
+		t.Fatalf("grant with room: %v", err)
+	}
+	node = 0
+	for _, c := range sub2.CallLog()[callsBefore:] {
+		if c == "NodeInfo" {
+			node++
+		}
+	}
+	if node != 1 {
+		t.Fatalf("%d NodeInfo reads during the roomy grant, want 1 (admitCapacity's own check; no near-floor refresh away from the edge)", node)
+	}
+}
+
 // TestPressureChecksEverySecond: the loop's pressureInterval is one
 // second — its normal cadence is a 1 s check with free memory far above
 // the floor (spoond-154), not the old 15 s — while the near-floor fast

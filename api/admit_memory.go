@@ -115,7 +115,7 @@ func (s *Service) takeBackForAdmission(ctx context.Context, owner string, memory
 		return nil
 	}
 
-	freeMiB, err := s.cachedFreeHugepageMiB(ctx)
+	freeMiB, err := s.freshFreeHugepageMiB(ctx, memoryMB)
 	if err != nil {
 		s.log.Printf("preempt: node info: %v", err)
 		return nil
@@ -177,7 +177,7 @@ func (s *Service) takeBackForAdmission(ctx context.Context, owner string, memory
 	refused := 0
 	pausedAny := false
 	for refused < maxRefusedRounds {
-		freeMiB, err = s.cachedFreeHugepageMiB(ctx)
+		freeMiB, err = s.freshFreeHugepageMiB(ctx, memoryMB)
 		if err != nil {
 			// The node could not be re-read: leave with what the earlier
 			// pauses freed. The caller's debit and createSandbox's own
