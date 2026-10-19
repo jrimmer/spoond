@@ -19,6 +19,12 @@ import (
 // breach sheds load a lease at a time instead of pausing a stack at
 // once.
 //
+// Near the floor (free under twice MEMORY_FLOOR_MIB) the loop checks
+// every second instead (spoond-90ia): on 2026-10-17 two VMs faulting in
+// memory at full speed ate the 2 GiB floor and the rest of the pool
+// inside one 15 s interval, and died of hugepage exhaustion 4 s before
+// the next tick would have paused one.
+//
 // Anti-cycling (round 2): admission keeps the floor as headroom, so a
 // lease the loop paused resumes only with the floor free on top of its
 // own memory and is not paused again at once. The loop stands down
@@ -34,6 +40,9 @@ const (
 	DefaultMemoryFloorMiB = 2048
 	// pressureInterval is how often the loop checks the floor.
 	pressureInterval = 15 * time.Second
+	// pressureFastInterval is how often it checks while free memory sits
+	// under twice the floor.
+	pressureFastInterval = time.Second
 	// pressureAlertEvery is how often a floor that cannot be met may
 	// repeat its alert.
 	pressureAlertEvery = 10 * time.Minute
@@ -48,24 +57,32 @@ const (
 	pressureRequester = "memory_pressure"
 )
 
-// pressureLoop runs until ctx is done: every pressureInterval, keep the
-// box's free hugepage memory at or above MEMORY_FLOOR_MIB.
+// pressureLoop runs until ctx is done: every pressureInterval (every
+// pressureFastInterval near the floor), keep the box's free hugepage
+// memory at or above MEMORY_FLOOR_MIB. Each interval starts when the
+// previous check returns, so a pause (up to 35 s) is judged by a reading
+// taken after it freed its pages.
 func (s *Service) pressureLoop(ctx context.Context) {
-	t := time.NewTicker(s.pressureCheckInterval)
+	t := time.NewTimer(s.pressureCheckInterval)
 	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if s.pressureCheck(ctx) {
-				// A pause just ran (up to 35 s): start a fresh interval
-				// so the next reading sees its freed pages, rather than
-				// the tick that queued during the pause.
-				t.Reset(s.pressureCheckInterval)
-			}
+			s.pressureCheck(ctx)
+			t.Reset(s.pressureNextInterval())
 		}
 	}
+}
+
+// pressureNextInterval is the wait before the next check: the fast
+// interval while the last good reading sat under twice the floor.
+func (s *Service) pressureNextInterval() time.Duration {
+	if s.pressureNear.Load() && s.pressureFastInterval > 0 {
+		return s.pressureFastInterval
+	}
+	return s.pressureCheckInterval
 }
 
 // committedMiB is the memory the box has committed to live VMs: the
@@ -108,6 +125,7 @@ func (s *Service) pressureCheck(ctx context.Context) bool {
 	}
 	floor := s.cfg.MemoryFloorMiB
 	if s.pressureSkip(floor) {
+		s.pressureNear.Store(false)
 		return false
 	}
 	// A fresh reading, not the admission cache: the floor is a standing
@@ -116,19 +134,23 @@ func (s *Service) pressureCheck(ctx context.Context) bool {
 	info, err := s.sub.NodeInfo(ctx)
 	if err != nil {
 		s.log.Printf("memory floor: node info: %v", err)
+		s.pressureNear.Store(false) // no reading: do not poll a failing orchestrator every second
 		return false
 	}
 	// Bad readings are not a floor breach (round 2): an orchestrator
 	// still booting or wedged reports no pages (or lies with a draining
 	// status), and taking back on that would pause leases for nothing.
 	if info.Status != "healthy" || info.HugepagesTotal == 0 {
+		s.pressureNear.Store(false)
 		return false
 	}
 	free := int(info.FreeHugepageBytes() / (1024 * 1024))
+	s.pressureNear.Store(free < 2*floor)
 	if free >= floor {
 		// Room again: hand back one lease spoond's take-back paused, if
 		// it fits (api/give_back.go).
-		return s.giveBackOne(ctx, free, floor)
+		pool := int(info.HugepagesTotal * info.HugepageSizeBytes / (1024 * 1024))
+		return s.giveBackOne(ctx, free, pool, floor)
 	}
 	short := floor - free
 

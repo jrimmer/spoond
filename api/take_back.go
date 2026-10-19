@@ -285,7 +285,7 @@ func (s *Service) takeBackPause(ctx context.Context, l *Lease, requester string,
 	if err != nil {
 		return err
 	}
-	s.noteTakeBack()
+	s.noteTakeBack(requester == pressureRequester)
 
 	// Record the take-back stamp: the stamp is re-checked under the
 	// lock, so a concurrent resume that already brought the lease back
@@ -328,6 +328,7 @@ func (s *Service) takeBackPause(ctx context.Context, l *Lease, requester string,
 	l.TakeBackAt = s.now()
 	l.TakeBackFor = requester
 	l.TakeBackRatio = ratio
+	s.holdGiveBackLocked(l)
 	l.LastAction, l.LastActionAt = pauseActionTakeBack, l.TakeBackAt
 	s.saveLeaseLocked(l)
 	s.store.mu.Unlock()
