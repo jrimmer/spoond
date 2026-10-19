@@ -922,6 +922,19 @@ func Main(args []string) int {
 	// /llm/ for identity users WITHOUT an LLM key unless the operator
 	// explicitly opts into the pre-U8 capability model.
 	srv.SetLLMRequireKey(os.Getenv("LLM_OPEN_LEGACY") == "")
+	// Per-owner activity knobs (scout#20): the host defaults for the
+	// exec/stream and guest-dial concurrency caps. Every owner without
+	// a per-identity override (identity store data, set via POST
+	// /api/users/{id}/quota) counts against these. The NewServer
+	// constructor has already read them; a set value is logged so an
+	// operator can see the process runs a different shape than the
+	// 8/16 built-ins.
+	if n := envIntOr("EXEC_CONCURRENCY_MAX", 8); n != 8 {
+		log.Printf("EXEC_CONCURRENCY_MAX: per-owner exec/stream cap %d (default 8)", n)
+	}
+	if n := envIntOr("GUEST_DIAL_MAX", 16); n != 16 {
+		log.Printf("GUEST_DIAL_MAX: per-owner guest-dial cap %d (default 16)", n)
+	}
 	// Public proxy auth (U7/T7): off (default) = capability model;
 	// forward-auth = require X-Proxy-Auth secret + Remote-User identity
 	// on every hostname-routed proxy request. The secret is shared with

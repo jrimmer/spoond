@@ -107,6 +107,14 @@ type User struct {
 	// in 3.0 (fair shares, FS4); a users file written before still loads
 	// (unknown JSON fields are ignored) and the next save drops them.
 	MaxTTL int `json:"max_ttl"` // max lease TTL seconds (0 = global max applies)
+	// Per-identity concurrency overrides (scout#20): the owner's own cap
+	// on concurrent exec/stream operations and on open guest-port dials.
+	// 0 (absent, or a users file written before the field) means the host
+	// default applies (EXEC_CONCURRENCY_MAX, GUEST_DIAL_MAX). Like the
+	// admin flag these live on the identity, and only an admin sets them
+	// (POST /api/users/{id}/quota).
+	ExecConcurrency int `json:"exec_concurrency,omitempty"` // concurrent exec/stream cap (0 = host default)
+	GuestDial       int `json:"guest_dial,omitempty"`       // concurrent guest-port-dial cap (0 = host default)
 }
 
 // ErrTooManyTokens is AddToken's answer once a user holds
@@ -563,6 +571,41 @@ func (s *Store) SetQuota(userID string, maxTTL int) error {
 		return fmt.Errorf("no such user")
 	}
 	u.MaxTTL = maxTTL
+	return s.save()
+}
+
+// SetExecLimit sets a user's per-identity concurrent exec/stream cap
+// (scout#20). 0 clears the override — the host default
+// (EXEC_CONCURRENCY_MAX) applies again; negative values are refused.
+func (s *Store) SetExecLimit(userID string, n int) error {
+	if n < 0 {
+		return fmt.Errorf("cap values must be >= 0")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	u := s.users[userID]
+	if u == nil {
+		return fmt.Errorf("no such user")
+	}
+	u.ExecConcurrency = n
+	return s.save()
+}
+
+// SetDialLimit sets a user's per-identity concurrent guest-port-dial cap
+// (scout#20), the dial-side twin of SetExecLimit. 0 clears the override
+// — the host default (GUEST_DIAL_MAX) applies again; negative values
+// are refused.
+func (s *Store) SetDialLimit(userID string, n int) error {
+	if n < 0 {
+		return fmt.Errorf("cap values must be >= 0")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	u := s.users[userID]
+	if u == nil {
+		return fmt.Errorf("no such user")
+	}
+	u.GuestDial = n
 	return s.save()
 }
 
