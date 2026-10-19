@@ -33,6 +33,12 @@ type JobRow struct {
 	// in seconds, 0 meaning "no cap". A job is killed and marked
 	// exited with Reason timed_out once it has run this long.
 	MaxRuntimeSecs int64
+	// RetentionSecs is the effective retention recorded at start, in
+	// seconds: how long the exited record and its guest files are kept
+	// before the sweeper prunes them. A request may shorten the host's
+	// JOB_RETENTION_SECS, never lengthen it. 0 for a row written before
+	// this column existed: the prune falls back to the host window.
+	RetentionSecs int64
 	// Reason records why a record left 'running' outside the guest's own
 	// rc file: "" for a normal exit, "timed_out" when the max runtime
 	// was spent.
@@ -40,7 +46,8 @@ type JobRow struct {
 }
 
 const jobColumns = `job_id, lease_id, owner, cmd, cwd, state, exit_code,
-	started_at, ended_at, stderr_tail, generation, max_runtime_secs, reason`
+	started_at, ended_at, stderr_tail, generation, max_runtime_secs, reason,
+	retention_secs`
 
 // JobReasonTimedOut is the lease_jobs.reason recorded when the max
 // runtime, not the command, ended a job. It is also the label the API
@@ -51,10 +58,10 @@ const JobReasonTimedOut = "timed_out"
 // "running" and exit_code nil.
 func (db *DB) InsertJob(ctx context.Context, j JobRow) error {
 	_, err := db.w.ExecContext(ctx, `
-INSERT INTO lease_jobs (`+jobColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+INSERT INTO lease_jobs (`+jobColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		j.JobID, j.LeaseID, j.Owner, j.Cmd, j.Cwd, j.State, j.ExitCode,
 		formatTime(j.StartedAt), formatTime(j.EndedAt), j.StderrTail, j.Generation,
-		j.MaxRuntimeSecs, j.Reason)
+		j.MaxRuntimeSecs, j.Reason, j.RetentionSecs)
 	if err != nil {
 		return fmt.Errorf("store: insert job %s: %w", j.JobID, err)
 	}
@@ -236,17 +243,12 @@ func (db *DB) LatestJobExitOfLease(ctx context.Context, leaseID string) (JobRow,
 	return row, true, nil
 }
 
-// PruneJobs deletes exited jobs older than cutoff, returning how many
-// rows went. Running and lost jobs are kept.
-//
-// ended_at is stored as RFC3339 with a variable-width fraction, so a
-// string comparison (ended_at < ?) mis-orders values with and without
-// fractional seconds: "12:00:00" sorts after "12:00:00.5" even though
-// the latter is earlier. Select the exited rows and compare the parsed
-// times in Go instead; retention is days, so reading the candidate set
-// is cheap.
-func (db *DB) PruneJobs(ctx context.Context, cutoff time.Time) (int64, error) {
-	expired, err := db.ListExpiredJobs(ctx, cutoff)
+// PruneJobs deletes expired exited jobs — each row's own retention
+// window against now (spoond-hwto), the host window for a row recorded
+// before retention_secs existed — returning how many rows went. Running
+// and lost jobs are kept.
+func (db *DB) PruneJobs(ctx context.Context, now time.Time, hostRetention time.Duration) (int64, error) {
+	expired, err := db.ListExpiredJobs(ctx, now, hostRetention)
 	if err != nil {
 		return 0, err
 	}
@@ -270,11 +272,12 @@ func (db *DB) PruneJobs(ctx context.Context, cutoff time.Time) (int64, error) {
 	return n, nil
 }
 
-// ListExpiredJobs returns the exited jobs whose parsed ended_at is
-// before cutoff, for the guest-side cleanup that follows a prune. The
-// comparison is in Go because the stored RFC3339 fraction width varies
-// (see PruneJobs).
-func (db *DB) ListExpiredJobs(ctx context.Context, cutoff time.Time) ([]JobRow, error) {
+// ListExpiredJobs returns the exited jobs whose own retention window
+// (hostRetention for a row recorded before retention_secs existed,
+// spoond-hwto) has run out against now, for the guest-side cleanup that
+// follows a prune. The comparison is in Go because the stored RFC3339
+// fraction width varies (see PruneJobs).
+func (db *DB) ListExpiredJobs(ctx context.Context, now time.Time, hostRetention time.Duration) ([]JobRow, error) {
 	rows, err := db.r.QueryContext(ctx,
 		`SELECT `+jobColumns+` FROM lease_jobs WHERE state='exited' AND ended_at IS NOT NULL AND ended_at != ''`)
 	if err != nil {
@@ -287,7 +290,11 @@ func (db *DB) ListExpiredJobs(ctx context.Context, cutoff time.Time) ([]JobRow, 
 	}
 	out := all[:0]
 	for _, r := range all {
-		if r.EndedAt.Before(cutoff) {
+		window := hostRetention
+		if r.RetentionSecs > 0 {
+			window = time.Duration(r.RetentionSecs) * time.Second
+		}
+		if window <= 0 || r.EndedAt.Add(window).Before(now) {
 			out = append(out, r)
 		}
 	}
@@ -310,7 +317,9 @@ func (db *DB) DeleteJobsOfLease(ctx context.Context, leaseID string) error {
 // them: without this they accumulate for ever (spoond-966 L3). A lost
 // row with no ended_at (lost before markJobLost stamped it) ages from
 // its started_at instead, so it cannot leak either. The comparison is in
-// Go for the same RFC3339 fraction reason as PruneJobs.
+// Go for the same RFC3339 fraction reason as PruneJobs. Lost rows keep
+// the single host cutoff: their guest files are gone with the sandbox,
+// so there is nothing a per-job shortening would clean earlier.
 func (db *DB) PruneLostJobs(ctx context.Context, cutoff time.Time) (int64, error) {
 	rows, err := db.r.QueryContext(ctx,
 		`SELECT `+jobColumns+` FROM lease_jobs WHERE state='lost'`)
@@ -351,6 +360,18 @@ func (db *DB) PruneLostJobs(ctx context.Context, cutoff time.Time) (int64, error
 	return n, nil
 }
 
+// DeleteJob removes one job row by id. changed is false when the job
+// is unknown (or already gone). Used by the per-job delete API
+// (spoond-hwto); the lease's other rows cascade with the lease as
+// before.
+func (db *DB) DeleteJob(ctx context.Context, jobID string) (bool, error) {
+	res, err := db.w.ExecContext(ctx, `DELETE FROM lease_jobs WHERE job_id = ?`, jobID)
+	if err != nil {
+		return false, fmt.Errorf("store: delete job %s: %w", jobID, err)
+	}
+	return rowsChanged(res), nil
+}
+
 func scanJobs(rows *sql.Rows) ([]JobRow, error) {
 	var out []JobRow
 	for rows.Next() {
@@ -372,7 +393,7 @@ func scanJob(scan func(dest ...any) error) (JobRow, error) {
 	var startedAt, endedAt string
 	err := scan(&r.JobID, &r.LeaseID, &r.Owner, &r.Cmd, &r.Cwd, &r.State,
 		&exitCode, &startedAt, &endedAt, &r.StderrTail, &r.Generation,
-		&r.MaxRuntimeSecs, &r.Reason)
+		&r.MaxRuntimeSecs, &r.Reason, &r.RetentionSecs)
 	if errors.Is(err, sql.ErrNoRows) {
 		return JobRow{}, ErrNotFound
 	}

@@ -104,11 +104,11 @@ func TestJobRoundTripAndTieBreak(t *testing.T) {
 		t.Fatalf("second timed out = %v (%v), want no change", changed, err)
 	}
 
-	// Pruning removes only exited rows older than the cutoff; running and
+	// Pruning removes only exited rows past their window; running and
 	// lost stay.
 	insert("j-run", "l-1", "running", base.Add(7*time.Minute))
 	insert("j-lost", "l-1", "lost", base.Add(7*time.Minute))
-	if _, err := db.PruneJobs(ctx, base.Add(6*time.Minute)); err != nil {
+	if _, err := db.PruneJobs(ctx, base.Add(6*time.Minute), 0); err != nil {
 		t.Fatalf("prune: %v", err)
 	}
 	if _, err := db.GetJob(ctx, "j-old"); !errors.Is(err, ErrNotFound) {
@@ -160,14 +160,16 @@ func TestJobRetentionFractionBoundary(t *testing.T) {
 	insert("j-earlier", base.Add(-500*time.Millisecond))
 	insert("j-later", base.Add(500*time.Millisecond))
 
-	expired, err := db.ListExpiredJobs(ctx, base)
+	// now = end + 1 s and a 1 s host window put the boundary exactly at
+	// the cutoff the old string comparison mis-ordered around.
+	exp, err := db.ListExpiredJobs(ctx, base.Add(time.Second), time.Second)
 	if err != nil {
 		t.Fatalf("list expired: %v", err)
 	}
-	if len(expired) != 1 || expired[0].JobID != "j-earlier" {
-		t.Fatalf("expired = %+v, want just j-earlier", expired)
+	if len(exp) != 1 || exp[0].JobID != "j-earlier" {
+		t.Fatalf("expired = %+v, want just j-earlier", exp)
 	}
-	if _, err := db.PruneJobs(ctx, base); err != nil {
+	if _, err := db.PruneJobs(ctx, base.Add(time.Second), time.Second); err != nil {
 		t.Fatalf("prune: %v", err)
 	}
 	if _, err := db.GetJob(ctx, "j-earlier"); !errors.Is(err, ErrNotFound) {
@@ -229,5 +231,89 @@ func TestPruneLostJobs(t *testing.T) {
 		if _, err := db.GetJob(ctx, id); err != nil {
 			t.Fatalf("%s wrongly pruned: %v", id, err)
 		}
+	}
+}
+
+// TestJobPerJobRetention (spoond-hwto): an exited row recorded with a
+// retention_secs shorter than the host window is pruned by its own
+// window; a row still inside its own window survives a pass that prunes
+// host-window rows; a 0 row (a record written before the column
+// existed) falls back to the host window. PruneJobs reports the rows it
+// deleted, and DeleteJob removes exactly one row.
+func TestJobPerJobRetention(t *testing.T) {
+	db, _ := openTestDB(t)
+	ctx := context.Background()
+	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	if err := db.UpsertLease(ctx, LeaseRow{
+		ID: "l-1", Owner: "alice", Image: "py-base",
+		CreatedAt: base, ExpiresAt: base.Add(time.Hour), LastActive: base,
+		State: "running", Class: "guaranteed",
+	}); err != nil {
+		t.Fatalf("upsert lease: %v", err)
+	}
+	insert := func(id string, retention int64, ended time.Time) {
+		t.Helper()
+		if err := db.InsertJob(ctx, JobRow{
+			JobID: id, LeaseID: "l-1", Owner: "alice", Cmd: "echo " + id,
+			State: "exited", StartedAt: ended.Add(-time.Minute), EndedAt: ended,
+			RetentionSecs: retention,
+		}); err != nil {
+			t.Fatalf("insert %s: %v", id, err)
+		}
+	}
+	// j-short ended an hour ago with a 60 s retention; j-host the same
+	// age with none (0: the host window applies); j-fresh with a 60 s
+	// retention ended a minute ago — its own window has not run out.
+	ended := base.Add(-time.Hour)
+	insert("j-short", 60, ended)
+	insert("j-host", 0, ended)
+	insert("j-fresh", 60, base.Add(-time.Minute))
+
+	expired, err := db.ListExpiredJobs(ctx, base, 7*24*time.Hour)
+	if err != nil {
+		t.Fatalf("list expired: %v", err)
+	}
+	if len(expired) != 1 || expired[0].JobID != "j-short" {
+		t.Fatalf("expired = %+v, want just j-short", expired)
+	}
+	n, err := db.PruneJobs(ctx, base, 7*24*time.Hour)
+	if err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("pruned = %d, want 1", n)
+	}
+	if _, err := db.GetJob(ctx, "j-short"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("j-short survived its own 60 s window: %v", err)
+	}
+	for _, id := range []string{"j-host", "j-fresh"} {
+		if _, err := db.GetJob(ctx, id); err != nil {
+			t.Fatalf("%s wrongly pruned: %v", id, err)
+		}
+	}
+
+	// A later pass with the service clock moved the host window's 7 days
+	// ahead prunes j-host; j-fresh's own window has long run out by then.
+	if _, err := db.PruneJobs(ctx, base.Add(8*24*time.Hour), 7*24*time.Hour); err != nil {
+		t.Fatalf("second prune: %v", err)
+	}
+	if _, err := db.GetJob(ctx, "j-host"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("j-host survived the host window: %v", err)
+	}
+	if _, err := db.GetJob(ctx, "j-fresh"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("j-fresh survived its own window: %v", err)
+	}
+
+	// DeleteJob removes exactly one row, and reports unknown as no
+	// change.
+	insert("j-del", 0, base)
+	if changed, err := db.DeleteJob(ctx, "j-del"); err != nil || !changed {
+		t.Fatalf("DeleteJob = %v (%v), want change", changed, err)
+	}
+	if _, err := db.GetJob(ctx, "j-del"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("j-del survived DeleteJob: %v", err)
+	}
+	if changed, err := db.DeleteJob(ctx, "j-del"); err != nil || changed {
+		t.Fatalf("DeleteJob of a gone job = %v (%v), want no change", changed, err)
 	}
 }
