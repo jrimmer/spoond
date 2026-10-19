@@ -572,6 +572,9 @@ func TestMemGaugesExcludePoolAndCountReserved(t *testing.T) {
 	if s.HugeFreeGiB != 23.9 || s.HugeUsedPct != 44.3 {
 		t.Errorf("hugepages = %v GiB free (%v%%), want 23.9 GiB (44.3%%)", s.HugeFreeGiB, s.HugeUsedPct)
 	}
+	if s.HugeUsedGiB != 19 || s.HugeTotalGiB != 42.9 {
+		t.Errorf("hugepages = %v of %v GiB, want 19 of 42.9 GiB", s.HugeUsedGiB, s.HugeTotalGiB)
+	}
 }
 
 // TestConfigFromFileSecrets (#137 C2): the dashboard reads its secrets

@@ -5,9 +5,9 @@ SPOOND · spoond.example.com                                                    
 │ 3 leases · 2 running · 1 susp · 1 taken back    │  │ i/o stall     ░░░░░░░░░░░░╎░░░    0.0% stalled  │
 │ 0 lost                                          │  │ nvme0n1 busy  ██░░░░░░░░░░╎░░░ 18% · 12 MB/s w  │
 │ queued 1 · granted 1,234 · swept 17             │  │ memory        ███████░░░░░╎░░░ 9.7 of 19.7 GiB  │
-│ shares 2 · users 7 · builds busy 1              │  │ hugepages     ███████░░░░░╎░░░   23.9 GiB free  │
-│ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ │  │ snapshot disk █████████░░░╎░░░  121.5 GiB free  │
-│ go-base        ███······             1 running  │  │ root disk     ██████░░░░░░╎░░░   30.2 GiB free  │
+│ shares 2 · users 7 · builds busy 1              │  │ hugepages     ███████░░░░░╎░░░    19 of 43 GiB  │
+│ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ │  │ snapshot disk █████████░░░╎░░░  192 of 313 GiB  │
+│ go-base        ███······             1 running  │  │ root disk     ██████░░░░░░╎░░░    21 of 51 GiB  │
 │ py-base        ███······             1 running  │  │ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ │
 │                                                 │  │ vcpu alloc 11 / 16 · mem alloc 19.5 GiB         │
 │                                                 │  │ gc dry-run                                      │

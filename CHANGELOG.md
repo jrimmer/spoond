@@ -42,6 +42,10 @@ summarised from README "Status".
 
 ### Changed
 
+- **Dashboard: hugepages, snapshot disk and root disk read "used of
+  total"**, like memory ("35.2 of 104 GiB"), instead of "GiB free".
+  Numbers of 100 and over drop their decimal so the text fits beside
+  the bar.
 - **README: a dashboard screenshot, and a shorter dashboard section**
   that says what the dashboard shows rather than how each panel is drawn.
 - **README: Status names the current release only**; the release history
