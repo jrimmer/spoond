@@ -663,3 +663,47 @@ func (f *failingJobStore) UpdateJobSkipped(ctx context.Context, jobID, stream st
 	}
 	return f.JobStore.UpdateJobSkipped(ctx, jobID, stream, dropped, newlines)
 }
+
+// TestJobOutputCapWrapperRunnerFiles (spoond-hwto): the cap works on the
+// real-wrapper runner's guest files too, not just the in-memory
+// filesystem: the front is zeroed in place (the file's size and the
+// kept bytes' offsets stay absolute), the row reports the drop, and a
+// read below it answers the first kept bytes.
+func TestJobOutputCapWrapperRunnerFiles(t *testing.T) {
+	ts, svc, db, sub := newTestServerWithService(t)
+	id, _, sandbox := createJobLease(t, ts, svc)
+	useJobRunner(t, sub)
+
+	jobID, _ := startBackgroundJob(t, ts, id, map[string]any{
+		"cmd":              "sleep 900",
+		"output_max_bytes": 10,
+	})
+	stdout := strings.Repeat("r\n", 4500) // 9000 bytes
+	writeStream(t, sub, sandbox, jobID, "stdout", stdout)
+
+	svc.reconcileJobs(context.Background())
+	row, err := db.GetJob(context.Background(), jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if row.StdoutDroppedBytes != 4096 {
+		t.Fatalf("wrapper-runner stream dropped %d, want 4096", row.StdoutDroppedBytes)
+	}
+	if row.StdoutDroppedNewlines != 2048 {
+		t.Fatalf("wrapper-runner stream dropped %d newlines, want 2048", row.StdoutDroppedNewlines)
+	}
+
+	// The host file keeps its size; the kept tail sits at its absolute
+	// place, and a read below the drop starts at the first kept byte.
+	got, resp := readOutput(t, ts, id, jobID, "stream=stdout&offset=0&limit=4", "token-a")
+	if got != stdout[row.StdoutDroppedBytes:row.StdoutDroppedBytes+4] {
+		t.Fatalf("read at 0 = %q, want the first kept bytes", got)
+	}
+	if resp.Header.Get("X-Output-Offset") != itoa9(int(row.StdoutDroppedBytes)) {
+		t.Fatalf("X-Output-Offset = %q, want %d", resp.Header.Get("X-Output-Offset"), row.StdoutDroppedBytes)
+	}
+	tail, _ := readOutput(t, ts, id, jobID, "stream=stdout&limit=2", "token-a")
+	if tail != strings.Repeat("r\n", 4500)[len(stdout)-2:] {
+		t.Fatalf("absolute tail = %q, want the last line", tail)
+	}
+}

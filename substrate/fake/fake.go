@@ -660,6 +660,39 @@ func fakeReadHost(path string, max int64) ([]byte, error) {
 	return data, nil
 }
 
+// fakePunchHost zeroes [offset, offset+length) of a real file without
+// truncating it, the same reads-after a guest punch leaves (the file's
+// size and every later byte's offset stay put). The job runner's files
+// live on the host, so a cap pass in a real-wrapper test must see the
+// same hole semantics as the in-memory filesystem.
+func fakePunchHost(path string, offset, length int64) error {
+	f, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("%w: %s", substrate.ErrNotFound, path)
+		}
+		return err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	from, to := offset, offset+length
+	if from > info.Size() {
+		from = info.Size()
+	}
+	if to > info.Size() {
+		to = info.Size()
+	}
+	if to <= from {
+		return nil
+	}
+	zero := make([]byte, to-from)
+	_, err = f.WriteAt(zero, from)
+	return err
+}
+
 func fakeReadHostRange(path string, offset, limit int64) ([]byte, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -904,6 +937,12 @@ func (f *Fake) PunchHole(ctx context.Context, sandboxID, name string, offset, le
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.punchCalls++
+	if host, ok := f.hostFilePathLocked(name); ok {
+		if _, exists := f.sandboxes[sandboxID]; !exists {
+			return fmt.Errorf("fake: PunchHole %s %s: %w", sandboxID, name, substrate.ErrNotFound)
+		}
+		return fakePunchHost(host, offset, length)
+	}
 	fs := f.fileFS(sandboxID)
 	if fs == nil {
 		return fmt.Errorf("fake: PunchHole %s %s: %w", sandboxID, name, substrate.ErrNotFound)
