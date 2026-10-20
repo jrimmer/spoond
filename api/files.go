@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/jrimmer/spoond/v3/internal/dirwalk"
 	"github.com/jrimmer/spoond/v3/substrate"
 )
 
@@ -193,10 +195,12 @@ type fileRangeReader interface {
 
 // handleFileDownload answers GET .../files/{path}: the file's bytes as
 // application/octet-stream. ?stat=1 returns the metadata document
-// instead. A single standard Range header is served as 206 with
-// Content-Range; a range past the end is 416. Multi-range requests (and
-// malformed ones) are answered with the whole file, as HTTP allows. 404
-// when the path does not exist, 413 beyond 256 MiB.
+// instead. ?list=1 returns a bounded, gitignore-aware listing of the
+// path's tree (it must be a directory). A single standard Range header
+// is served as 206 with Content-Range; a range past the end is 416.
+// Multi-range requests (and malformed ones) are answered with the whole
+// file, as HTTP allows. 404 when the path does not exist, 413 beyond
+// 256 MiB.
 func (s *Server) handleFileDownload(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Accept-Ranges", "bytes")
 	lease := s.filesGate(w, r)
@@ -208,7 +212,12 @@ func (s *Server) handleFileDownload(w http.ResponseWriter, r *http.Request) {
 		filesInvalidPath(w)
 		return
 	}
-	if r.URL.Query().Get("stat") == "1" {
+	q := r.URL.Query()
+	switch {
+	case q.Get("list") == "1":
+		s.handleFileList(w, r, lease, guestPath)
+		return
+	case q.Get("stat") == "1":
 		info, err := s.svc.sub.Stat(r.Context(), lease.SandboxID, guestPath)
 		if err != nil {
 			s.mapFileError(w, lease, "stat", err)
@@ -373,6 +382,136 @@ func (s *Server) serveFileRange(w http.ResponseWriter, r *http.Request, lease *L
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 	w.WriteHeader(http.StatusPartialContent)
 	_, _ = w.Write(data)
+}
+
+// defaultList bounds for ?list=1: 50000 entries, 4 MiB of response
+// entries, a 10 s walk.
+const (
+	defaultListMaxEntries = 50000
+	defaultListMaxBytes   = 4 << 20
+	defaultListTimeout    = 10 * time.Second
+	listIgnoreFileMax     = int64(1 << 20) // per .gitignore read
+)
+
+// listSettings is one ?list=1 request's parsed bounds.
+type listSettings struct {
+	limits dirwalk.Limits
+	hidden bool
+}
+
+// parseListSettings reads the list query parameters: hidden (default
+// true), gitignore (default true), exclude (comma-separated names),
+// max_entries (default and maximum 50000), max_bytes (default and
+// maximum 4 MiB), timeout_ms (default and maximum 10000). A malformed
+// value is an error; a zero, negative or over-maximum bound clamps to
+// the maximum, so the listing is always bounded.
+func parseListSettings(q url.Values) (listSettings, error) {
+	st := listSettings{limits: dirwalk.Limits{MaxIgnoreFile: listIgnoreFileMax}}
+	if raw := q.Get("hidden"); raw != "" {
+		b, err := parseBoolParam(raw)
+		if err != nil {
+			return st, errors.New("hidden must be 0 or 1")
+		}
+		st.hidden = b
+	} else {
+		st.hidden = true
+	}
+	st.limits.Hidden = st.hidden
+	st.limits.Gitignore = true
+	if raw := q.Get("gitignore"); raw != "" {
+		b, err := parseBoolParam(raw)
+		if err != nil {
+			return st, errors.New("gitignore must be 0 or 1")
+		}
+		st.limits.Gitignore = b
+	}
+	if raw := q.Get("exclude"); raw != "" {
+		for _, name := range strings.Split(raw, ",") {
+			if name = strings.TrimSpace(name); name != "" {
+				st.limits.Exclude = append(st.limits.Exclude, name)
+			}
+		}
+	}
+	st.limits.MaxEntries = defaultListMaxEntries
+	if raw := q.Get("max_entries"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil {
+			return st, errors.New("max_entries must be an integer")
+		}
+		// A zero, negative or over-size bound is the maximum, never
+		// "off": the listing stays bounded.
+		if n > 0 && n < defaultListMaxEntries {
+			st.limits.MaxEntries = n
+		}
+	}
+	st.limits.MaxBytes = defaultListMaxBytes
+	if raw := q.Get("max_bytes"); raw != "" {
+		n, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			return st, errors.New("max_bytes must be an integer")
+		}
+		if n > 0 && n < defaultListMaxBytes {
+			st.limits.MaxBytes = int(n)
+		}
+	}
+	st.limits.Timeout = defaultListTimeout
+	if raw := q.Get("timeout_ms"); raw != "" {
+		n, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			return st, errors.New("timeout_ms must be an integer")
+		}
+		if n > 0 && n < int64(defaultListTimeout/time.Millisecond) {
+			st.limits.Timeout = time.Duration(n) * time.Millisecond
+		}
+	}
+	return st, nil
+}
+
+// parseBoolParam reads a boolean query value: "1"/"true" or
+// "0"/"false", anything else an error.
+func parseBoolParam(raw string) (bool, error) {
+	switch raw {
+	case "1", "true":
+		return true, nil
+	case "0", "false":
+		return false, nil
+	}
+	return false, errors.New("not a boolean")
+}
+
+// handleFileList serves ?list=1: the bounded walk of guestPath's
+// tree. The path must exist (404) and be a directory (409 codes
+// ENOTDIR), like the other file routes' codes.
+func (s *Server) handleFileList(w http.ResponseWriter, r *http.Request, lease *Lease, guestPath string) {
+	st, err := parseListSettings(r.URL.Query())
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	sub := dirwalk.Substrate{Sub: s.svc.sub, ID: lease.SandboxID}
+	info, err := sub.Stat(r.Context(), guestPath)
+	if err != nil {
+		s.mapFileError(w, lease, "list", err)
+		return
+	}
+	if !info.IsDir {
+		writeErrorCode(w, http.StatusConflict, "ENOTDIR", guestPath+": not a directory")
+		return
+	}
+	res, err := dirwalk.Walk(r.Context(), sub, guestPath, st.limits)
+	if err != nil {
+		s.mapFileError(w, lease, "list", err)
+		return
+	}
+	entries := make([]map[string]any, 0, len(res.Entries))
+	for _, e := range res.Entries {
+		entries = append(entries, map[string]any{"kind": e.Kind, "path": e.Path})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"entries":   entries,
+		"count":     len(entries),
+		"truncated": res.Truncated,
+	})
 }
 
 // fileInfoView is the ?stat=1 JSON shape.

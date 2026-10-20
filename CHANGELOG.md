@@ -59,6 +59,22 @@ summarised from README "Status".
     untruncated (nothing is reported dropped), and an exited job's
     streams are never capped. The per-job request fields and the host
     default are documented by effect in the README and `docs/api.md`.
+- **Bounded directory listing (`?list=1`, spoond-bvmc).** `GET
+  /api/leases/{id}/files/{path…}?list=1` lists the tree below the path:
+  files, directories and symlinks (never followed), depth first with
+  siblings in byte order, paths relative to the requested directory.
+  `.git` is always skipped with everything below it; inside a git work
+  tree, what `.gitignore` files (of the path, its subdirectories and
+  parents up to the work-tree root) and `.git/info/exclude` ignore is
+  left out and ignored directories are pruned without being walked
+  (`node_modules` never lists). Bounds: `hidden` (default `1`),
+  `gitignore` (default `1`), `exclude` (comma-separated names to skip
+  with everything below), `max_entries` (default `50000`),
+  `max_bytes` (default 4 MiB of response entries) and `timeout_ms`
+  (default 10000); the walk stops at the first entry past the first
+  bound it meets and answers `"truncated": true` with what fit. A
+  missing path answers `404` with `code: ENOENT`, a file `409` with
+  `code: ENOTDIR`.
 
 - **Stable error codes on the files, exec and jobs routes
   (spoond-wir9).** Every error those routes answer now carries a stable,

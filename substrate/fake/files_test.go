@@ -2,6 +2,7 @@ package fake
 
 import (
 	"errors"
+	"reflect"
 	"testing"
 
 	"github.com/jrimmer/spoond/v3/substrate"
@@ -247,4 +248,58 @@ func TestWriteFileOntoDirectoryFails(t *testing.T) {
 	if _, err := f.ReadFile(t.Context(), id, "/d", 1<<20); !errors.Is(err, substrate.ErrIsDir) {
 		t.Fatalf("ReadFile on a directory: %v, want ErrIsDir", err)
 	}
+}
+
+// TestWriteSymlinkListDir: a symlink rides the fake as its own kind,
+// whatever its target (a directory link is not reported as a
+// directory), so a test can pin the walk's never-follow rule.
+func TestWriteSymlinkListDir(t *testing.T) {
+	f, id := newFileSandbox(t)
+	if err := f.MakeDir(t.Context(), id, "/d", 0o755); err != nil {
+		t.Fatalf("MakeDir: %v", err)
+	}
+	if err := f.WriteFile(t.Context(), id, "/d/x", []byte("x"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := f.WriteSymlink(t.Context(), id, "/d", "/top/dlink"); err != nil {
+		t.Fatalf("WriteSymlink dir: %v", err)
+	}
+	if err := f.WriteSymlink(t.Context(), id, "/d/x", "/top/flink"); err != nil {
+		t.Fatalf("WriteSymlink file: %v", err)
+	}
+	// The link's target is not followed: the link is named by its own
+	// kind, never as the directory or file it names.
+	entries, err := f.ListDir(t.Context(), id, "/top")
+	if err != nil {
+		t.Fatalf("ListDir: %v", err)
+	}
+	want := []substrate.DirEntry{
+		{Name: "dlink", Kind: substrate.DirSymlink},
+		{Name: "flink", Kind: substrate.DirSymlink},
+	}
+	if len(entries) != len(want) {
+		t.Fatalf("entries = %v, want %v", entries, want)
+	}
+	for i := range want {
+		if entries[i] != want[i] {
+			t.Fatalf("entries = %v, want %v", entries, want)
+		}
+	}
+	if err := f.WriteSymlink(t.Context(), "iunknown", "/d", "/top/l"); !errors.Is(err, substrate.ErrNotFound) {
+		t.Fatalf("WriteSymlink unknown sandbox: %v", err)
+	}
+}
+
+// TestWriteSymlinkFakeOnly: the substrate interface carries no symlink
+// writer (production never calls one); the fake keeps it so tests can
+// build symlink trees.
+func TestWriteSymlinkFakeOnly(t *testing.T) {
+	iface := reflect.TypeOf((*substrate.Substrate)(nil)).Elem()
+	if _, ok := iface.MethodByName("WriteSymlink"); ok {
+		t.Fatal("substrate.Substrate must not carry WriteSymlink")
+	}
+	if _, ok := reflect.TypeOf(&Fake{}).MethodByName("WriteSymlink"); !ok {
+		t.Fatal("the fake must keep WriteSymlink for tests")
+	}
+	var _ substrate.Substrate = (*Fake)(nil)
 }

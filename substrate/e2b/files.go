@@ -337,6 +337,40 @@ func (c *Client) Stat(ctx context.Context, sandboxID, path string) (substrate.Fi
 	return entryInfo(resp.Msg.GetEntry()), nil
 }
 
+// ListDir returns the direct children of path (depth 1) through envd's
+// filesystem.ListDir: files, directories and symlinks with their kind,
+// sorted in byte order. Other entry kinds are left out. A missing path
+// wraps substrate.ErrNotFound; a path that is not a directory wraps
+// substrate.ErrNotDir.
+func (c *Client) ListDir(ctx context.Context, sandboxID, path string) ([]substrate.DirEntry, error) {
+	resp, err := c.envdFilesystem(sandboxID, "").ListDir(ctx, connect.NewRequest(&filesystem.ListDirRequest{
+		Path:  path,
+		Depth: 1,
+	}))
+	if err != nil {
+		return nil, fmt.Errorf("e2b: list %s %s: %w", sandboxID, path, mapConnectError(err))
+	}
+	entries := resp.Msg.GetEntries()
+	out := make([]substrate.DirEntry, 0, len(entries))
+	for _, e := range entries {
+		// is_symlink wins over type: envd sets is_symlink and describes
+		// the TARGET's shape in type, so a symlink to a directory
+		// arrives as FILE_TYPE_DIRECTORY + is_symlink. Any such entry
+		// lists as a symlink and is never descended (the walk names it
+		// and moves on); FILE_TYPE_SYMLINK (envd's own kind) joins it.
+		switch {
+		case e.GetIsSymlink() || e.GetType() == filesystem.FileType_FILE_TYPE_SYMLINK:
+			out = append(out, substrate.DirEntry{Name: e.GetName(), Kind: substrate.DirSymlink})
+		case e.GetType() == filesystem.FileType_FILE_TYPE_DIRECTORY:
+			out = append(out, substrate.DirEntry{Name: e.GetName(), Kind: substrate.DirDirectory})
+		case e.GetType() == filesystem.FileType_FILE_TYPE_FILE:
+			out = append(out, substrate.DirEntry{Name: e.GetName(), Kind: substrate.DirFile})
+			// Other kinds (sockets, devices, fifos) are left out.
+		}
+	}
+	return out, nil
+}
+
 // MakeDir creates path and any missing parents through envd's
 // filesystem.MakeDir, then applies mode with a chmod exec (MakeDirRequest
 // carries no mode).

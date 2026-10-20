@@ -1200,6 +1200,49 @@ suspends on schedule, and that suspension ends the watch. A missing
 path is `404 ENOENT`; a path that is a file is `409 ENOTDIR`. The request's context is
 the watch's: closing the connection tears it down.
 
+With `?list=1` the route lists the path's tree instead of reading a
+file. The path must be a directory: a file answers `409` with
+`code: ENOTDIR`, a missing path `404` with `code: ENOENT`. The walk is
+depth first with siblings in byte order of their names, and each entry
+names its path relative to the listed directory with `/` separators
+(the listed directory itself is never named):
+
+```json
+{"entries":[{"kind":"f","path":"app.py"},{"kind":"d","path":"sub"},{"kind":"f","path":"sub/deep.txt"}],"count":3,"truncated":false}
+```
+
+`kind` is `f` (file), `d` (directory) or `l` (symlink); symlinks are
+listed but never followed, other entry kinds (sockets, devices, fifos)
+are left out, and unreadable entries are skipped. A `.git` directory is
+always skipped with everything below it. With `gitignore` at its
+default `1`, ignore rules apply inside a git work tree (a `.git`
+directory at the listed path or one of its parents): what the
+`.gitignore` files of the listed path, its subdirectories and its
+parents up to the work-tree root, and the work tree's
+`.git/info/exclude`, ignore is left out, and an ignored directory is
+pruned without being listed — `node_modules` names a directory, so a
+wide ignored tree is never walked. Listing an ignored directory itself,
+or anything below it, is empty, as git sees it; `gitignore=0` lists it.
+An ignore file above the listed path that cannot be read adds no rules
+and does not fail the listing. `hidden` (default `1`) lists
+dot-names; `0` hides them. `exclude` takes a comma-separated name list
+to skip with everything below them (`exclude=node_modules,dist`),
+wherever they would appear.
+
+The listing is bounded; the walk stops at the first entry past the
+first bound it meets and answers `truncated: true` with what fit:
+
+- `max_entries` (default `50000`) caps the response's entry count.
+- `max_bytes` (default `4194304`, i.e. 4 MiB) caps the JSON bytes of
+  the `entries` array.
+- `timeout_ms` (default `10000`) caps the walk's wall time, a single
+  slow directory listing included.
+
+The defaults are also the maxima: a zero, negative or larger value
+clamps to the maximum, so a listing is always bounded. `count` is the
+entries' length; `truncated` false says the whole tree below the
+directory fit.
+
 **`PUT`** replaces the file with the request body (parents are created;
 an existing file is replaced, an existing directory in the way is a
 `409` with `code: EISDIR`). The body lands in a private directory beside the target and is

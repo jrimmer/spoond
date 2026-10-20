@@ -64,6 +64,15 @@ curl -s -X PUT --data-binary @report.pdf \
 curl -s "https://sandbox.example.com/api/leases/<id>/files/root/report.pdf?stat=1" \
   -H "Authorization: Bearer $TOKEN"
 
+# List a directory tree (depth first, siblings in byte order; bounded
+# by 50000 entries / 4 MiB of entries / 10 s unless ?max_entries=,
+# ?max_bytes= or ?timeout_ms= say otherwise; hidden names and
+# .gitignore rules apply by default — ?hidden=0, ?gitignore=0 and
+# ?exclude=node_modules,dist turn them off or add skips)
+curl -s "https://sandbox.example.com/api/leases/<id>/files/root/repo?list=1" \
+  -H "Authorization: Bearer $TOKEN"
+# → 200 {"entries":[{"kind":"f","path":"app.py"}, …],"count":N,"truncated":false}
+
 # Download (application/octet-stream)
 curl -s -o report.pdf \
   "https://sandbox.example.com/api/leases/<id>/files/root/report.pdf" \
