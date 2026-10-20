@@ -40,6 +40,15 @@ summarised from README "Status".
   the surfaces it measured, as is the gateway's
   `spoond_llm_keyless_denied_total` companion.
 
+### Changed
+
+- **README: a dashboard screenshot, and a shorter dashboard section**
+  that says what the dashboard shows rather than how each panel is drawn.
+- **README: Status names the current release only**; the release history
+  lives here and on the releases page.
+
+## [3.11.1] - 2026-10-20
+
 ### Fixed
 
 - **The CI runner checks out the commit that triggered the run.** A
@@ -64,11 +73,6 @@ summarised from README "Status".
   crash-loss window stays bounded. Background jobs do not defer it: a
   pause stops them without ending them. On-demand checkpoints and the
   implicit checkpoint of clone, fork and restart do not wait.
-
-- **README: a dashboard screenshot, and a shorter dashboard section**
-  that says what the dashboard shows rather than how each panel is drawn.
-- **README: Status names the current release only**; the release history
-  lives here and on the releases page.
 
 ## [3.11.0] - 2026-10-19
 

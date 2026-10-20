@@ -186,7 +186,8 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
   `none` may not. Known limit: a domain in a `restricted` allowlist
   currently breaks HTTPS to allow-listed LAN IPs, so list IPs only.
 - **Forgejo Actions runner**: `spoond runner` leases sandboxes as CI
-  workers. On a full node a job waits for admission and retries instead
+  workers. A checkout step tests the commit that triggered the run (or
+  the step's `with: ref:`). On a full node a job waits for admission and retries instead
   of failing, and a job's `timeout-minutes` is enforced as in GitHub
   Actions (execution from sandbox creation), capped by
   `RUNNER_JOB_TIMEOUT` (default 6h, the whole job).
@@ -327,7 +328,7 @@ the result.
 
 ## Status
 
-**v3.11.0** (2026-10-19) is the current release. spoond 3.x shares a host
+**v3.11.1** (2026-10-20) is the current release. spoond 3.x shares a host
 fairly: every active owner gets an equal, floating slice of memory and
 snapshot disk, and when a request does not fit, spoond takes room back
 from the biggest borrower; it pauses a lease on its own before the host
@@ -335,7 +336,9 @@ runs out of memory, now checking every second. 3.11 rounds out the
 guest file and process API for agent clients: stable machine-readable
 error codes, a bounded gitignore-aware directory listing, ranged file
 reads, directory watches, and background jobs that can be deleted,
-kept for less time and capped in output. Clients moving from 2.9 read
+kept for less time and capped in output. 3.11.1 has the CI runner test
+the commit that triggered a run, and a periodic checkpoint waits for an
+open stream or sync exec instead of ending it. Clients moving from 2.9 read
 [docs/upgrading-3.0.md](docs/upgrading-3.0.md).
 
 Every release and what changed in it is in [CHANGELOG.md](CHANGELOG.md)
