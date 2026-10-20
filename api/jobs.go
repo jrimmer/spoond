@@ -188,10 +188,13 @@ type jobInfo struct {
 // jobStreamSkipped is one stream's dropped-front view (spoond-hwto): the
 // bytes the output cap dropped from the stream's file (and the newlines
 // those bytes held), so an absolute offset the record's caller reads
-// can name where the answer starts.
+// can name where the answer starts. EndsWithNewline says whether the
+// front's own last byte was a "\n": the kept tail starts block-aligned,
+// often mid-line, so only the cap saw where the dropped front ended.
 type jobStreamSkipped struct {
-	Bytes    int64 `json:"bytes"`
-	Newlines int64 `json:"newlines"`
+	Bytes           int64 `json:"bytes"`
+	Newlines        int64 `json:"newlines"`
+	EndsWithNewline bool  `json:"ends_with_newline"`
 }
 
 // jobInfoOf renders a store row for the API.
@@ -221,13 +224,21 @@ func jobInfoOf(r store.JobRow) jobInfo {
 func jobSkippedView(r store.JobRow) map[string]jobStreamSkipped {
 	var out map[string]jobStreamSkipped
 	if r.StdoutDroppedBytes > 0 {
-		out = map[string]jobStreamSkipped{"stdout": {r.StdoutDroppedBytes, r.StdoutDroppedNewlines}}
+		out = map[string]jobStreamSkipped{"stdout": {
+			Bytes:           r.StdoutDroppedBytes,
+			Newlines:        r.StdoutDroppedNewlines,
+			EndsWithNewline: r.StdoutDroppedEndsWithNewline,
+		}}
 	}
 	if r.StderrDroppedBytes > 0 {
 		if out == nil {
 			out = map[string]jobStreamSkipped{}
 		}
-		out["stderr"] = jobStreamSkipped{r.StderrDroppedBytes, r.StderrDroppedNewlines}
+		out["stderr"] = jobStreamSkipped{
+			Bytes:           r.StderrDroppedBytes,
+			Newlines:        r.StderrDroppedNewlines,
+			EndsWithNewline: r.StderrDroppedEndsWithNewline,
+		}
 	}
 	return out
 }
@@ -370,52 +381,86 @@ func jobStreamNewlines(job store.JobRow, stream string) int64 {
 	return job.StderrDroppedNewlines
 }
 
+// jobStreamEndsWithNewline is whether the recorded dropped front of one
+// stream ended on a newline (false for a stream that dropped nothing or
+// a legacy row).
+func jobStreamEndsWithNewline(job store.JobRow, stream string) bool {
+	if stream == "stdout" {
+		return job.StdoutDroppedEndsWithNewline
+	}
+	return job.StderrDroppedEndsWithNewline
+}
+
+// jobCapEndsWithNewline reports whether the last byte of a planned drop
+// is a newline (false for an empty drop).
+func jobCapEndsWithNewline(data []byte) bool {
+	return len(data) > 0 && data[len(data)-1] == '\n'
+}
+
 // jobCapLine renders a cap sidecar line, newline included: the dropped
-// bytes, their newlines, and the absolute offset the kept tail starts at
-// (keptFrom, the same as dropped today; readers check it for sanity).
-func jobCapLine(dropped, newlines, keptFrom int64) string {
-	return fmt.Sprintf("%d %d %d\n", dropped, newlines, keptFrom)
+// bytes, their newlines, the absolute offset the kept tail starts at
+// (keptFrom, the same as dropped today; readers check it for sanity),
+// and whether the dropped front's last byte was a newline (1 or 0, so
+// the line stays whitespace-separated).
+func jobCapLine(dropped, newlines, keptFrom int64, endsWithNewline bool) string {
+	ends := 0
+	if endsWithNewline {
+		ends = 1
+	}
+	return fmt.Sprintf("%d %d %d %d\n", dropped, newlines, keptFrom, ends)
 }
 
 // jobCapSidecarOf loads the live counters of a stream's cap sidecar.
 // ok is false when there is no live line (the file is missing, garbled
 // or unwritten), and the caller falls back to the record's own.
-func (s *Service) jobCapSidecarOf(ctx context.Context, sandboxID, jobID, stream string) (int64, int64, bool) {
+func (s *Service) jobCapSidecarOf(ctx context.Context, sandboxID, jobID, stream string) (int64, int64, bool, bool, bool) {
 	data, err := s.sub.ReadFile(ctx, sandboxID, jobCapPath(jobID, stream), maxJobCapFile)
 	if err != nil || len(data) == 0 {
-		return 0, 0, false
+		return 0, 0, false, false, false
 	}
 	if n := len(data); data[n-1] != '\n' {
-		return 0, 0, false
+		return 0, 0, false, false, false
 	}
 	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
 	last := lines[len(lines)-1]
-	dropped, newlines, ok := jobCapSidecarOf2(last)
+	dropped, newlines, ends, endsKnown, ok := jobCapSidecarOf2(last)
 	if !ok {
-		return 0, 0, false
+		return 0, 0, false, false, false
 	}
-	return dropped, newlines, true
+	return dropped, newlines, ends, endsKnown, true
 }
 
 // jobCapSidecarOf2 is the pure body of jobCapSidecarOf: one sidecar
 // line parsed. ok is false for anything that is not a whole, sane
-// "<dropped> <newlines> <kept>" line; the caller then falls back to the
-// record's own counters.
-func jobCapSidecarOf2(line string) (dropped, newlines int64, ok bool) {
+// "<dropped> <newlines> <kept> <ends>" line; the caller then falls back
+// to the record's own counters. A legacy three-field line (written
+// before the flag existed) parses with endsKnown false: its counters
+// are usable, but it cannot say where the front ended.
+func jobCapSidecarOf2(line string) (dropped, newlines int64, endsWithNewline, endsKnown, ok bool) {
 	fields := strings.Fields(line)
-	if len(fields) != 3 {
-		return 0, 0, false
+	if len(fields) != 3 && len(fields) != 4 {
+		return 0, 0, false, false, false
 	}
 	a, err1 := strconv.ParseInt(fields[0], 10, 64)
 	b, err2 := strconv.ParseInt(fields[1], 10, 64)
 	_, err3 := strconv.ParseInt(fields[2], 10, 64)
 	if err1 != nil || err2 != nil || err3 != nil || a < 0 || b < 0 {
-		return 0, 0, false
+		return 0, 0, false, false, false
 	}
 	// kept is recorded as it was applied (kept = size - dropped at the
 	// pass); it is not validated beyond its parse: the record's counters
 	// are what reads trust.
-	return a, b, true
+	if len(fields) == 4 {
+		switch fields[3] {
+		case "0":
+		case "1":
+			endsWithNewline = true
+		default:
+			return 0, 0, false, false, false
+		}
+		endsKnown = true
+	}
+	return a, b, endsWithNewline, endsKnown, true
 }
 
 // capJobStream caps one guest stream file (spoond-hwto), the poller's
@@ -431,7 +476,7 @@ func jobCapSidecarOf2(line string) (dropped, newlines int64, ok bool) {
 // substrate cannot punch holes the stream is left whole: truncating it
 // by any other means would shift the offsets every absolute-offset
 // reader holds, so the cap says so in the log and drops nothing.
-func (s *Service) capJobStream(ctx context.Context, sandboxID, jobID, stream string, dropped, newlines, kept, rowDropped, rowNewlines int64) {
+func (s *Service) capJobStream(ctx context.Context, sandboxID, jobID, stream string, dropped, newlines int64, endsWithNewline bool, kept, rowDropped, rowNewlines int64) {
 	path := jobPath(jobID, stream)
 	info, err := s.sub.Stat(ctx, sandboxID, path)
 	if err != nil {
@@ -450,7 +495,7 @@ func (s *Service) capJobStream(ctx context.Context, sandboxID, jobID, stream str
 		// whose record write did not). Land them now: the front is
 		// already gone, and the record must not stay behind it.
 		if dropped > rowDropped || newlines > rowNewlines {
-			if uerr := s.dbJobs.UpdateJobSkipped(ctx, jobID, stream, dropped, newlines); uerr != nil {
+			if uerr := s.dbJobs.UpdateJobSkipped(ctx, jobID, stream, dropped, newlines, endsWithNewline); uerr != nil {
 				s.log.Printf("jobs: %s: %s output cap: record skipped: %v", jobID, stream, uerr)
 			}
 		}
@@ -470,6 +515,7 @@ func (s *Service) capJobStream(ctx context.Context, sandboxID, jobID, stream str
 		return
 	}
 	planned := jobCapCountNewlines(data)
+	plannedEnds := jobCapEndsWithNewline(data)
 	if perr := ph.PunchHole(ctx, sandboxID, path, dropped, target-dropped); perr != nil {
 		s.log.Printf("jobs: %s: %s output cap: punch %d..%d: %v", jobID, stream, dropped, target, perr)
 		return
@@ -486,14 +532,14 @@ func (s *Service) capJobStream(ctx context.Context, sandboxID, jobID, stream str
 		s.log.Printf("jobs: %s: %s output cap: counters end mid-line; the pass is skipped", jobID, stream)
 		return
 	}
-	next := string(pre) + jobCapLine(target, newlines+planned, target)
+	next := string(pre) + jobCapLine(target, newlines+planned, target, plannedEnds)
 	if werr := s.sub.WriteFile(ctx, sandboxID, jobCapPath(jobID, stream), []byte(next), 0o600); werr != nil {
 		// The drop is already punched, so the record is the only view
 		// left: a failure here says so and the counters catch up there.
 		s.log.Printf("jobs: %s: %s output cap: write counters: %v", jobID, stream, werr)
 		return
 	}
-	if uerr := s.dbJobs.UpdateJobSkipped(ctx, jobID, stream, target, newlines+planned); uerr != nil {
+	if uerr := s.dbJobs.UpdateJobSkipped(ctx, jobID, stream, target, newlines+planned, plannedEnds); uerr != nil {
 		s.log.Printf("jobs: %s: %s output cap: record skipped: %v", jobID, stream, uerr)
 	}
 }
@@ -510,18 +556,24 @@ func (s *Service) capJobStreams(ctx context.Context, job store.JobRow, sandboxID
 	}
 	for _, stream := range []string{"stdout", "stderr"} {
 		rowDropped, rowNewlines := jobRowDropped(job, stream), jobStreamNewlines(job, stream)
-		dropped, newlines := rowDropped, rowNewlines
-		if d, n, ok := s.jobCapSidecarOf(ctx, sandboxID, job.JobID, stream); ok && d > dropped {
+		rowEnds := jobStreamEndsWithNewline(job, stream)
+		dropped, newlines, ends := rowDropped, rowNewlines, rowEnds
+		if d, n, e, endsKnown, ok := s.jobCapSidecarOf(ctx, sandboxID, job.JobID, stream); ok && d > dropped {
 			// The guest file's counters are ahead of the record's (a
 			// store write failed after a pass): continue from there —
-			// the newline count too, so the next pass counts the front's
+			// the newline count and, when the line carries it, the
+			// front's ending too, so the next pass counts the front's
 			// lines from the live total rather than the stale record.
+			// A legacy line without the flag leaves the record's.
 			dropped = d
 			if n > newlines {
 				newlines = n
 			}
+			if endsKnown {
+				ends = e
+			}
 		}
-		s.capJobStream(ctx, sandboxID, job.JobID, stream, dropped, newlines, kept, rowDropped, rowNewlines)
+		s.capJobStream(ctx, sandboxID, job.JobID, stream, dropped, newlines, ends, kept, rowDropped, rowNewlines)
 	}
 }
 
@@ -1555,8 +1607,9 @@ func (s *Service) readJobRange(ctx context.Context, sandboxID, jobID, stream str
 	skip = jobStreamSkipped{}
 	if skipBytes > 0 {
 		skip = jobStreamSkipped{
-			Bytes:    skipBytes,
-			Newlines: jobStreamNewlines(job, stream),
+			Bytes:           skipBytes,
+			Newlines:        jobStreamNewlines(job, stream),
+			EndsWithNewline: jobStreamEndsWithNewline(job, stream),
 		}
 	}
 	start = int64(offset)

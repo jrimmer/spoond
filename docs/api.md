@@ -945,8 +945,9 @@ Two more optional fields tune this job alone:
   polls. It shortens the host's `JOB_OUTPUT_MAX_BYTES` (default 0 =
   unlimited), never lengthens it; a negative value is `400` even on a
   synchronous exec, so a client cannot believe it capped anything. A
-  dropped front is reported as `"skipped": {"bytes": N, "newlines": M}`
-  — see [Read one job](#get-apileasesidjobsjob) and
+  dropped front is reported as `"skipped": {"bytes": N, "newlines": M,
+  "ends_with_newline": B}` — see
+  [Read one job](#get-apileasesidjobsjob) and
   [Stream job output](#get-apileasesidjobsjoboutput); offsets stay
   absolute, so a byte range an uncapped read answers is answered the
   same after a punch. On a substrate without hole-punching the streams
@@ -1050,8 +1051,9 @@ key marks it rather than dropping the field.
 
 The record names what the output cap has dropped (spoond-hwto): the
 `job` object carries `"skipped": {"stdout": {"bytes": N, "newlines":
-M}, …}` per stream that dropped anything (omitted whole while none
-did), and a stream whose answer skips a dropped front also carries
+M, "ends_with_newline": B}, …}` per stream that dropped anything
+(omitted whole while none did), and a stream whose answer skips a
+dropped front also carries
 `stdout_offset`/`stderr_offset` (the absolute offset the answer starts
 at) with `stdout_skipped`/`stderr_skipped` beside it. With `?wait=<seconds>` (at most 900) the request long-polls until the
 job is no longer running or the wait ends, then answers the current
@@ -1076,9 +1078,13 @@ read (`?offset=`, or the no-`offset` tail) answers the same bytes before
 and after a front was punched out — a request into the dropped front is
 not an error, it returns the first kept bytes. Once anything has been
 dropped the response carries `X-Output-Offset` (the absolute offset the
-body starts at) and `X-Output-Skipped` (`{"bytes": N, "newlines": M}`,
-the front the cap dropped); both are absent while nothing is dropped,
-so an uncapped response keeps its exact old shape.
+body starts at) and `X-Output-Skipped` (`{"bytes": N, "newlines": M,
+"ends_with_newline": B}`, the front the cap dropped); both are absent
+while nothing is dropped, so an uncapped response keeps its exact old
+shape. `ends_with_newline` says whether the dropped front's own last
+byte was a `\n`: the front is punched out at a block boundary, so the
+kept tail often starts mid-line, and only the cap saw where the dropped
+part ended. It describes the latest drop, like the counters.
 
 A `stream` that is neither `stdout` nor `stderr`, a negative `offset`
 or a non-positive `limit` answers `400` with `code: EINVAL`; a substrate

@@ -317,3 +317,75 @@ func TestJobPerJobRetention(t *testing.T) {
 		t.Fatalf("DeleteJob of a gone job = %v (%v), want no change", changed, err)
 	}
 }
+
+// TestJobSkippedEndsWithNewline covers the dropped-front update's
+// newline flag (spoond-sgld): the flag belongs to the latest drop, so a
+// later, larger drop replaces it while an update that does not extend
+// the front (a replayed sidecar, a recovery pass) leaves it alone.
+func TestJobSkippedEndsWithNewline(t *testing.T) {
+	db, _ := openTestDB(t)
+	ctx := context.Background()
+	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	if err := db.UpsertLease(ctx, LeaseRow{
+		ID: "l-1", Owner: "alice", Image: "py-base",
+		CreatedAt: base, ExpiresAt: base.Add(time.Hour), LastActive: base,
+		State: "running", Class: "guaranteed",
+	}); err != nil {
+		t.Fatalf("upsert lease: %v", err)
+	}
+	if err := db.InsertJob(ctx, JobRow{
+		JobID: "j-1", LeaseID: "l-1", Owner: "alice", Cmd: "echo x",
+		State: "running", StartedAt: base,
+	}); err != nil {
+		t.Fatalf("insert job: %v", err)
+	}
+
+	// The first drop ends mid-line.
+	if err := db.UpdateJobSkipped(ctx, "j-1", "stdout", 4096, 100, false); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	row, err := db.GetJob(ctx, "j-1")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if row.StdoutDroppedEndsWithNewline || row.StdoutDroppedBytes != 4096 {
+		t.Fatalf("first drop = %+v, want 4096 bytes ending mid-line", row)
+	}
+
+	// A larger drop replaces the flag: the front now ends on a newline.
+	if err := db.UpdateJobSkipped(ctx, "j-1", "stdout", 8192, 200, true); err != nil {
+		t.Fatalf("update 2: %v", err)
+	}
+	row, err = db.GetJob(ctx, "j-1")
+	if err != nil {
+		t.Fatalf("get 2: %v", err)
+	}
+	if !row.StdoutDroppedEndsWithNewline || row.StdoutDroppedBytes != 8192 {
+		t.Fatalf("second drop = %+v, want 8192 bytes ending on a newline", row)
+	}
+
+	// An update that does not extend the front leaves the latest drop's
+	// flag in place, whatever it is given.
+	if err := db.UpdateJobSkipped(ctx, "j-1", "stdout", 4096, 100, false); err != nil {
+		t.Fatalf("update 3: %v", err)
+	}
+	row, err = db.GetJob(ctx, "j-1")
+	if err != nil {
+		t.Fatalf("get 3: %v", err)
+	}
+	if !row.StdoutDroppedEndsWithNewline || row.StdoutDroppedBytes != 8192 {
+		t.Fatalf("shrinking update changed the latest drop: %+v", row)
+	}
+
+	// The streams are independent.
+	if err := db.UpdateJobSkipped(ctx, "j-1", "stderr", 4096, 0, false); err != nil {
+		t.Fatalf("update stderr: %v", err)
+	}
+	row, err = db.GetJob(ctx, "j-1")
+	if err != nil {
+		t.Fatalf("get 4: %v", err)
+	}
+	if row.StderrDroppedEndsWithNewline || !row.StdoutDroppedEndsWithNewline {
+		t.Fatalf("streams not independent: %+v", row)
+	}
+}

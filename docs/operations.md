@@ -1474,7 +1474,8 @@ lengthened. A file that grew past the cap has its front punched out
 with `fallocate --punch-hole` in the guest: block-aligned, so the file's
 size and every later byte's offset stay exactly where they were, and
 only the tail keeps occupying blocks. What was dropped is counted
-before each punch (bytes and the newlines those bytes held) and
+before each punch (bytes, the newlines those bytes held, and whether
+the latest drop ended on a newline) and
 reported from the record and the output endpoint as `skipped`; reads
 keep their absolute offsets, a read into the dropped front returns the
 first kept bytes. The counters only ever rise; a substrate without
@@ -1491,8 +1492,8 @@ stderr tail would go with them.
 
 The job record lives in the `lease_jobs` table (migration 0016, with
 migration 0020 adding the max-runtime cap and reason, 0030 the
-per-job retention and 0031 the output cap and its dropped-front
-counters) and is deleted with its lease. Metrics: `spoond_jobs_running` (gauge) and
+per-job retention, 0031 the output cap and its dropped-front
+counters, and 0032 the dropped front's ends-with-newline flag) and is deleted with its lease. Metrics: `spoond_jobs_running` (gauge) and
 `spoond_jobs_exited_total{result}` (`ok`/`error`/`lost`/`timed_out`).
 Events: `job_started`, `job_exited` and `job_lost`; the dashboard events
 panel shows `job_exited` lines, non-zero exits in the warning colour.

@@ -109,6 +109,8 @@ func TestSweepExpiredSparesMigratedPinnedTLLLease(t *testing.T) {
 			`ALTER TABLE lease_jobs DROP COLUMN stdout_dropped_newlines`,
 			`ALTER TABLE lease_jobs DROP COLUMN stderr_dropped_bytes`,
 			`ALTER TABLE lease_jobs DROP COLUMN stderr_dropped_newlines`,
+			`ALTER TABLE lease_jobs DROP COLUMN stdout_dropped_ends_with_newline`,
+			`ALTER TABLE lease_jobs DROP COLUMN stderr_dropped_ends_with_newline`,
 			`DELETE FROM schema_migrations WHERE version >= 22`,
 		} {
 			if _, err := db21.Exec(stmt); err != nil {
