@@ -1134,7 +1134,8 @@ malformed path tails, answers `404` with `code: EINVAL`.
 Access follows the strictest lease model: the **owner** (or an admin,
 who may act on any lease); a grantee's `http` share does **not** carry
 file content, and anyone else gets the usual `404`. Every call counts
-as activity for the idle sweeper. A suspended lease — whatever suspended
+as activity for the idle sweeper, except a watch (`?watch=1`), which
+holds a slot but never touches the lease. A suspended lease — whatever suspended
 it — is resumed first on every file route and then served (#145 D2); a
 refused resume answers the shared shapes (`429 box_full`, `503
 capacity_wait` with `Retry-After`, `409 lease_busy`). A `lost` lease
@@ -1157,6 +1158,35 @@ metadata instead:
 `mode` is the octal permission string, `mod_time` is RFC 3339, `is_dir`
 distinguishes a directory (its `size` is substrate-defined, `0` on the
 fake) from a file.
+
+**`GET ?watch=1`** streams the directory's guest-side changes as
+Server-Sent Events (`recursive=true|false`, default `false`: a
+non-recursive watch reports the directory's direct children only). One
+`data:` JSON line per event, in this order:
+
+```
+data: {"kind":"ready"}
+
+data: {"kind":"change","paths":["/work/a.txt","/work/z.txt"]}
+
+data: {"kind":"error","code":"lease_suspended","message":"…"}
+```
+
+`ready` arrives once the watch is live; `change` events carry each
+coalescing window's (100 ms) deduplicated, sorted paths; the terminal
+`error` is the last event and ends the stream. Its code is
+`lease_suspended` when the lease suspends (idle, hand, drain or
+take-back), `lease_lost` when its sandbox is lost, or `lease_gone` when
+it is released — a client re-watches after restoring or resuming. A
+watch that ends for none of those (a transport drop) answers
+`watch_ended`. The stream carries a `: keepalive` comment every 15 s.
+
+The watch holds an exec/stream slot for its lifetime (`429 too_busy` when the
+pool is full) and resumes a suspended lease like the other file routes,
+but it is **not activity**: an idle lease with an open watch still
+suspends on schedule, and that suspension ends the watch. A missing
+path is `404 ENOENT`; a path that is a file is `409 ENOTDIR`. The request's context is
+the watch's: closing the connection tears it down.
 
 **`PUT`** replaces the file with the request body (parents are created;
 an existing file is replaced, an existing directory in the way is a

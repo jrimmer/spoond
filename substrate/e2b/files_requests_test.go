@@ -514,3 +514,103 @@ func TestWriteFileScripts(t *testing.T) {
 		t.Fatal("place wrote into a directory target")
 	}
 }
+
+// Watch request shape and relaying: the Stat precondition runs first, the
+// WatchDir request carries the path and recursion, the start event
+// becomes WatchReady and each filesystem event one WatchChange carrying
+// the watch-root-joined path.
+func TestWatchRequestShape(t *testing.T) {
+	e := &filesTestEnvd{
+		statEntry: &filesystem.EntryInfo{Name: "work", Type: filesystem.FileType_FILE_TYPE_DIRECTORY},
+		watchEvents: []*filesystem.FilesystemEvent{
+			{Name: "a.txt", Type: filesystem.EventType_EVENT_TYPE_CREATE},
+			{Name: "deep/b.txt", Type: filesystem.EventType_EVENT_TYPE_WRITE},
+		},
+	}
+	c := newFilesEnvd(t, e)
+	defer e.close()
+
+	events, err := c.Watch(context.Background(), filesSandboxID, "/work", true)
+	if err != nil {
+		t.Fatalf("Watch: %v", err)
+	}
+	if len(e.statReqs) != 1 || e.statReqs[0] != "/work" {
+		t.Fatalf("Stat requests = %v, want [/work]", e.statReqs)
+	}
+	if len(e.watchReqs) != 1 || e.watchReqs[0] != "/work recursive=true" {
+		t.Fatalf("WatchDir requests = %v, want [/work recursive=true]", e.watchReqs)
+	}
+	if ev := waitE2BWatch(t, events); ev.Kind != substrate.WatchReady {
+		t.Fatalf("first event = %+v, want ready", ev)
+	}
+	if ev := waitE2BWatch(t, events); ev.Kind != substrate.WatchChange || len(ev.Paths) != 1 || ev.Paths[0] != "/work/a.txt" {
+		t.Fatalf("first change = %+v, want /work/a.txt", ev)
+	}
+	if ev := waitE2BWatch(t, events); ev.Kind != substrate.WatchChange || len(ev.Paths) != 1 || ev.Paths[0] != "/work/deep/b.txt" {
+		t.Fatalf("second change = %+v, want /work/deep/b.txt", ev)
+	}
+	if _, ok := <-events; ok {
+		t.Fatal("the channel stayed open after the stream ended")
+	}
+}
+
+// Watch preconditions: a missing path is ErrNotFound and a path that is a
+// file is ErrNotDir, both before any WatchDir stream opens.
+func TestWatchPreconditions(t *testing.T) {
+	e := &filesTestEnvd{} // Stat answers CodeNotFound
+	c := newFilesEnvd(t, e)
+	defer e.close()
+	if _, err := c.Watch(context.Background(), filesSandboxID, "/nope", true); !errors.Is(err, substrate.ErrNotFound) {
+		t.Fatalf("Watch missing = %v, want ErrNotFound", err)
+	}
+	if len(e.watchReqs) != 0 {
+		t.Fatalf("WatchDir opened for a missing path: %v", e.watchReqs)
+	}
+
+	e2 := &filesTestEnvd{statEntry: &filesystem.EntryInfo{Name: "f", Type: filesystem.FileType_FILE_TYPE_FILE}}
+	c2 := newFilesEnvd(t, e2)
+	defer e2.close()
+	if _, err := c2.Watch(context.Background(), filesSandboxID, "/f", true); !errors.Is(err, substrate.ErrNotDir) {
+		t.Fatalf("Watch a file = %v, want ErrNotDir", err)
+	}
+}
+
+// Watch's stream error: envd names it and the channel closes after the
+// WatchError event.
+func TestWatchStreamError(t *testing.T) {
+	e := &filesTestEnvd{
+		statEntry: &filesystem.EntryInfo{Name: "work", Type: filesystem.FileType_FILE_TYPE_DIRECTORY},
+		watchErr:  connect.NewError(connect.CodeInternal, errors.New("inotify overflow")),
+	}
+	c := newFilesEnvd(t, e)
+	defer e.close()
+	events, err := c.Watch(context.Background(), filesSandboxID, "/work", false)
+	if err != nil {
+		t.Fatalf("Watch: %v", err)
+	}
+	if ev := waitE2BWatch(t, events); ev.Kind != substrate.WatchReady {
+		t.Fatalf("first event = %+v, want ready", ev)
+	}
+	ev := waitE2BWatch(t, events)
+	if ev.Kind != substrate.WatchError || !strings.Contains(ev.Err, "inotify overflow") {
+		t.Fatalf("terminal event = %+v, want a WatchError naming the stream error", ev)
+	}
+	if _, ok := <-events; ok {
+		t.Fatal("the channel stayed open after the WatchError")
+	}
+}
+
+// waitE2BWatch reads one event or fails after a bounded wait.
+func waitE2BWatch(t *testing.T, events <-chan substrate.WatchEvent) substrate.WatchEvent {
+	t.Helper()
+	select {
+	case ev, ok := <-events:
+		if !ok {
+			t.Fatal("watch channel closed before the expected event")
+		}
+		return ev
+	case <-time.After(5 * time.Second):
+		t.Fatal("watch event did not arrive within 5s")
+		return substrate.WatchEvent{}
+	}
+}

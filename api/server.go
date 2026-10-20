@@ -335,7 +335,13 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	// Lease file operations (#114): download/upload/stat/mkdir/remove a
 	// guest file through the substrate. Owner or admin; 404 for anyone
 	// else, 409 while suspended.
-	s.mux.HandleFunc("GET /api/sandboxes/{id}/files/{path...}", s.handleFileDownload)
+	s.mux.HandleFunc("GET /api/sandboxes/{id}/files/{path...}", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("watch") == "1" {
+			s.handleFileWatch(w, r)
+			return
+		}
+		s.handleFileDownload(w, r)
+	})
 	s.mux.HandleFunc("PUT /api/sandboxes/{id}/files/{path...}", s.handleFileUpload)
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/files/{path...}", s.handleFileOp)
 	s.mux.HandleFunc("DELETE /api/sandboxes/{id}/files/{path...}", s.handleFileDelete)

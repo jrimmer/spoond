@@ -193,6 +193,24 @@ type ProcessEvent struct {
 	Err      string
 }
 
+// WatchEventKind is the kind of one filesystem watcher event.
+type WatchEventKind int
+
+const (
+	WatchReady  WatchEventKind = iota // the watch is in place; change events follow
+	WatchChange                       // Paths changed
+	WatchError                        // Err describes why the watch ended
+)
+
+// WatchEvent is one filesystem watcher event. The channel a Watch call
+// returns feeds these in order and closes after WatchError (or plainly,
+// when the stream ends without an error).
+type WatchEvent struct {
+	Kind  WatchEventKind
+	Paths []string // WatchChange: the changed paths, deduplicated
+	Err   string   // WatchError
+}
+
 // FileInfo is a path's metadata as returned by Substrate.Stat.
 type FileInfo struct {
 	Name    string
@@ -249,4 +267,12 @@ type Substrate interface {
 	Rename(ctx context.Context, sandboxID, oldPath, newPath string) error
 	// Remove deletes path; recursive removes non-empty directories.
 	Remove(ctx context.Context, sandboxID, path string, recursive bool) error
+
+	// Watch streams the path directory's change events until the context
+	// is cancelled or the watch ends. Each changed path is one event with
+	// the WatchChange kind (or more; the substrate is free to coalesce);
+	// the first event carries the WatchReady kind once watching is in
+	// place. A missing path wraps ErrNotFound, a path that is a file
+	// wraps ErrNotDir.
+	Watch(ctx context.Context, sandboxID, path string, recursive bool) (<-chan WatchEvent, error)
 }
