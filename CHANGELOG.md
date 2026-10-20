@@ -43,11 +43,16 @@ summarised from README "Status".
     size and later offsets unchanged) and only the tail is kept — a
     chatty job can no longer fill the disk between polls. A request may
     shorten the host cap, never lengthen it. A dropped front is
-    reported as `"skipped": {"bytes": N, "newlines": M}`: per stream in
+    reported as `"skipped": {"bytes": N, "newlines": M,
+    "ends_with_newline": B}`: per stream in
     the job record and `stdout_skipped`/`stderr_skipped` beside the
     record view's outputs (plus a `stdout_offset`/`stderr_offset`
     naming the first kept byte), and as `X-Output-Skipped` and
-    `X-Output-Offset` headers on the raw output endpoint; reads
+    `X-Output-Offset` headers on the raw output endpoint.
+    `ends_with_newline` says whether the dropped front's own last byte
+    was a `\n` — the front is punched at a block boundary, so the kept
+    tail often starts mid-line — and describes the latest drop, like
+    the counters; reads
     (`?offset=`) keep absolute offsets — a read into the dropped front
     returns the first kept bytes rather than an error. The counters only
     ever rise, a substrate without hole-punching leaves streams

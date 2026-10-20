@@ -55,6 +55,14 @@ type JobRow struct {
 	StdoutDroppedNewlines int64
 	StderrDroppedBytes    int64
 	StderrDroppedNewlines int64
+	// StdoutDroppedEndsWithNewline/StderrDroppedEndsWithNewline say
+	// whether the last byte of the dropped front was a "\n". The front
+	// is punched at a block boundary, so the kept tail usually starts
+	// mid-line; only the cap saw the byte the front ended on. The flag
+	// belongs to the latest drop and is false for a stream that dropped
+	// nothing or a row written before the column existed.
+	StdoutDroppedEndsWithNewline bool
+	StderrDroppedEndsWithNewline bool
 	// Reason records why a record left 'running' outside the guest's own
 	// rc file: "" for a normal exit, "timed_out" when the max runtime
 	// was spent.
@@ -64,13 +72,15 @@ type JobRow struct {
 const jobColumns = `job_id, lease_id, owner, cmd, cwd, state, exit_code,
 	started_at, ended_at, stderr_tail, generation, max_runtime_secs, reason,
 	retention_secs, output_max_bytes, stdout_dropped_bytes, stdout_dropped_newlines,
-	stderr_dropped_bytes, stderr_dropped_newlines`
+	stdout_dropped_ends_with_newline, stderr_dropped_bytes, stderr_dropped_newlines,
+	stderr_dropped_ends_with_newline`
 
-// jobDroppedColumns selects one stream's dropped-front counter pair by
-// name, for the cap's update.
-var jobDroppedColumn = map[string][2]string{
-	"stdout": {"stdout_dropped_bytes", "stdout_dropped_newlines"},
-	"stderr": {"stderr_dropped_bytes", "stderr_dropped_newlines"},
+// jobDroppedColumns selects one stream's dropped-front columns by
+// name, for the cap's update: the bytes, the newlines and the flag
+// saying whether the front's last byte was a newline.
+var jobDroppedColumn = map[string][3]string{
+	"stdout": {"stdout_dropped_bytes", "stdout_dropped_newlines", "stdout_dropped_ends_with_newline"},
+	"stderr": {"stderr_dropped_bytes", "stderr_dropped_newlines", "stderr_dropped_ends_with_newline"},
 }
 
 // JobStore is the jobs surface of the DB, narrowed so callers (and the
@@ -79,7 +89,7 @@ var jobDroppedColumn = map[string][2]string{
 type JobStore interface {
 	// the background-job surface (this file)
 	InsertJob(ctx context.Context, j JobRow) error
-	UpdateJobSkipped(ctx context.Context, jobID, stream string, dropped, newlines int64) error
+	UpdateJobSkipped(ctx context.Context, jobID, stream string, dropped, newlines int64, endsWithNewline bool) error
 }
 
 // JobReasonTimedOut is the lease_jobs.reason recorded when the max
@@ -91,12 +101,12 @@ const JobReasonTimedOut = "timed_out"
 // "running" and exit_code nil.
 func (db *DB) InsertJob(ctx context.Context, j JobRow) error {
 	_, err := db.w.ExecContext(ctx, `
-INSERT INTO lease_jobs (`+jobColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+INSERT INTO lease_jobs (`+jobColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		j.JobID, j.LeaseID, j.Owner, j.Cmd, j.Cwd, j.State, j.ExitCode,
 		formatTime(j.StartedAt), formatTime(j.EndedAt), j.StderrTail, j.Generation,
 		j.MaxRuntimeSecs, j.Reason, j.RetentionSecs, j.OutputMaxBytes,
-		j.StdoutDroppedBytes, j.StdoutDroppedNewlines,
-		j.StderrDroppedBytes, j.StderrDroppedNewlines)
+		j.StdoutDroppedBytes, j.StdoutDroppedNewlines, j.StdoutDroppedEndsWithNewline,
+		j.StderrDroppedBytes, j.StderrDroppedNewlines, j.StderrDroppedEndsWithNewline)
 	if err != nil {
 		return fmt.Errorf("store: insert job %s: %w", j.JobID, err)
 	}
@@ -104,19 +114,26 @@ INSERT INTO lease_jobs (`+jobColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
 }
 
 // UpdateJobSkipped raises one stream's dropped-front counters to
-// dropped/newlines (spoond-hwto). The cap can only drop more, so a
-// value below what the row already holds is ignored rather than written:
-// a guest file restored from a snapshot or replayed from an older
-// sidecar cannot shorten what the record reports.
-func (db *DB) UpdateJobSkipped(ctx context.Context, jobID, stream string, dropped, newlines int64) error {
+// dropped/newlines and says whether the front now ends on a newline
+// (spoond-hwto). The cap can only drop more, so a value below what the
+// row already holds is ignored rather than written: a guest file
+// restored from a snapshot or replayed from an older sidecar cannot
+// shorten what the record reports. The newline flag belongs to the
+// latest drop, so it moves only when this update extends the front.
+func (db *DB) UpdateJobSkipped(ctx context.Context, jobID, stream string, dropped, newlines int64, endsWithNewline bool) error {
 	cols, ok := jobDroppedColumn[stream]
 	if !ok {
 		return fmt.Errorf("store: update job skipped %s: unknown stream %q", jobID, stream)
 	}
+	ends := 0
+	if endsWithNewline {
+		ends = 1
+	}
 	_, err := db.w.ExecContext(ctx, `
-UPDATE lease_jobs SET `+cols[0]+` = MAX(`+cols[0]+`, ?), `+cols[1]+` = MAX(`+cols[1]+`, ?)
+UPDATE lease_jobs SET `+cols[0]+` = MAX(`+cols[0]+`, ?), `+cols[1]+` = MAX(`+cols[1]+`, ?),
+	`+cols[2]+` = CASE WHEN ? > `+cols[0]+` THEN ? ELSE `+cols[2]+` END
 WHERE job_id = ?`,
-		dropped, newlines, jobID)
+		dropped, newlines, dropped, ends, jobID)
 	if err != nil {
 		return fmt.Errorf("store: update job skipped %s: %w", jobID, err)
 	}
@@ -449,8 +466,8 @@ func scanJob(scan func(dest ...any) error) (JobRow, error) {
 	err := scan(&r.JobID, &r.LeaseID, &r.Owner, &r.Cmd, &r.Cwd, &r.State,
 		&exitCode, &startedAt, &endedAt, &r.StderrTail, &r.Generation,
 		&r.MaxRuntimeSecs, &r.Reason, &r.RetentionSecs, &r.OutputMaxBytes,
-		&r.StdoutDroppedBytes, &r.StdoutDroppedNewlines,
-		&r.StderrDroppedBytes, &r.StderrDroppedNewlines)
+		&r.StdoutDroppedBytes, &r.StdoutDroppedNewlines, &r.StdoutDroppedEndsWithNewline,
+		&r.StderrDroppedBytes, &r.StderrDroppedNewlines, &r.StderrDroppedEndsWithNewline)
 	if errors.Is(err, sql.ErrNoRows) {
 		return JobRow{}, ErrNotFound
 	}

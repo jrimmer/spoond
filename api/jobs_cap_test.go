@@ -178,6 +178,12 @@ func TestJobOutputCapPerStreamAndViews(t *testing.T) {
 	if skipped.Newlines != int64(strings.Count(stdout[:row.StdoutDroppedBytes], "\n")) {
 		t.Fatalf("skipped newlines = %d, want %d (the front's own)", skipped.Newlines, strings.Count(stdout[:row.StdoutDroppedBytes], "\n"))
 	}
+	// This front is cut at a block boundary inside a line: its last byte
+	// is not a newline, so the kept tail starts mid-line.
+	wantEnds := stdout[row.StdoutDroppedBytes-1] == '\n'
+	if skipped.EndsWithNewline != wantEnds || wantEnds {
+		t.Fatalf("skipped ends_with_newline = %v, want %v (false: the front ends mid-line)", skipped.EndsWithNewline, wantEnds)
+	}
 
 	// A read into the dropped front is not an error: it returns the first
 	// kept bytes, with the absolute offset it actually starts at.
@@ -215,6 +221,9 @@ func TestJobOutputCapPerStreamAndViews(t *testing.T) {
 	if int64(sout["newlines"].(float64)) != int64(strings.Count(stdout[:row.StdoutDroppedBytes], "\n")) {
 		t.Fatalf("record view skipped.stdout.newlines = %v, want the front's own %d", sout["newlines"], strings.Count(stdout[:row.StdoutDroppedBytes], "\n"))
 	}
+	if got, ok := sout["ends_with_newline"].(bool); !ok || got != wantEnds {
+		t.Fatalf("record view skipped.stdout.ends_with_newline = %v, want %v", sout["ends_with_newline"], wantEnds)
+	}
 	if _, ok := sk["stderr"]; ok {
 		t.Fatalf("record view reports skipped.stderr for a stream that dropped nothing")
 	}
@@ -236,6 +245,73 @@ func itoa9(n int) string {
 		n /= 10
 	}
 	return string(b)
+}
+
+// TestJobOutputCapEndsWithNewline (spoond-sgld): a dropped front that
+// ends on a newline reports ends_with_newline true in both the raw
+// output endpoint's header and the record view, and a front cut
+// mid-line reports false.
+func TestJobOutputCapEndsWithNewline(t *testing.T) {
+	ts, svc, db, sub := newTestServerWithService(t)
+	id, _, sandbox := createJobLease(t, ts, svc)
+
+	p := fake.NewProcess(1210)
+	installJobProcess(t, sub, p)
+
+	cases := []struct {
+		name    string
+		content string
+		// cut is the byte the front's last dropped byte lands on for the
+		// planned drop (4096 bytes of a 9000-byte file here).
+		ends bool
+	}{
+		// Two-byte lines: byte 4095 (0-based) is the line's newline.
+		{"line-aligned", strings.Repeat("s\n", 4500), true},
+		// No newline at all: the front is cut mid-line.
+		{"mid-line", strings.Repeat("m", 9000), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			jobID, _ := startBackgroundJob(t, ts, id, map[string]any{
+				"cmd":              "sleep 900",
+				"output_max_bytes": 10,
+			})
+			writeStream(t, sub, sandbox, jobID, "stdout", tc.content)
+			svc.reconcileJobs(context.Background())
+			row, err := db.GetJob(context.Background(), jobID)
+			if err != nil {
+				t.Fatalf("get job: %v", err)
+			}
+			if row.StdoutDroppedBytes != 4096 {
+				t.Fatalf("dropped %d, want 4096", row.StdoutDroppedBytes)
+			}
+			if row.StdoutDroppedEndsWithNewline != tc.ends {
+				t.Fatalf("row ends_with_newline = %v, want %v", row.StdoutDroppedEndsWithNewline, tc.ends)
+			}
+
+			_, resp := readOutput(t, ts, id, jobID, "stream=stdout&offset=0&limit=4", "token-a")
+			var skipped jobStreamSkipped
+			if err := json.Unmarshal([]byte(resp.Header.Get("X-Output-Skipped")), &skipped); err != nil {
+				t.Fatalf("X-Output-Skipped: %v", err)
+			}
+			if skipped.EndsWithNewline != tc.ends {
+				t.Fatalf("header ends_with_newline = %v, want %v", skipped.EndsWithNewline, tc.ends)
+			}
+
+			_, body := doReq(t, "GET", ts.URL+"/api/leases/"+id+"/jobs/"+jobID, "token-a", nil)
+			job, _ := body["job"].(map[string]any)
+			sk, _ := job["skipped"].(map[string]any)
+			sout, _ := sk["stdout"].(map[string]any)
+			if got, ok := sout["ends_with_newline"].(bool); !ok || got != tc.ends {
+				t.Fatalf("record view ends_with_newline = %v, want %v", sout["ends_with_newline"], tc.ends)
+			}
+			// The record view's per-output skipped view carries it too.
+			viewSkip, _ := body["stdout_skipped"].(map[string]any)
+			if got, ok := viewSkip["ends_with_newline"].(bool); !ok || got != tc.ends {
+				t.Fatalf("record view stdout_skipped.ends_with_newline = %v, want %v", viewSkip["ends_with_newline"], tc.ends)
+			}
+		})
+	}
 }
 
 // TestJobOutputCapDropsKeepGrowing (spoond-hwto): an over-cap stream
@@ -517,7 +593,7 @@ func TestJobCapSidecarFormat(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("sidecar = %q, want one pass's line", string(raw))
 	}
-	dropped, newlines, ok := jobCapSidecarOf2(lines[len(lines)-1])
+	dropped, newlines, ends, _, ok := jobCapSidecarOf2(lines[len(lines)-1])
 	if !ok {
 		t.Fatalf("sidecar line %q unparsable", lines[len(lines)-1])
 	}
@@ -530,6 +606,10 @@ func TestJobCapSidecarFormat(t *testing.T) {
 	}
 	if newlines != jobStreamNewlines(row, "stdout") {
 		t.Fatalf("sidecar newlines %d, row %d", newlines, jobStreamNewlines(row, "stdout"))
+	}
+	// Every line is "s\n", so the dropped front's last byte is a newline.
+	if !ends || !row.StdoutDroppedEndsWithNewline {
+		t.Fatalf("front ending: sidecar ends=%v, row %v, want true", ends, row.StdoutDroppedEndsWithNewline)
 	}
 	if dropped%jobPunchBlockBytes != 0 {
 		t.Fatalf("sidecar dropped %d, not block-aligned", dropped)
@@ -564,7 +644,7 @@ func TestJobCapSidecarFormat(t *testing.T) {
 		t.Fatalf("failed pass left row dropped=%d newlines=%d, want 4096/2048", row.StdoutDroppedBytes, row.StdoutDroppedNewlines)
 	}
 	lines = strings.Split(strings.TrimRight(sidecarRaw(t, sub, sandbox, jobID, "stdout"), "\n"), "\n")
-	sd, sn, sOK := jobCapSidecarOf2(lines[len(lines)-1])
+	sd, sn, _, _, sOK := jobCapSidecarOf2(lines[len(lines)-1])
 	if !sOK || sd != 8192 {
 		t.Fatalf("failed pass left no live sidecar line: %q", lines)
 	}
@@ -583,9 +663,19 @@ func TestJobCapSidecarFormat(t *testing.T) {
 		t.Fatalf("recovery pass left row dropped=%d newlines=%d, want 8192/4096", row.StdoutDroppedBytes, row.StdoutDroppedNewlines)
 	}
 
+	// A legacy three-field line (written before the newline flag) still
+	// parses for its counters, but cannot say where the front ended.
+	_, _, legacyEnds, legacyKnown, legacyOK := jobCapSidecarOf2("4096 2048 4096")
+	if !legacyOK || legacyKnown || legacyEnds {
+		t.Fatalf("legacy line parsed ends=%v known=%v ok=%v, want false/false/true", legacyEnds, legacyKnown, legacyOK)
+	}
+
 	// Garbage reads as not-ok (the row falls back).
-	for bad := range map[string]bool{"nonsense": true, "-1 0 0": true, "600 0 600 extra": true} {
-		if _, _, ok := jobCapSidecarOf2(bad); ok {
+	for bad := range map[string]bool{
+		"nonsense": true, "-1 0 0": true, "600 0 600 extra": true,
+		"600 0 600 2": true, "600 0 600 -1": true,
+	} {
+		if _, _, _, _, ok := jobCapSidecarOf2(bad); ok {
 			t.Fatalf("garbage line %q parsed ok", bad)
 		}
 	}
@@ -654,14 +744,14 @@ type failingJobStore struct {
 	err    error
 }
 
-func (f *failingJobStore) UpdateJobSkipped(ctx context.Context, jobID, stream string, dropped, newlines int64) error {
+func (f *failingJobStore) UpdateJobSkipped(ctx context.Context, jobID, stream string, dropped, newlines int64, endsWithNewline bool) error {
 	if f.method == "UpdateJobSkipped" && f.err != nil {
 		f.n++
 		if f.nth == 0 || f.nth == f.n {
 			return f.err
 		}
 	}
-	return f.JobStore.UpdateJobSkipped(ctx, jobID, stream, dropped, newlines)
+	return f.JobStore.UpdateJobSkipped(ctx, jobID, stream, dropped, newlines, endsWithNewline)
 }
 
 // TestJobOutputCapRunnerFiles (spoond-hwto): the cap works on the job

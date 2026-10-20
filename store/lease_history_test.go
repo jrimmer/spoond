@@ -157,7 +157,9 @@ func TestMigration29LeaseHistoryOnV28Database(t *testing.T) {
 		`ALTER TABLE lease_jobs DROP COLUMN stdout_dropped_newlines`,
 		`ALTER TABLE lease_jobs DROP COLUMN stderr_dropped_bytes`,
 		`ALTER TABLE lease_jobs DROP COLUMN stderr_dropped_newlines`,
-		`DELETE FROM schema_migrations WHERE version IN (29, 30, 31)`,
+		`ALTER TABLE lease_jobs DROP COLUMN stdout_dropped_ends_with_newline`,
+		`ALTER TABLE lease_jobs DROP COLUMN stderr_dropped_ends_with_newline`,
+		`DELETE FROM schema_migrations WHERE version IN (29, 30, 31, 32)`,
 	} {
 		if _, err := db28.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
