@@ -59,14 +59,19 @@ printf 'x\n' > %[1]s/keep.log.disabled
 rm -f %[1]s/keep.log.disabled
 mkdir -p -- %[1]s/node_modules/%[2]s
 for i in $(seq 1 40); do
-  mkdir -p -- "%[1]s/node_modules/%[2]s/left-$i"
-  printf 'x' > "%[1]s/node_modules/%[2]s/left-$i/index.js"
-  mkdir -p -- "%[1]s/node_modules/%[2]s/right-$i"
-  printf 'x' > "%[1]s/node_modules/%[2]s/right-$i/index.js"
+  mkdir -p -- %[1]s/node_modules/%[2]s/left-$i
+  printf 'x' > %[1]s/node_modules/%[2]s/left-$i/index.js
+  mkdir -p -- %[1]s/node_modules/%[2]s/right-$i
+  printf 'x' > %[1]s/node_modules/%[2]s/right-$i/index.js
 done
 `, shQuote(repo), "pkg")
 	if got := execOK(t, l.ID, script); got != "" {
 		failf(t, "repo build: %q", got)
+	}
+	// The wide tree must really exist, or the bound checks below prove
+	// nothing (%[1]s is single-quoted: never wrap it in double quotes).
+	if n := execOK(t, l.ID, fmt.Sprintf("find %s/node_modules -name index.js | wc -l", shQuote(repo))); strings.TrimSpace(n) != "80" {
+		failf(t, "repo build made %s index.js files under node_modules, want 80", strings.TrimSpace(n))
 	}
 
 	st, data, err := cl.fileGet(l.ID, repo, "list=1")
