@@ -23,8 +23,8 @@ import (
 
 // handleBackgroundExec answers the exec request with "background": true:
 // start the job and 202 as soon as it is running.
-func (s *Server) handleBackgroundExec(w http.ResponseWriter, r *http.Request, lease *Lease, owner, cmd, cwd string, env map[string]string, secrets map[string]string, maxRuntimeSecs int64) {
-	jobID, startedAt, proc, err := s.svc.startJob(r.Context(), lease, owner, cmd, cwd, env, secrets, maxRuntimeSecs)
+func (s *Server) handleBackgroundExec(w http.ResponseWriter, r *http.Request, lease *Lease, owner, cmd, cwd string, env map[string]string, secrets map[string]string, maxRuntimeSecs, retentionSecs, outputMaxBytes int64) {
+	jobID, startedAt, proc, err := s.svc.startJob(r.Context(), lease, owner, cmd, cwd, env, secrets, maxRuntimeSecs, retentionSecs, outputMaxBytes)
 	if err != nil {
 		switch {
 		case errors.Is(err, errJobCap):
@@ -121,8 +121,9 @@ func (s *Server) handleJobsList(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleJobGet answers GET .../jobs/{job}: the record plus the last
-// 64 KiB of stdout and stderr. With ?wait=<seconds> it long-polls until
-// the job is no longer running or the wait ends.
+// 64 KiB of stdout and stderr, naming what the output cap (spoond-hwto)
+// has dropped as "skipped" beside it. With ?wait=<seconds> it long-polls
+// until the job is no longer running or the wait ends.
 func (s *Server) handleJobGet(w http.ResponseWriter, r *http.Request) {
 	lease := s.jobsTarget(w, r)
 	if lease == nil {
@@ -141,20 +142,30 @@ func (s *Server) handleJobGet(w http.ResponseWriter, r *http.Request) {
 	// does not depend on the lease's state (a suspended lease's envd is
 	// gone and returns nothing to read).
 	resp["stdout"], resp["stderr"] = "", ""
-	if out, err := s.svc.readJobOutput(r.Context(), lease.SandboxID, row.JobID, "stdout", jobStdoutReadBytes); err == nil {
+	out, outStart, outSkip, err := s.svc.readJobOutput(r.Context(), lease.SandboxID, row.JobID, "stdout", jobStdoutReadBytes, row)
+	if err == nil {
 		resp["stdout"] = out
+		if outSkip.Bytes > 0 {
+			resp["stdout_offset"] = outStart
+			resp["stdout_skipped"] = outSkip
+		}
 	} else if errors.Is(err, substrate.ErrUnavailable) {
 		s.writeSubstrateUnavailable(w)
 		return
 	} else if !errors.Is(err, substrate.ErrNotFound) {
 		resp["stdout_error"] = "output unavailable"
 	}
-	if errText, err := s.svc.readJobOutput(r.Context(), lease.SandboxID, row.JobID, "stderr", jobStderrReadBytes); err == nil {
+	errText, errStart, errSkip, errRead := s.svc.readJobOutput(r.Context(), lease.SandboxID, row.JobID, "stderr", jobStderrReadBytes, row)
+	if errRead == nil {
 		resp["stderr"] = errText
-	} else if errors.Is(err, substrate.ErrUnavailable) {
+		if errSkip.Bytes > 0 {
+			resp["stderr_offset"] = errStart
+			resp["stderr_skipped"] = errSkip
+		}
+	} else if errors.Is(errRead, substrate.ErrUnavailable) {
 		s.writeSubstrateUnavailable(w)
 		return
-	} else if !errors.Is(err, substrate.ErrNotFound) {
+	} else if !errors.Is(errRead, substrate.ErrNotFound) {
 		resp["stderr_error"] = "output unavailable"
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -209,6 +220,47 @@ func (s *Server) waitJob(r *http.Request, lease *Lease, row store.JobRow, wait i
 	}
 }
 
+// handleJobDelete answers DELETE .../jobs/{job} (spoond-hwto): the job
+// record is deleted and its guest directory removed, so an owner can
+// reclaim a chatty job's disk before the retention window. A running job
+// answers 409 (signal it first, like the other lifecycle paths); the
+// record is resolved before any resume, so deleting a finished job
+// cannot wake a suspended lease for nothing. The guest cleanup is
+// best-effort: a lease paused mid-delete may put the files back on its
+// next resume, and with the record gone nothing prunes them again — they
+// then live until the lease itself is released (or the owner deletes
+// them the same way once the lease is running again). The 204 answers
+// for the record; a cleanup that could not reach the guest is logged,
+// not failed, matching the prune path.
+func (s *Server) handleJobDelete(w http.ResponseWriter, r *http.Request) {
+	lease := s.jobsTarget(w, r)
+	if lease == nil {
+		return
+	}
+	s.svc.touch(lease.ID)
+	row, ok := s.jobTarget(w, r, lease)
+	if !ok {
+		return
+	}
+	if row.State == "running" {
+		writeError(w, http.StatusConflict, "job is running; signal it first")
+		return
+	}
+	// Remove the guest directory first, while the record still exists: a
+	// client that retries after a failure finds a removable record rather
+	// than an orphaned directory nothing points at any more. The lease
+	// here is live (jobsTarget checked), so files are reachable unless the
+	// sandbox is mid-operation; cleanupJobFiles logs what it could not
+	// remove and the row is still deleted below, matching the prune path.
+	s.svc.cleanupJobFiles(r.Context(), lease.SandboxID, row.JobID)
+	if _, err := s.svc.db.DeleteJob(r.Context(), row.JobID); err != nil {
+		s.svc.log.Printf("jobs: delete %s: %v", row.JobID, err)
+		writeError(w, http.StatusInternalServerError, "job delete failed")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // handleJobOutput answers GET .../jobs/{job}/output?stream=&offset=&limit=:
 // raw bytes from the chosen stream, so a client can follow output.
 func (s *Server) handleJobOutput(w http.ResponseWriter, r *http.Request) {
@@ -246,7 +298,7 @@ func (s *Server) handleJobOutput(w http.ResponseWriter, r *http.Request) {
 	if limit > jobOutputMaxLimit {
 		limit = jobOutputMaxLimit
 	}
-	data, err := s.svc.readJobRange(r.Context(), lease.SandboxID, row.JobID, stream, offset, limit)
+	data, start, skip, err := s.svc.readJobRange(r.Context(), lease.SandboxID, row.JobID, stream, offset, limit, row)
 	if err != nil {
 		if errors.Is(err, substrate.ErrUnavailable) {
 			s.writeSubstrateUnavailable(w)
@@ -262,6 +314,16 @@ func (s *Server) handleJobOutput(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
+	// The absolute byte offset the answer starts at: the request's
+	// offset when it lies past the cap's dropped front, else the first
+	// kept byte (never an error, but a follower must know where it is
+	// resuming from). Only sent once the cap has dropped something, so
+	// the uncapped shape is byte-identical to before (spoond-hwto).
+	if skip.Bytes > 0 {
+		w.Header().Set("X-Output-Offset", strconv.FormatInt(start, 10))
+		scrubbed, _ := json.Marshal(skip)
+		w.Header().Set("X-Output-Skipped", string(scrubbed))
+	}
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)

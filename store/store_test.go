@@ -336,7 +336,7 @@ func TestMigration7HolderOnV6Database(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN nap_since`,
 		`ALTER TABLE leases DROP COLUMN max_nap_secs`,
 		`DROP TABLE IF EXISTS lease_history`,
-		`DELETE FROM schema_migrations WHERE version IN (7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29)`,
+		`DELETE FROM schema_migrations WHERE version IN (7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31)`,
 	} {
 		if _, err := db6.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -425,7 +425,7 @@ func TestMigration9GenerationOnV8Database(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN nap_since`,
 		`ALTER TABLE leases DROP COLUMN max_nap_secs`,
 		`DROP TABLE IF EXISTS lease_history`,
-		`DELETE FROM schema_migrations WHERE version IN (9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29)`,
+		`DELETE FROM schema_migrations WHERE version IN (9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31)`,
 	} {
 		if _, err := db8.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -504,7 +504,13 @@ func TestMigration23DiskMBBackfill(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN nap_since`,
 		`ALTER TABLE leases DROP COLUMN max_nap_secs`,
 		`DROP TABLE IF EXISTS lease_history`,
-		`DELETE FROM schema_migrations WHERE version IN (23, 24, 25, 26, 27, 28, 29)`,
+		`ALTER TABLE lease_jobs DROP COLUMN retention_secs`,
+		`ALTER TABLE lease_jobs DROP COLUMN output_max_bytes`,
+		`ALTER TABLE lease_jobs DROP COLUMN stdout_dropped_bytes`,
+		`ALTER TABLE lease_jobs DROP COLUMN stdout_dropped_newlines`,
+		`ALTER TABLE lease_jobs DROP COLUMN stderr_dropped_bytes`,
+		`ALTER TABLE lease_jobs DROP COLUMN stderr_dropped_newlines`,
+		`DELETE FROM schema_migrations WHERE version IN (23, 24, 25, 26, 27, 28, 29, 30, 31)`,
 	} {
 		if _, err := db22.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -567,7 +573,13 @@ func TestMigration24UsageSamplesOnV23Database(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN nap_since`,
 		`ALTER TABLE leases DROP COLUMN max_nap_secs`,
 		`DROP TABLE IF EXISTS lease_history`,
-		`DELETE FROM schema_migrations WHERE version IN (24, 25, 26, 27, 28, 29)`,
+		`ALTER TABLE lease_jobs DROP COLUMN retention_secs`,
+		`ALTER TABLE lease_jobs DROP COLUMN output_max_bytes`,
+		`ALTER TABLE lease_jobs DROP COLUMN stdout_dropped_bytes`,
+		`ALTER TABLE lease_jobs DROP COLUMN stdout_dropped_newlines`,
+		`ALTER TABLE lease_jobs DROP COLUMN stderr_dropped_bytes`,
+		`ALTER TABLE lease_jobs DROP COLUMN stderr_dropped_newlines`,
+		`DELETE FROM schema_migrations WHERE version IN (24, 25, 26, 27, 28, 29, 30, 31)`,
 	} {
 		if _, err := db23.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -656,7 +668,7 @@ func TestMigration12MemoryMBBackfill(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN nap_since`,
 		`ALTER TABLE leases DROP COLUMN max_nap_secs`,
 		`DROP TABLE IF EXISTS lease_history`,
-		`DELETE FROM schema_migrations WHERE version IN (13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29)`,
+		`DELETE FROM schema_migrations WHERE version IN (13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31)`,
 		`ALTER TABLE leases DROP COLUMN memory_mb`,
 		`ALTER TABLE leases DROP COLUMN paused_expiry_notified`,
 		`ALTER TABLE leases DROP COLUMN pinned_idle_since`,
@@ -742,7 +754,7 @@ func TestMigration15IdleSuspendOnV14Database(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN nap_since`,
 		`ALTER TABLE leases DROP COLUMN max_nap_secs`,
 		`DROP TABLE IF EXISTS lease_history`,
-		`DELETE FROM schema_migrations WHERE version IN (15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29)`,
+		`DELETE FROM schema_migrations WHERE version IN (15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31)`,
 	} {
 		if _, err := db14.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -818,7 +830,13 @@ func TestMigration17NamedSnapshotsOnV16Database(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN nap_since`,
 		`ALTER TABLE leases DROP COLUMN max_nap_secs`,
 		`DROP TABLE IF EXISTS lease_history`,
-		`DELETE FROM schema_migrations WHERE version IN (17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29)`,
+		`ALTER TABLE lease_jobs DROP COLUMN retention_secs`,
+		`ALTER TABLE lease_jobs DROP COLUMN output_max_bytes`,
+		`ALTER TABLE lease_jobs DROP COLUMN stdout_dropped_bytes`,
+		`ALTER TABLE lease_jobs DROP COLUMN stdout_dropped_newlines`,
+		`ALTER TABLE lease_jobs DROP COLUMN stderr_dropped_bytes`,
+		`ALTER TABLE lease_jobs DROP COLUMN stderr_dropped_newlines`,
+		`DELETE FROM schema_migrations WHERE version IN (17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31)`,
 	} {
 		if _, err := db16.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -897,7 +915,13 @@ func TestMigration19LostReasonOnV18Database(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN nap_since`,
 		`ALTER TABLE leases DROP COLUMN max_nap_secs`,
 		`DROP TABLE IF EXISTS lease_history`,
-		`DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29)`,
+		`ALTER TABLE lease_jobs DROP COLUMN retention_secs`,
+		`ALTER TABLE lease_jobs DROP COLUMN output_max_bytes`,
+		`ALTER TABLE lease_jobs DROP COLUMN stdout_dropped_bytes`,
+		`ALTER TABLE lease_jobs DROP COLUMN stdout_dropped_newlines`,
+		`ALTER TABLE lease_jobs DROP COLUMN stderr_dropped_bytes`,
+		`ALTER TABLE lease_jobs DROP COLUMN stderr_dropped_newlines`,
+		`DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31)`,
 	} {
 		if _, err := db18.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -982,7 +1006,13 @@ func TestMigration20JobMaxRuntimeOnV19Database(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN nap_since`,
 		`ALTER TABLE leases DROP COLUMN max_nap_secs`,
 		`DROP TABLE IF EXISTS lease_history`,
-		`DELETE FROM schema_migrations WHERE version IN (20, 21, 22, 23, 24, 25, 26, 27, 28, 29)`,
+		`ALTER TABLE lease_jobs DROP COLUMN retention_secs`,
+		`ALTER TABLE lease_jobs DROP COLUMN output_max_bytes`,
+		`ALTER TABLE lease_jobs DROP COLUMN stdout_dropped_bytes`,
+		`ALTER TABLE lease_jobs DROP COLUMN stdout_dropped_newlines`,
+		`ALTER TABLE lease_jobs DROP COLUMN stderr_dropped_bytes`,
+		`ALTER TABLE lease_jobs DROP COLUMN stderr_dropped_newlines`,
+		`DELETE FROM schema_migrations WHERE version IN (20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31)`,
 	} {
 		if _, err := db19.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -1071,7 +1101,13 @@ func TestMigration21SuspendFactsOnV20Database(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN nap_since`,
 		`ALTER TABLE leases DROP COLUMN max_nap_secs`,
 		`DROP TABLE IF EXISTS lease_history`,
-		`DELETE FROM schema_migrations WHERE version IN (21, 22, 23, 24, 25, 26, 27, 28, 29)`,
+		`ALTER TABLE lease_jobs DROP COLUMN retention_secs`,
+		`ALTER TABLE lease_jobs DROP COLUMN output_max_bytes`,
+		`ALTER TABLE lease_jobs DROP COLUMN stdout_dropped_bytes`,
+		`ALTER TABLE lease_jobs DROP COLUMN stdout_dropped_newlines`,
+		`ALTER TABLE lease_jobs DROP COLUMN stderr_dropped_bytes`,
+		`ALTER TABLE lease_jobs DROP COLUMN stderr_dropped_newlines`,
+		`DELETE FROM schema_migrations WHERE version IN (21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31)`,
 	} {
 		if _, err := db20.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -1158,7 +1194,13 @@ func TestMigration22PinsHoldsAndBackfillsPausedAt(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN nap_since`,
 		`ALTER TABLE leases DROP COLUMN max_nap_secs`,
 		`DROP TABLE IF EXISTS lease_history`,
-		`DELETE FROM schema_migrations WHERE version IN (22, 23, 24, 25, 26, 27, 28, 29)`,
+		`ALTER TABLE lease_jobs DROP COLUMN retention_secs`,
+		`ALTER TABLE lease_jobs DROP COLUMN output_max_bytes`,
+		`ALTER TABLE lease_jobs DROP COLUMN stdout_dropped_bytes`,
+		`ALTER TABLE lease_jobs DROP COLUMN stdout_dropped_newlines`,
+		`ALTER TABLE lease_jobs DROP COLUMN stderr_dropped_bytes`,
+		`ALTER TABLE lease_jobs DROP COLUMN stderr_dropped_newlines`,
+		`DELETE FROM schema_migrations WHERE version IN (22, 23, 24, 25, 26, 27, 28, 29, 30, 31)`,
 	} {
 		if _, err := db21.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -1403,7 +1445,13 @@ func TestMigration25VCPUBackfill(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN nap_since`,
 		`ALTER TABLE leases DROP COLUMN max_nap_secs`,
 		`DROP TABLE IF EXISTS lease_history`,
-		`DELETE FROM schema_migrations WHERE version IN (25, 26, 27, 28, 29)`,
+		`ALTER TABLE lease_jobs DROP COLUMN retention_secs`,
+		`ALTER TABLE lease_jobs DROP COLUMN output_max_bytes`,
+		`ALTER TABLE lease_jobs DROP COLUMN stdout_dropped_bytes`,
+		`ALTER TABLE lease_jobs DROP COLUMN stdout_dropped_newlines`,
+		`ALTER TABLE lease_jobs DROP COLUMN stderr_dropped_bytes`,
+		`ALTER TABLE lease_jobs DROP COLUMN stderr_dropped_newlines`,
+		`DELETE FROM schema_migrations WHERE version IN (25, 26, 27, 28, 29, 30, 31)`,
 	} {
 		if _, err := db24.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -1492,7 +1540,13 @@ func TestMigration26ImageSizesOnV25Database(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN nap_since`,
 		`ALTER TABLE leases DROP COLUMN max_nap_secs`,
 		`DROP TABLE IF EXISTS lease_history`,
-		`DELETE FROM schema_migrations WHERE version IN (26, 27, 28, 29)`,
+		`ALTER TABLE lease_jobs DROP COLUMN retention_secs`,
+		`ALTER TABLE lease_jobs DROP COLUMN output_max_bytes`,
+		`ALTER TABLE lease_jobs DROP COLUMN stdout_dropped_bytes`,
+		`ALTER TABLE lease_jobs DROP COLUMN stdout_dropped_newlines`,
+		`ALTER TABLE lease_jobs DROP COLUMN stderr_dropped_bytes`,
+		`ALTER TABLE lease_jobs DROP COLUMN stderr_dropped_newlines`,
+		`DELETE FROM schema_migrations WHERE version IN (26, 27, 28, 29, 30, 31)`,
 	} {
 		if _, err := db25.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -1567,7 +1621,13 @@ func TestMigration28GrantsAndSecretFacts(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN nap_since`,
 		`ALTER TABLE leases DROP COLUMN max_nap_secs`,
 		`DROP TABLE IF EXISTS lease_history`,
-		`DELETE FROM schema_migrations WHERE version IN (28, 29)`,
+		`ALTER TABLE lease_jobs DROP COLUMN retention_secs`,
+		`ALTER TABLE lease_jobs DROP COLUMN output_max_bytes`,
+		`ALTER TABLE lease_jobs DROP COLUMN stdout_dropped_bytes`,
+		`ALTER TABLE lease_jobs DROP COLUMN stdout_dropped_newlines`,
+		`ALTER TABLE lease_jobs DROP COLUMN stderr_dropped_bytes`,
+		`ALTER TABLE lease_jobs DROP COLUMN stderr_dropped_newlines`,
+		`DELETE FROM schema_migrations WHERE version IN (28, 29, 30, 31)`,
 	} {
 		if _, err := db27.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)

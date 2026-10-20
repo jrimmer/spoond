@@ -1538,3 +1538,142 @@ func TestJobWatcherDoesNotRecordTimingOutExit(t *testing.T) {
 		t.Fatalf("finishJob after timing out: %v", err)
 	}
 }
+
+// TestJobRetentionShortensPrune (spoond-hwto): a job's own retention_secs
+// stores the effective host-or-shorter window on the record and the prune
+// honours it: a shortened job's row (and its guest files) goes before a
+// same-age record under the host window; a longer request falls back to
+// the host window; a negative request is refused with 400.
+func TestJobRetentionShortensPrune(t *testing.T) {
+	ts, svc, db, sub := newTestServerWithService(t)
+	id, _, _ := createJobLease(t, ts, svc)
+	svc.cfg.JobRetentionSecs = 604800
+
+	p := fake.NewProcess(1040)
+	installJobProcess(t, sub, p)
+	short, _ := startBackgroundJob(t, ts, id, map[string]any{"cmd": "sleep 1", "retention_secs": 60})
+	long, _ := startBackgroundJob(t, ts, id, map[string]any{"cmd": "sleep 2", "retention_secs": 99999999})
+	host, _ := startBackgroundJob(t, ts, id, map[string]any{"cmd": "sleep 3"})
+
+	row, err := db.GetJob(context.Background(), short)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if row.RetentionSecs != 60 {
+		t.Fatalf("shorter request: retention_secs = %d, want 60", row.RetentionSecs)
+	}
+	row, err = db.GetJob(context.Background(), long)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if row.RetentionSecs != 604800 {
+		t.Fatalf("longer request: retention_secs = %d, want the 604800 host window", row.RetentionSecs)
+	}
+	row, err = db.GetJob(context.Background(), host)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if row.RetentionSecs != 604800 {
+		t.Fatalf("unset request: retention_secs = %d, want the 604800 host window", row.RetentionSecs)
+	}
+
+	resp, _ := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/exec", "token-a", map[string]any{"cmd": "sleep 4", "retention_secs": -1})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("negative retention_secs = %d, want 400", resp.StatusCode)
+	}
+
+	// Finish all three and backdate their ends to the same instant, then
+	// prune with the service clock just past the shortened window but far
+	// inside the host window: only the shortened job goes.
+	ended := time.Now().Add(-time.Hour)
+	for _, jid := range []string{short, long, host} {
+		if _, err := db.UpdateJobExit(context.Background(), jid, 0, ended, ""); err != nil {
+			t.Fatalf("update exit %s: %v", jid, err)
+		}
+	}
+	svc.now = func() time.Time { return ended.Add(2 * time.Minute) }
+	t.Cleanup(func() { svc.now = time.Now })
+	svc.pruneJobs(context.Background())
+	if _, err := db.GetJob(context.Background(), short); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("shortened job survived its own 60 s window: %v", err)
+	}
+	for _, jid := range []string{long, host} {
+		if _, err := db.GetJob(context.Background(), jid); err != nil {
+			t.Fatalf("%s wrongly pruned: %v", jid, err)
+		}
+	}
+}
+
+// TestJobDelete (spoond-hwto): DELETE removes a finished job's record and
+// guest directory; a running job answers 409; an unknown job or another
+// owner's job answers 404; the owner gate matches the other job routes.
+func TestJobDelete(t *testing.T) {
+	ts, svc, db, sub := newTestServerWithService(t)
+	id, lease, sandbox := createJobLease(t, ts, svc)
+
+	p := fake.NewProcess(1050)
+	installJobProcess(t, sub, p)
+	done, _ := startBackgroundJob(t, ts, id, map[string]any{"cmd": "sleep 610"})
+	writeJobFile(t, sub, sandbox, done, "stdout", "kept\n")
+	writeJobFile(t, sub, sandbox, done, "rc", "0\n")
+	p.Push(substrate.ProcessEvent{Kind: substrate.EventExit, ExitCode: 0})
+	waitJobState(t, db, done, "exited", jobWatchTimeout)
+
+	// A finished job: 204, the row and the guest files are gone.
+	del := func(path, token string) *http.Response {
+		t.Helper()
+		req, _ := http.NewRequest("DELETE", ts.URL+path, nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("delete %s: %v", path, err)
+		}
+		defer resp.Body.Close()
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return resp
+	}
+	if resp := del("/api/leases/"+id+"/jobs/"+done, "token-a"); resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete finished job = %d, want 204", resp.StatusCode)
+	}
+	if _, err := db.GetJob(context.Background(), done); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("deleted record still in the store: %v", err)
+	}
+	if _, err := sub.Stat(context.Background(), sandbox, jobPath(done, "stdout")); !errors.Is(err, substrate.ErrNotFound) {
+		t.Fatalf("deleted job's guest files still present: %v", err)
+	}
+
+	// Repeating the delete: 404 (the record is gone).
+	if resp := del("/api/leases/"+id+"/jobs/"+done, "token-a"); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("re-delete = %d, want 404", resp.StatusCode)
+	}
+
+	// A running job: 409, and the record stays.
+	running, _ := startBackgroundJob(t, ts, id, map[string]any{"cmd": "sleep 611"})
+	if resp := del("/api/leases/"+id+"/jobs/"+running, "token-a"); resp.StatusCode != http.StatusConflict {
+		t.Fatalf("delete running job = %d, want 409", resp.StatusCode)
+	}
+	if _, err := db.GetJob(context.Background(), running); err != nil {
+		t.Fatalf("running record deleted: %v", err)
+	}
+
+	// An unknown job and another owner's job: 404.
+	if resp := del("/api/leases/"+id+"/jobs/j-nope", "token-a"); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("delete unknown job = %d, want 404", resp.StatusCode)
+	}
+	other, _, _ := createJobLeaseOther(t, ts)
+	if resp := del("/api/leases/"+other+"/jobs/"+running, "token-b"); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("cross-owner delete = %d, want 404", resp.StatusCode)
+	}
+	_ = lease
+}
+
+// createJobLeaseOther creates a lease for token-b (a different owner).
+func createJobLeaseOther(t *testing.T, ts *httptest.Server) (string, *Lease, string) {
+	t.Helper()
+	_, body := doReq(t, "POST", ts.URL+"/api/leases", "token-b", map[string]any{"image": "py-base", "ttl": 300})
+	id, _ := body["id"].(string)
+	if id == "" {
+		t.Fatalf("create lease: no id in %v", body)
+	}
+	return id, nil, ""
+}

@@ -155,6 +155,12 @@
 //	                  start past it answers 429 (2.6, #135)
 //	JOB_RETENTION_SECS  how long an exited background-job record is kept
 //	                  before pruning (2.6, #135; default 604800 = 7 d)
+//	JOB_OUTPUT_MAX_BYTES  the per-stream output cap of a background job
+//	                  (spoond-hwto): once the job's stdout or stderr file
+//	                  grows past it, the poller punches the file's front
+//	                  out in the guest and keeps the tail (0 = unlimited,
+//	                  the default; a job's own output_max_bytes may
+//	                  shorten it, never lengthen it)
 //	JOB_MAX_RUNTIME  how long a background exec job may run before the
 //	                  reconcile pass kills it and marks it exited with
 //	                  reason timed_out (spoond-wb5; default 24h = 86400;
@@ -846,6 +852,7 @@ func Main(args []string) int {
 		// value disables the cap.
 		MaxRunningJobsPerLease:   envIntOr("MAX_RUNNING_JOBS_PER_LEASE", api.DefaultMaxRunningJobsPerLease),
 		JobRetentionSecs:         int64(envIntOr("JOB_RETENTION_SECS", api.DefaultJobRetentionSecs)),
+		JobOutputMaxBytes:        int64(envIntOr("JOB_OUTPUT_MAX_BYTES", api.DefaultJobOutputMaxBytes)),
 		JobMaxRuntimeSecs:        jobMaxRuntimeSecs(jobMaxRuntime),
 		MaxAdmitWaitSecs:         maxAdmitWaitSecs,
 		SnapshotWriteConcurrency: snapshotWriteConcurrency,

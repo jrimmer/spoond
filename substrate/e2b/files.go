@@ -246,6 +246,44 @@ func (c *Client) ReadFileRange(ctx context.Context, sandboxID, path string, offs
 	return data, nil
 }
 
+// punchHoleScript deallocates [offset, offset+length) of file "$1" with
+// fallocate --punch-hole (spoond-hwto): FALLOC_FL_PUNCH_HOLE|KEEP_SIZE,
+// so the bytes after the hole keep their offsets and the file's size is
+// unchanged — the caller's absolute-offset contract. The offsets are
+// positional ($2 offset, $3 length); a target that is a directory (or
+// any other refusal) exits nonzero.
+const punchHoleScript = `set -e
+[ ! -d "$1" ] || { echo "$1: is a directory" >&2; exit 3; }
+fallocate --punch-hole --offset "$2" --length "$3" -- "$1"
+`
+
+// PunchHole deallocates a byte range of a guest file without shifting
+// the bytes after it (the guest's fallocate --punch-hole, spoond-hwto):
+// the file's size and every later offset stay exactly where they were,
+// and reads of the punched range return zeros on most filesystems. Used
+// by the background-job output cap's poll pass; a failure there is the
+// caller's "leave the stream whole" rule. A gone sandbox wraps
+// substrate.ErrNotFound/ErrUnavailable like the other file calls; a
+// missing file's fallocate failure surfaces verbatim (the next pass
+// re-plans, and a missing stream is nothing to cap).
+func (c *Client) PunchHole(ctx context.Context, sandboxID, path string, offset, length int64) error {
+	if offset < 0 || length < 0 {
+		return fmt.Errorf("e2b: punch %s %s: %w", sandboxID, path, substrate.ErrInvalidOp)
+	}
+	err := c.shExec(ctx, sandboxID, "punch "+path, punchHoleScript, path,
+		strconv.FormatInt(offset, 10), strconv.FormatInt(length, 10))
+	if err != nil {
+		// A gone or unreachable sandbox has nothing to punch: the
+		// orchestrator probe turns that into substrate.ErrNotFound or
+		// ErrUnavailable like the other file calls do.
+		if serr := c.sandboxListed(ctx, sandboxID); serr != nil {
+			return fmt.Errorf("%w: %v", serr, err)
+		}
+		return fmt.Errorf("e2b: punch %s %s: %v", sandboxID, path, err)
+	}
+	return nil
+}
+
 // Stat reports path's metadata through envd's filesystem.Stat.
 func (c *Client) Stat(ctx context.Context, sandboxID, path string) (substrate.FileInfo, error) {
 	resp, err := c.envdFilesystem(sandboxID, "").Stat(ctx, connect.NewRequest(&filesystem.StatRequest{Path: path}))

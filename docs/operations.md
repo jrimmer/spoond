@@ -1429,8 +1429,11 @@ backend restart or a broken envd stream does not lose an outcome: while
 the backend holds the stream it notices the exit at once, and otherwise
 a reconcile pass (every 10 s while any job runs) reads `rc` through the
 files path. The files are kept until the exited record is pruned (after
-`JOB_RETENTION_SECS`), when the sweeper removes the job directory too;
-the job record outlives the files only within that window.
+`JOB_RETENTION_SECS` or the job's own shorter `retention_secs`,
+spoond-hwto), when the sweeper removes the job directory too; the job
+record outlives the files only within that window.
+`DELETE /api/leases/{id}/jobs/{job}` removes one finished job's record
+and guest directory at once (a still-running job answers `409`).
 
 A running job keeps its lease out of idle suspension — the lease's own
 `idle_suspend` — so nothing
@@ -1463,15 +1466,33 @@ the in-memory timed-out intent is kept so the next pass records the
 outcome without a second kill. A record written before the cap existed
 (`max_runtime_secs` 0) is capped by the current host value.
 
+A job's output is capped the same way (spoond-hwto): the reconcile pass
+compares each running job's stdout and stderr guest file with the job's
+effective output cap — the host's `JOB_OUTPUT_MAX_BYTES` (default 0 =
+unlimited) shortened by the start's `output_max_bytes`, never
+lengthened. A file that grew past the cap has its front punched out
+with `fallocate --punch-hole` in the guest: block-aligned, so the file's
+size and every later byte's offset stay exactly where they were, and
+only the tail keeps occupying blocks. What was dropped is counted
+before each punch (bytes and the newlines those bytes held) and
+reported from the record and the output endpoint as `skipped`; reads
+keep their absolute offsets, a read into the dropped front returns the
+first kept bytes. The counters only ever rise; a substrate without
+hole-punching leaves the streams whole (nothing is reported dropped),
+and an already-exited job's streams are never capped — its recorded
+stderr tail would go with them.
+
 | Variable | Default | Meaning |
 |---|---|---|
 | `MAX_RUNNING_JOBS_PER_LEASE` | `16` | running background jobs per lease; past it a start answers `429` |
-| `JOB_RETENTION_SECS` | `604800` (7 d) | exited job records older than this are pruned by the sweeper (running and lost records are kept) |
+| `JOB_RETENTION_SECS` | `604800` (7 d) | exited job records older than this are pruned by the sweeper (running and lost records are kept); a job's own `retention_secs` shortens it (spoond-hwto) |
+| `JOB_OUTPUT_MAX_BYTES` | `0` (unlimited) | a running job's stdout/stderr guest file grown past this has its front punched out between reconcile passes (block-aligned `fallocate --punch-hole`), keeping the tail; the drop is reported as `skipped` with absolute offsets intact. A start's `output_max_bytes` shortens it, never lengthens it; 0 (the default) caps nothing (spoond-hwto) |
 | `JOB_MAX_RUNTIME` | `86400` (24 h) | how long a background job may run before the reconcile pass kills it and marks it exited with reason `timed_out`. A start may ask for a shorter `max_runtime_secs`, never a longer one. Takes a Go duration (`24h`) or seconds; `0` is the default and a negative value disables the cap (the cap is held as whole seconds: a positive fractional duration rounds up, and a negative value under one second is rejected at startup) (spoond-wb5) |
 
 The job record lives in the `lease_jobs` table (migration 0016, with
-migration 0020 adding the max-runtime cap and reason) and is deleted
-with its lease. Metrics: `spoond_jobs_running` (gauge) and
+migration 0020 adding the max-runtime cap and reason, 0030 the
+per-job retention and 0031 the output cap and its dropped-front
+counters) and is deleted with its lease. Metrics: `spoond_jobs_running` (gauge) and
 `spoond_jobs_exited_total{result}` (`ok`/`error`/`lost`/`timed_out`).
 Events: `job_started`, `job_exited` and `job_lost`; the dashboard events
 panel shows `job_exited` lines, non-zero exits in the warning colour.

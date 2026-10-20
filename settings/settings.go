@@ -124,6 +124,7 @@ var Known = []string{
 	"IMAGE_MAP",
 	"IMAGE_REGISTRY",
 	"JOB_MAX_RUNTIME",
+	"JOB_OUTPUT_MAX_BYTES",
 	"JOB_RECORD_DIR",
 	"JOB_RETENTION_SECS",
 	"KEPT_DISK_WARN_PCT",
@@ -462,6 +463,7 @@ var Specs = []Spec{
 	{"IMAGE_MAP", TypeList, Runner, false},                // label=image pairs
 	{"IMAGE_REGISTRY", TypeString, Images, false},
 	{"JOB_MAX_RUNTIME", TypeDuration, Backend, false},
+	{"JOB_OUTPUT_MAX_BYTES", TypeInt, Backend, false},
 	{"JOB_RECORD_DIR", TypeString, Runner, false},
 	{"JOB_RETENTION_SECS", TypeInt, Backend, false},
 	{"KEPT_DISK_WARN_PCT", TypePercent, Backend, false},

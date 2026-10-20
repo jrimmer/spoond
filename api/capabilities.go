@@ -171,6 +171,7 @@ var endpointTable = []endpointSpec{
 	ep("GET", "/api/sandboxes/{id}/jobs/{job}", "read one job"),
 	ep("GET", "/api/sandboxes/{id}/jobs/{job}/output", "stream job output"),
 	ep("POST", "/api/sandboxes/{id}/jobs/{job}/signal", "signal a job"),
+	ep("DELETE", "/api/sandboxes/{id}/jobs/{job}", "delete a finished job"),
 	ep("DELETE", "/api/sandboxes/{id}", "delete"),
 	ep("POST", "/api/sandboxes/{id}/keepalive", "extend a persistent lease"),
 	ep("POST", "/api/sandboxes/{id}/suspend", "snapshot + stop"),
