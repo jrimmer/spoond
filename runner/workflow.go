@@ -80,6 +80,8 @@ type Step struct {
 	Run  string            `yaml:"run"`
 	If   string            `yaml:"if"`
 	Env  map[string]string `yaml:"env"`
+	// With holds a uses: step's inputs; checkout reads `ref`.
+	With map[string]string `yaml:"with"`
 }
 
 // ParseWorkflow parses the expanded workflow YAML payload.

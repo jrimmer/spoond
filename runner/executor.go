@@ -212,19 +212,22 @@ func (e *Executor) Run(ctx context.Context, job *Job) error {
 			Name:     stepName(&step),
 			Result:   ResultSuccess,
 			LogIndex: logIndex,
+			Started:  time.Now(),
 		}
 		// actions/checkout: clone the repo into the workspace.
 		if step.Uses != "" && checkoutRe.MatchString(step.Uses) {
-			if err := e.checkout(ctx, sandboxID, ws, job, ctx2, stepState, &logIndex); err != nil {
+			if err := e.checkout(ctx, sandboxID, ws, job, &step, ctx2, stepState, &logIndex); err != nil {
 				state.Result = ResultFailure
 				stepState.Result = ResultFailure
 				stepState.Exit = -1
+				stepState.Stopped = time.Now()
 				state.Steps = append(state.Steps, *stepState)
 				failed = stepState
 				failedStderr = err.Error()
 				break
 			}
 			checkedOut = true
+			stepState.Stopped = time.Now()
 			state.Steps = append(state.Steps, *stepState)
 			continue
 		}
@@ -375,6 +378,7 @@ func (e *Executor) Run(ctx context.Context, job *Job) error {
 			e.log(ctx, job, logIndex, "step failed: "+err.Error())
 			logIndex++
 			stepState.LogLength = 1
+			stepState.Stopped = time.Now()
 			state.Steps = append(state.Steps, *stepState)
 			failed = stepState
 			failedStderr = err.Error()
@@ -394,6 +398,7 @@ func (e *Executor) Run(ctx context.Context, job *Job) error {
 			failed = stepState
 			failedStdout, failedStderr = res.Stdout, res.Stderr
 		}
+		stepState.Stopped = time.Now()
 		state.Steps = append(state.Steps, *stepState)
 		e.log(ctx, job, logIndex, fmt.Sprintf("step %d (%s) exit=%d", i, stepName(&step), res.Exit))
 		logIndex++
@@ -589,8 +594,11 @@ func resultLabel(r Result) string {
 
 // checkout clones the job's repository into the workspace inside the
 // sandbox. It is the sandbox equivalent of actions/checkout: the runner
-// provides the environment, the workflow asks for the code.
-func (e *Executor) checkout(ctx context.Context, sandboxID, ws string, job *Job, ctx2 *EvalContext, stepState *StepState, logIndex *int64) error {
+// provides the environment, the workflow asks for the code. The tree is
+// the step's `with: ref:` when given, else the commit that triggered the
+// run (github.sha), so a pull request or branch push tests its own code
+// and not the default branch.
+func (e *Executor) checkout(ctx context.Context, sandboxID, ws string, job *Job, step *Step, ctx2 *EvalContext, stepState *StepState, logIndex *int64) error {
 	repo := ctx2.Eval("${{ github.repository }}")
 	if repo == "" {
 		stepState.Result = ResultFailure
@@ -646,25 +654,79 @@ func (e *Executor) checkout(ctx context.Context, sandboxID, ws string, job *Job,
 		{"mkdir -p " + ws, nil},
 		{"git clone --depth 1 " + cloneURL + " " + ws, authEnv},
 	}
-	for _, step := range cmds {
-		c := step.cmd
-		res, err := e.Sandbox.Exec(ctx, sandboxID, c, "", step.env, 300)
-		if err != nil {
+	// The ref to check out: with.ref, else github.sha with github.ref as
+	// the fallback (a sha fetch needs the server to allow it). Refs go
+	// into a shell command, so anything outside the ref charset fails
+	// the step rather than being quoted around.
+	var refs []string
+	if want := strings.TrimSpace(ctx2.Eval(step.With["ref"])); want != "" {
+		refs = []string{want}
+	} else {
+		for _, r := range []string{ctx2.Eval("${{ github.sha }}"), ctx2.Eval("${{ github.ref }}")} {
+			if r != "" {
+				refs = append(refs, r)
+			}
+		}
+	}
+	for _, r := range refs {
+		if !checkoutRefRe.MatchString(r) {
 			stepState.Result = ResultFailure
-			e.log(ctx, job, *logIndex, "checkout: "+err.Error())
+			e.log(ctx, job, *logIndex, "checkout: ref "+strconv.Quote(r)+" has characters unsafe for a git ref")
 			*logIndex++
 			stepState.LogLength = 1
+			return fmt.Errorf("checkout: unsafe ref %q", r)
+		}
+	}
+	for _, c := range cmds {
+		if err := e.checkoutExec(ctx, sandboxID, job, c.cmd, c.env, stepState, logIndex); err != nil {
 			return err
 		}
-		rows := splitLog(res.Stdout, res.Stderr)
-		if len(rows) > 0 {
-			*logIndex += e.logLines(ctx, job, *logIndex, rows)
-			stepState.LogLength += int64(len(rows))
+	}
+	if len(refs) == 0 {
+		return nil
+	}
+	var fetchErr error
+	for _, r := range refs {
+		fetchErr = e.checkoutExec(ctx, sandboxID, job, "git -C "+ws+" fetch --depth 1 origin "+r, authEnv, stepState, logIndex)
+		if fetchErr == nil {
+			// An earlier ref's failed fetch marked the step; this one
+			// worked.
+			stepState.Result = ResultSuccess
+			return e.checkoutExec(ctx, sandboxID, job, "git -C "+ws+" checkout --detach FETCH_HEAD", nil, stepState, logIndex)
 		}
-		if res.Exit != 0 {
-			stepState.Result = ResultFailure
-			return fmt.Errorf("checkout: command failed: %s", c)
-		}
+	}
+	// Running the default branch's tree in place of the asked-for one
+	// would report a result for code nobody pushed.
+	e.log(ctx, job, *logIndex, "checkout: could not fetch "+strings.Join(refs, " or "))
+	*logIndex++
+	stepState.LogLength++
+	return fetchErr
+}
+
+// checkoutRefRe is the charset a checkout ref may use: a sha, a branch or
+// tag name, or a full refs/... path. No leading dash (it would read as a
+// git option).
+var checkoutRefRe = regexp.MustCompile(`^[A-Za-z0-9_.][A-Za-z0-9_./+\-]*$`)
+
+// checkoutExec runs one checkout command, streaming its output to the
+// step log. A non-zero exit fails the step.
+func (e *Executor) checkoutExec(ctx context.Context, sandboxID string, job *Job, c string, env map[string]string, stepState *StepState, logIndex *int64) error {
+	res, err := e.Sandbox.Exec(ctx, sandboxID, c, "", env, 300)
+	if err != nil {
+		stepState.Result = ResultFailure
+		e.log(ctx, job, *logIndex, "checkout: "+err.Error())
+		*logIndex++
+		stepState.LogLength++
+		return err
+	}
+	rows := splitLog(res.Stdout, res.Stderr)
+	if len(rows) > 0 {
+		*logIndex += e.logLines(ctx, job, *logIndex, rows)
+		stepState.LogLength += int64(len(rows))
+	}
+	if res.Exit != 0 {
+		stepState.Result = ResultFailure
+		return fmt.Errorf("checkout: command failed: %s", c)
 	}
 	return nil
 }
