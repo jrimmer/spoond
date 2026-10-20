@@ -33,3 +33,6 @@ __pycache__/
 # Conformance suite results
 conformance/results/*
 !conformance/results/.gitkeep
+
+# Worker completion notes stay out of the repo.
+DONE-*.md
