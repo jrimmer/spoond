@@ -111,6 +111,11 @@ summarised from README "Status".
   and the suspension ends the watch with `lease_suspended`. Backed by a
   new `substrate.Watch` over envd's `filesystem.WatchDir`.
 
+- **`node-base` image.** Node.js 24 LTS (node, npm, npx, corepack) on the
+  dev-base environment, beside `go-base` and `py-base`. Sandboxes have no
+  network, so `npm install` needs a warm npm cache, for example in a named
+  snapshot made from this image.
+
 ### Removed
 
 - **The `/api/sandboxes` path alias (4.0, spoond-4-0-s10).** Every
