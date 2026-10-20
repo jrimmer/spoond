@@ -88,25 +88,22 @@ func (s *Service) runCheckpointLoop(ctx context.Context) {
 // activity has nothing new to protect). Persistent leases and held
 // leases alike — being held no longer means being checkpointed (2.3,
 // #122). One lease at a time, 2 s apart; busy leases are skipped.
+//
+// A due lease with open work (an interactive stream or a synchronous
+// exec in flight) waits: a checkpoint pauses the guest, which ends every
+// open connection and fails the exec in flight (spoond-g0ok). The pass
+// skips it until the work ends, or until one full effective interval has
+// passed since it first became due, then checkpoints it anyway. Only
+// this periodic pass waits; a checkpoint asked for through the API and
+// clone/fork/restart's implicit checkpoint are unchanged.
 func (s *Service) checkpointIdleLeases(ctx context.Context) {
 	now := s.now()
 	s.store.mu.Lock()
 	var targets []*Lease
 	for _, l := range s.store.leases {
-		if l.released || !l.live() || l.busy {
-			continue
+		if s.checkpointWantedLocked(l, now) {
+			targets = append(targets, l)
 		}
-		interval := s.effectiveCheckpointInterval(l)
-		if interval <= 0 {
-			continue
-		}
-		if !l.LastCheckpointAt.Add(time.Duration(interval) * time.Second).Before(now) {
-			continue
-		}
-		if !l.LastActive.After(l.LastCheckpointAt) {
-			continue
-		}
-		targets = append(targets, l)
 	}
 	s.store.mu.Unlock()
 
@@ -118,12 +115,66 @@ func (s *Service) checkpointIdleLeases(ctx context.Context) {
 			case <-time.After(checkpointIntervalSpacing):
 			}
 		}
+		// Work that opened after the collection (a stream attaching, an
+		// exec starting) defers this pass too.
+		now := s.now()
+		s.store.mu.Lock()
+		wanted := s.checkpointWantedLocked(l, now)
+		s.store.mu.Unlock()
+		if !wanted {
+			continue
+		}
 		if _, err := s.checkpointLeaseBusy(ctx, l, false); err != nil {
 			if !errors.Is(err, errLeaseBusy) {
 				s.log.Printf("checkpoint: lease %s: %v", l.ID, err)
 			}
 		}
 	}
+}
+
+// checkpointWantedLocked reports whether the periodic pass should
+// checkpoint the lease now: it is live, not busy, due on its effective
+// interval, active since its last checkpoint, and either has no open
+// work or has waited one full interval for that work to end
+// (spoond-g0ok). Deferral bookkeeping is updated here: the first skip
+// stamps checkpointDeferredSince and logs once per deferral, the cap
+// logs once, and a lease that is not due drops both stamps. Call with
+// s.store.mu held.
+func (s *Service) checkpointWantedLocked(l *Lease, now time.Time) bool {
+	if l.released || !l.live() || l.busy {
+		return false
+	}
+	interval := s.effectiveCheckpointInterval(l)
+	if interval <= 0 {
+		l.checkpointDeferredSince = time.Time{}
+		l.checkpointForceLogged = false
+		return false
+	}
+	if !l.LastCheckpointAt.Add(time.Duration(interval) * time.Second).Before(now) {
+		l.checkpointDeferredSince = time.Time{}
+		l.checkpointForceLogged = false
+		return false
+	}
+	if !l.LastActive.After(l.LastCheckpointAt) {
+		l.checkpointDeferredSince = time.Time{}
+		l.checkpointForceLogged = false
+		return false
+	}
+	if l.openWork > 0 {
+		if l.checkpointDeferredSince.IsZero() {
+			l.checkpointDeferredSince = now
+			l.checkpointForceLogged = false
+			s.log.Printf("checkpoint: lease %s deferred while it has open work (%d open)", l.ID, l.openWork)
+		}
+		if now.Sub(l.checkpointDeferredSince) < time.Duration(interval)*time.Second {
+			return false
+		}
+		if !l.checkpointForceLogged {
+			l.checkpointForceLogged = true
+			s.log.Printf("checkpoint: lease %s waited one full interval with open work (%d open); the deferral cap forces the checkpoint", l.ID, l.openWork)
+		}
+	}
+	return true
 }
 
 // checkpointLeaseBusy runs checkpointLease with the busy guard: a

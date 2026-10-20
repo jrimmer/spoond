@@ -1685,6 +1685,11 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.svc.log.Printf("stream: %s: start", lease.ID)
+	// An open stream is open work for the periodic checkpoint, which
+	// would otherwise pause the guest and end this connection
+	// (spoond-g0ok).
+	s.svc.incOpenWork(lease.ID)
+	defer s.svc.decOpenWork(lease.ID)
 
 	// Substrate -> WS relay: one frame per event, no trailing newline.
 	// The relay runs until EventExit or EventError (Events is closed
@@ -2465,6 +2470,11 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	start := time.Now()
+	// A synchronous exec in flight is open work for the periodic
+	// checkpoint: a pause fails it, unlike a background job, which the
+	// pause merely stops (spoond-g0ok).
+	s.svc.incOpenWork(lease.ID)
+	defer s.svc.decOpenWork(lease.ID)
 	res, err := s.svc.sub.Exec(r.Context(), lease.SandboxID, substrate.ExecRequest{
 		Args:    args,
 		Env:     execEnv,

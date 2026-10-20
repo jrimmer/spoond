@@ -1664,7 +1664,14 @@ lease keeps running from the new build. Checkpoints happen three ways:
   `> 0` and that have been active since their last checkpoint — the
   host default comes from `CHECKPOINT_INTERVAL_MINS` (default `0` =
   never, see [operations.md](operations.md)), a lease's own
-  `checkpoint_interval` overrides it;
+  `checkpoint_interval` overrides it. The periodic pass waits while the
+  lease has an open interactive stream or a synchronous exec in flight:
+  a checkpoint pauses the guest, which would end those connections and
+  fail that exec. The wait lasts at most one effective interval after
+  the lease first became due, then the checkpoint runs anyway. Background
+  jobs do not defer it — a pause stops them, it does not end them. A
+  checkpoint asked for on demand, and clone/fork/restart's implicit
+  checkpoint, never wait;
 - implicitly, as the first half of clone and fork (and the persistent
   restart round-trip).
 

@@ -252,6 +252,19 @@ type Lease struct {
 	// checkpoint/pause operation (U10): a second operation on it returns
 	// 409. Not persisted.
 	busy bool
+	// openWork counts the lease's open interactive streams and in-flight
+	// synchronous execs (spoond-g0ok): a periodic checkpoint pauses the
+	// guest, which ends every open connection, so the pass waits while
+	// this is non-zero. Background jobs are not counted: a pause stops
+	// them but does not end them. Guarded by store.mu; not persisted.
+	openWork int
+	// checkpointDeferredSince is when the periodic pass first skipped
+	// this lease because it had open work, and checkpointForceLogged
+	// records that the pass already logged the interval cap for that
+	// deferral. Both are cleared by a successful checkpoint (or once the
+	// lease is no longer due). Guarded by store.mu; not persisted.
+	checkpointDeferredSince time.Time
+	checkpointForceLogged   bool
 }
 
 // live reports whether the lease has a running sandbox. "recovered" is
@@ -2103,6 +2116,37 @@ func (s *Service) touch(id string) {
 		l.LastActive = now
 		s.store.lastActiveDirty[id] = now
 	}
+}
+
+// incOpenWork records that a lease gained an open interactive stream or
+// an in-flight synchronous exec (spoond-g0ok).
+func (s *Service) incOpenWork(leaseID string) {
+	s.store.mu.Lock()
+	if l := s.store.leases[leaseID]; l != nil && !l.released {
+		l.openWork++
+	}
+	s.store.mu.Unlock()
+}
+
+// decOpenWork records that one of a lease's open streams or synchronous
+// execs ended.
+func (s *Service) decOpenWork(leaseID string) {
+	s.store.mu.Lock()
+	if l := s.store.leases[leaseID]; l != nil && l.openWork > 0 {
+		l.openWork--
+	}
+	s.store.mu.Unlock()
+}
+
+// openWorkCount reports how many open streams and synchronous execs a
+// lease has, under the store lock.
+func (s *Service) openWorkCount(leaseID string) int {
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	if l := s.store.leases[leaseID]; l != nil {
+		return l.openWork
+	}
+	return 0
 }
 
 // incRunningJob records that a lease gained a running background job.
@@ -4282,6 +4326,10 @@ func (s *Service) afterCheckpoint(ctx context.Context, src *Lease, buildID strin
 	src.BuildID = buildID
 	src.LastCheckpointBuildID = buildID
 	src.LastCheckpointAt = time.Now()
+	// A successful checkpoint ends any periodic deferral it was under
+	// (spoond-g0ok): the next due interval starts from this checkpoint.
+	src.checkpointDeferredSince = time.Time{}
+	src.checkpointForceLogged = false
 	for _, sb := range sbs {
 		if sb.ID == src.SandboxID {
 			src.HostIP = sb.HostIP
