@@ -96,6 +96,11 @@ summarised from README "Status".
 - **README: Status names the current release only**; the release history
   lives here and on the releases page.
 
+### Fixed
+
+- An empty lease list is `"sandboxes": []`, not `null`: a client no
+  longer has to tell "no leases" from "no answer".
+
 ## [3.10.1] - 2026-10-18
 
 ### Changed

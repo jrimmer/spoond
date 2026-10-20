@@ -143,3 +143,25 @@ func TestOwnerScopedByName(t *testing.T) {
 		t.Fatalf("cross-owner resolve should 404, got %d", rec3.Code)
 	}
 }
+
+// TestLeaseListEmptyIsArray: a caller with no leases gets "sandboxes": [],
+// never null — a client must not have to tell "no leases" from "no
+// answer".
+func TestLeaseListEmptyIsArray(t *testing.T) {
+	svc, db, _ := newTestService(t)
+	h := NewServer(svc, NewImageRegistry(db)).Handler()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/api/leases", nil)
+	req.Header.Set("Authorization", "Bearer legacy-tok")
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list: %d %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got := strings.TrimSpace(string(body["sandboxes"])); got != "[]" {
+		t.Fatalf(`sandboxes = %s, want []`, got)
+	}
+}

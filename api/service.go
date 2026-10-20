@@ -5339,7 +5339,8 @@ func (s *Service) list(owner string) []map[string]any {
 	}
 	s.store.mu.Lock()
 	defer s.store.mu.Unlock()
-	var out []map[string]any
+	// An empty list, never nil: no leases is "sandboxes": [], not null.
+	out := []map[string]any{}
 	ms := s.memSamples
 	for _, l := range s.store.leases {
 		if l.Owner == owner && !l.released {
