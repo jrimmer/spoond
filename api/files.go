@@ -39,7 +39,7 @@ func (s *Server) acquireXfer(w http.ResponseWriter) bool {
 	case s.fileXfer <- struct{}{}:
 		return true
 	default:
-		writeError(w, http.StatusTooManyRequests, "too many file transfers in flight; try again shortly")
+		writeErrorCode(w, http.StatusTooManyRequests, "too_busy", "too many file transfers in flight; try again shortly")
 		return false
 	}
 }
@@ -73,6 +73,12 @@ func filePathValue(r *http.Request) (string, bool) {
 	return cleaned, true
 }
 
+// filesInvalidPath answers a missing or root-cleaning {path} tail with
+// the route's 404 and code EINVAL; the status keeps the old contract.
+func filesInvalidPath(w http.ResponseWriter) {
+	writeErrorCode(w, http.StatusNotFound, "EINVAL", "file path required")
+}
+
 // parseFileMode reads an octal ?mode= parameter ("0644", "644"), falling
 // back to def when absent; a malformed value, or one with setuid, setgid
 // or sticky bits (the substrate applies permission bits only), is an
@@ -86,6 +92,12 @@ func parseFileMode(raw string, def os.FileMode) (os.FileMode, error) {
 		return 0, errors.New("mode must be octal permission bits, 0000-0777")
 	}
 	return os.FileMode(v), nil
+}
+
+// filesInvalidModeOrOp answers a malformed ?mode or an unknown ?op with
+// the routes' 400 and code EINVAL.
+func filesInvalidModeOrOp(w http.ResponseWriter, msg string) {
+	writeErrorCode(w, http.StatusBadRequest, "EINVAL", msg)
 }
 
 // mapFileError translates a substrate file error onto the HTTP status
@@ -107,23 +119,44 @@ func (s *Server) mapFileError(w http.ResponseWriter, lease *Lease, op string, er
 		// Mid-checkpoint the whole sandbox reads as missing: busy, not a
 		// missing file (see writeSandboxGone).
 		w.Header().Set("Retry-After", "5")
-		writeError(w, http.StatusConflict, "lease is busy (a checkpoint or another lifecycle operation is in progress); retry shortly")
+		writeErrorCode(w, http.StatusConflict, "lease_busy", "lease is busy (a checkpoint or another lifecycle operation is in progress); retry shortly")
 	case errors.Is(err, substrate.ErrNotFound):
-		writeError(w, http.StatusNotFound, "file not found")
+		writeErrorCode(w, http.StatusNotFound, "ENOENT", "file not found")
 	case errors.Is(err, substrate.ErrTooLarge):
-		writeError(w, http.StatusRequestEntityTooLarge, "file exceeds the 256 MiB limit")
+		writeErrorCode(w, http.StatusRequestEntityTooLarge, "EFBIG", "file exceeds the 256 MiB limit")
+	case errors.Is(err, substrate.ErrPermission):
+		writeErrorCode(w, http.StatusForbidden, "EACCES", err.Error())
+	case errors.Is(err, substrate.ErrIsDir):
+		writeErrorCode(w, http.StatusConflict, "EISDIR", err.Error())
 	case errors.Is(err, substrate.ErrNotDir),
 		errors.Is(err, substrate.ErrNotEmpty),
 		errors.Is(err, substrate.ErrExist),
 		errors.Is(err, substrate.ErrInvalidOp):
-		writeError(w, http.StatusConflict, err.Error())
+		writeErrorCode(w, http.StatusConflict, fileErrCode(err), err.Error())
 	default:
 		if errors.Is(err, substrate.ErrCapacity) {
 			writeErrorCodeAfter(w, http.StatusServiceUnavailable, capacityRetryAfterSecs, "capacity_wait", "capacity: node is not accepting work")
 			return
 		}
 		s.svc.log.Printf("files: %s %s: %v", op, sandboxID, err)
-		writeError(w, http.StatusBadGateway, "file operation failed")
+		writeErrorCode(w, http.StatusBadGateway, "EIO", "file operation failed")
+	}
+}
+
+// fileErrCode names the code for the substrate's conflict-class file
+// errors: ENOTDIR (a file sits in a path's way), ENOTEMPTY, EEXIST (the
+// wrong type exists at the path) and EINVAL (an operation the substrate
+// cannot perform, e.g. a write over a directory).
+func fileErrCode(err error) string {
+	switch {
+	case errors.Is(err, substrate.ErrNotDir):
+		return "ENOTDIR"
+	case errors.Is(err, substrate.ErrNotEmpty):
+		return "ENOTEMPTY"
+	case errors.Is(err, substrate.ErrExist):
+		return "EEXIST"
+	default:
+		return "EINVAL"
 	}
 }
 
@@ -135,7 +168,7 @@ func (s *Server) mapFileError(w http.ResponseWriter, lease *Lease, op string, er
 func (s *Server) filesGate(w http.ResponseWriter, r *http.Request) *Lease {
 	lease := s.filesTarget(r)
 	if lease == nil {
-		writeError(w, http.StatusNotFound, "lease not found")
+		writeErrorCode(w, http.StatusNotFound, "not_found", "lease not found")
 		return nil
 	}
 	s.svc.touch(lease.ID) // files traffic is activity for the idle sweeper
@@ -158,7 +191,7 @@ func (s *Server) handleFileDownload(w http.ResponseWriter, r *http.Request) {
 	}
 	guestPath, ok := filePathValue(r)
 	if !ok {
-		writeError(w, http.StatusNotFound, "file path required")
+		filesInvalidPath(w)
 		return
 	}
 	if r.URL.Query().Get("stat") == "1" {
@@ -207,12 +240,12 @@ func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	guestPath, ok := filePathValue(r)
 	if !ok {
-		writeError(w, http.StatusNotFound, "file path required")
+		filesInvalidPath(w)
 		return
 	}
 	mode, err := parseFileMode(r.URL.Query().Get("mode"), 0o644)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		filesInvalidModeOrOp(w, err.Error())
 		return
 	}
 	if !s.acquireXfer(w) {
@@ -233,15 +266,17 @@ func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 }
 
 // readBodyCapped reads the request body, refusing anything beyond max
-// bytes with 413 before the caller touches the substrate.
+// bytes with 413 EFBIG before the caller touches the substrate; any other
+// read failure is 400 EIO (the body's bytes could not be read, a
+// transport failure, not a bad value).
 func readBodyCapped(w http.ResponseWriter, r *http.Request, max int64) ([]byte, bool) {
 	data, err := io.ReadAll(io.LimitReader(r.Body, max+1))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "reading request body: "+err.Error())
+		writeErrorCode(w, http.StatusBadRequest, "EIO", "reading request body: "+err.Error())
 		return nil, false
 	}
 	if int64(len(data)) > max {
-		writeError(w, http.StatusRequestEntityTooLarge, "request body exceeds the 256 MiB limit")
+		writeErrorCode(w, http.StatusRequestEntityTooLarge, "EFBIG", "request body exceeds the 256 MiB limit")
 		return nil, false
 	}
 	return data, true
@@ -257,16 +292,16 @@ func (s *Server) handleFileOp(w http.ResponseWriter, r *http.Request) {
 	}
 	guestPath, ok := filePathValue(r)
 	if !ok {
-		writeError(w, http.StatusNotFound, "file path required")
+		filesInvalidPath(w)
 		return
 	}
 	if r.URL.Query().Get("op") != "mkdir" {
-		writeError(w, http.StatusBadRequest, "op must be mkdir")
+		filesInvalidModeOrOp(w, "op must be mkdir")
 		return
 	}
 	mode, err := parseFileMode(r.URL.Query().Get("mode"), 0o755)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		filesInvalidModeOrOp(w, err.Error())
 		return
 	}
 	if err := s.svc.sub.MakeDir(r.Context(), lease.SandboxID, guestPath, mode); err != nil {
@@ -290,7 +325,7 @@ func (s *Server) handleFileDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	guestPath, ok := filePathValue(r)
 	if !ok {
-		writeError(w, http.StatusNotFound, "file path required")
+		filesInvalidPath(w)
 		return
 	}
 	recursive := r.URL.Query().Get("recursive") == "1"

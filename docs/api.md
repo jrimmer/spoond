@@ -37,6 +37,20 @@ particular means two different things depending on the code:
 |---|---|---|
 | `400` | `bad_request` | malformed or out-of-range request fields |
 | `400` | `image_mismatch` | a create `image` does not match the `snapshot`'s image |
+| `400`/`404` | `EINVAL` | a files/exec-stream or job-output parameter is malformed (bad path tail, `op`, `mode`, signal, stream, offset/limit) |
+| `400` | `EIO` | the request body's bytes could not be read (a transport failure, not a bad value) |
+| `403` | `EACCES` | the substrate refused a file operation on permissions (the guest's "Permission denied"); on e2b the write and remove paths classify it, a plain `GET` content read envd refuses to serve answers `502` `EIO` instead (envd reports no reason there) |
+| `404` | `ENOENT` | a file route's path does not exist |
+| `404` | `job_not_found` | unknown background job id, or the job belongs to another lease |
+| `409` | `EISDIR` | a file route's target is a directory, read or write |
+| `409` | `ENOTDIR` | a file sits in a file route's path's way |
+| `409` | `EEXIST` | the wrong type exists at a file route's path (mkdir over a file) |
+| `409` | `ENOTEMPTY` | non-recursive remove of a non-empty directory |
+| `409` | `job_not_running` | a signal of a finished job, or its process group is unreachable |
+| `413` | `EFBIG` | the body or file is over the size cap (exec/stream body, file transfer) |
+| `500` | `spawn_error` | the stream's command or a background job could never start (agent unreachable, guest refused the start) |
+| `500` | `EIO` | a sync exec, or a stream after its start, failed in the substrate's transport (it cannot say whether the command ran) |
+| `200` | `timeout` | a sync exec's 200 when the substrate itself ended it at the exec's time limit (beside `exit: 124`) |
 | `404` | `not_found` | unknown lease, name, snapshot or image |
 | `409` | `lease_busy` | a suspend/resume/restart/checkpoint/save is already in flight, or another caller's resume is; retry |
 | `409` | `lease_suspended` | a suspended lease on a path that cannot resume it (the stat probe, fork, crash test); `resume` it first. Every work call — exec, stream, files, proxy, jobs, the LLM gateway — resumes a suspended lease on use instead and never answers this. The body adds `"reason"` — `idle_suspend` or `take_back` when the suspension was automatic, `resume_failed` when an undrain could not bring the lease back and left it suspended with its snapshot intact for the next work call to retry (spoond-638d) |
@@ -72,7 +86,7 @@ Everything that refuses a request in 3.0:
 |---|---|---|
 | `400` | `bad_request` (or a plain `error`) | validation: malformed JSON, out-of-range or unknown values, `image_mismatch` |
 | `401` | | no or unknown token |
-| `403` | | not allowed: an admin route, a share that does not grant it, a port the guest reserves, or `owner deleted` (the owner's identity was removed while the request was in flight) |
+| `403` | | not allowed: an admin route, a share that does not grant it, a port the guest reserves, or `owner deleted` (the owner's identity was removed while the request was in flight). A resume-on-use refusal on the files, exec, stream and jobs routes carries `code: owner_deleted` |
 | `404` | `not_found` | unknown lease, name, snapshot, build, image or user — and any lease the caller cannot see |
 | `409` | `lease_busy` | another lifecycle operation (pause, resume, restart, checkpoint, save) is in flight; retry |
 | `409` | `kept_budget` | a keep or named save would push the owner's kept + named bytes past their fair disk slice |
@@ -498,7 +512,10 @@ answers the one shared no-room shape, `503` with `Retry-After: 30` and
 unavailable answers the retryable `503 substrate_unavailable` with
 `Retry-After: 5` (spoond-638d round 2); and a resume of a lost sandbox
 answers `410 lease_lost`. The lease stays suspended
-in every refusal. Resuming does not renew a hold: there is no hold any
+in every refusal. A resume refused because the owner's identity was
+removed mid-flight answers `403 owner_deleted`, and one for a lease
+that is not workspace-backed persistent `400 bad_request`; a released
+lease answers `404 not_found`. Resuming does not renew a hold: there is no hold any
 more, only labels.
 
 **Per-path status (resume-on-use).** Every path is listed; the
@@ -782,9 +799,9 @@ This is deliberately not `410 lease_lost`: `410` is final for clients
 the job permanently), and an orchestrator stall must never become one.
 The lease is not marked lost on this answer. A `List` that succeeds and
 does not name the sandbox is still a confirmed absence and answers
-`410` (the body is `{"error":"lease no longer exists"}` with **no**
-`code`; only a lease that is already marked `lost` carries
-`code: lease_lost`), or `404` on files.
+`410` (`code: lease_lost`) — or `409 code: lease_busy` with a
+`Retry-After` while a lifecycle operation is in flight on the lease —
+or `404 code: ENOENT` on files.
 
 On the e2b backend only `Start`, `Exec` and `WriteFile` call the
 sandbox-list check, so the paths that can actually answer
@@ -801,12 +818,12 @@ failed; the confirmed-absence answer is unchanged in every row.
 
 | Path | Confirmed absent | Unknown (orchestrator `List` failed) |
 |---|---|---|
-| `POST …/exec` (`api/server.go`, `handleExec`) | `410 lease no longer exists` (no code) | `503 substrate_unavailable` |
-| `GET …/stat` (`api/server.go`, `handleStat`) | `410 lease no longer exists` (no code) | `503 substrate_unavailable` |
-| `POST …/exec` `background:true` (`api/jobs_http.go`) | `410 lease no longer exists` (no code) | `503 substrate_unavailable` |
-| `PUT …/files/{path}` and directory remove (`api/files.go`) | `404 file not found` | `503 substrate_unavailable` |
-| `POST …/jobs/{job}/signal` (`api/jobs_http.go`) | `409 job is not running` | `503 substrate_unavailable` |
-| `DELETE …/jobs/{job}` (`api/jobs_http.go`) | `404 job is not on this lease` | `503 substrate_unavailable` |
+| `POST …/exec` (`api/server.go`, `handleExec`) | `410 lease_lost` (`409 lease_busy` mid-lifecycle) | `503 substrate_unavailable` |
+| `GET …/stat` (`api/server.go`, `handleStat`) | `410 lease_lost` (`409 lease_busy` mid-lifecycle) | `503 substrate_unavailable` |
+| `POST …/exec` `background:true` (`api/jobs_http.go`) | `410 lease_lost` (`409 lease_busy` mid-lifecycle) | `503 substrate_unavailable` |
+| `PUT …/files/{path}` and directory remove (`api/files.go`) | `404 ENOENT` | `503 substrate_unavailable` |
+| `POST …/jobs/{job}/signal` (`api/jobs_http.go`) | `409 job_not_running` | `503 substrate_unavailable` |
+| `DELETE …/jobs/{job}` (`api/jobs_http.go`) | `404 job_not_found` | `503 substrate_unavailable` |
 | `GET …/stream` (`api/server.go`, `handleStream`) | `error` frame | `error` frame naming `substrate: unavailable` |
 
 The exec-stream path has already committed a protocol (a WebSocket
@@ -862,16 +879,28 @@ own `idle_suspend`, take-back, or a hand suspend). A refused
 resume answers the shared shapes: `429`
 `box_full` when take-back can free nothing, `503 capacity_wait` with `Retry-After` when the host has
 no room, `409 lease_busy` while its pause or another resume is in
-flight. `410` if it is
-`lost` (`code: lease_lost`, see [Lost leases](#lost-leases)) or the
-sandbox no longer exists on the substrate; `413` when the JSON body is
+flight. `410 lease_lost` if the lease is
+`lost` (see [Lost leases](#lost-leases)) or the sandbox no longer
+exists on the substrate; `413 EFBIG` when the JSON body is
 larger than `MAX_EXEC_BODY_BYTES` (default 8 MiB, leaving room for a
-large `cmd` and `env` next to the 64 KiB secrets cap); `429` when
-the per-owner concurrent exec/stream cap is reached — the host default
-`EXEC_CONCURRENCY_MAX` (8) or the owner's identity override
-(`exec_concurrency`, set via the quota route). (Exec does not wait for or take the lease's lifecycle lock; its concurrency
-guard is the per-owner cap, which yields `429`. A busy lease shows up only
-as the `409` below.)
+large `cmd` and `env` next to the 64 KiB secrets cap); `429 too_busy`
+when the per-owner concurrent exec/stream cap is reached — the host
+default `EXEC_CONCURRENCY_MAX` (8) or the owner's identity override
+(`exec_concurrency`, set via the quota route). A body that is invalid
+JSON, a body without `cmd`, a negative `max_runtime_secs` or an
+invalid secrets map answers `400 bad_request`. (Exec does not wait for
+or take the lease's lifecycle lock; its concurrency guard is the
+per-owner cap, which yields `429`. A busy lease shows up only as the
+`409` below.)
+
+An exec the substrate fails (the agent was unreachable, the guest
+rejected the start, or the exec's stream broke mid-run) answers
+`500 EIO`: the substrate cannot say whether the command ran. An exec the substrate itself ended at the exec's time limit answers
+`200` with `exit: 124`, a `[spoond] exec timed out` marker on stderr and
+`code: timeout` on the body; the code rides the substrate's own timeout
+flag, not the 124 or the marker's text, so a command that exits 124 or
+merely prints "timeout" on its own carries no `code`: the answer then
+says nothing about why the command ended.
 
 The body cap bounds what the host buffers, not what the guest can run:
 the guest's own argv limit is about 128 KiB per string, so a `cmd`
@@ -936,7 +965,10 @@ first (the background exec is a work call, #145 D2), then the job starts;
 a `lost` lease answers `410` with `code: lease_lost` (see [Lost
 leases](#lost-leases)). At most `MAX_RUNNING_JOBS_PER_LEASE`
 (default 16) jobs may run at once per lease; past it the request answers
-`429`.
+`429` with `code: too_many_jobs`. A start while a named-snapshot save
+holds the lease's secrets gate answers `409` with `code: lease_busy`
+and `Retry-After`; a start the substrate refuses answers `500` with
+`code: spawn_error`.
 
 The command runs in the caller's lease and is detached from the envd
 stream, so a backend restart does not kill it. The guest records the
@@ -1021,10 +1053,13 @@ The record names what the output cap has dropped (spoond-hwto): the
 M}, …}` per stream that dropped anything (omitted whole while none
 did), and a stream whose answer skips a dropped front also carries
 `stdout_offset`/`stderr_offset` (the absolute offset the answer starts
-at) with `stdout_skipped`/`stderr_skipped` beside it. With `?wait=`
-(at most 900) the request long-polls until the job is no longer
-running or the wait ends, then answers the current record. This is the
-easy way to follow a job to completion.
+at) with `stdout_skipped`/`stderr_skipped` beside it. With `?wait=<seconds>` (at most 900) the request long-polls until the
+job is no longer running or the wait ends, then answers the current
+record — a wait that ran to its limit answers the still-running record
+with no timeout code (the long-poll's established answer; the `code`
+member is only on the routes' refusals). This is the easy way to follow
+a job to completion. An unknown or foreign job id answers `404` with
+`code: job_not_found`.
 
 ### `GET /api/leases/{id}/jobs/{job}/output` — stream job output
 
@@ -1045,19 +1080,28 @@ body starts at) and `X-Output-Skipped` (`{"bytes": N, "newlines": M}`,
 the front the cap dropped); both are absent while nothing is dropped,
 so an uncapped response keeps its exact old shape.
 
+A `stream` that is neither `stdout` nor `stderr`, a negative `offset`
+or a non-positive `limit` answers `400` with `code: EINVAL`; a substrate
+read failure that is neither a confirmed absence nor an unknown state
+answers `502` with `code: EIO`.
+
 ### `POST /api/leases/{id}/jobs/{job}/signal` — signal a job
 
 ```json
 {"signal": "TERM"}
 ```
 
-`TERM` or `KILL`; signals the job's process group. `200` on success,
-`409` when the job is not running.
+`TERM` or `KILL`; signals the job's process group. `200` on success;
+`409` with `code: job_not_running` when the job is not running (a
+finished job, or a pid the wrapper never recorded); anything other than
+`TERM`/`KILL` answers `400` with `code: EINVAL` and a malformed body
+`400` with `code: bad_request`; a kill the substrate could not issue is
+`502` with `code: EIO` or `503` with `code: substrate_unavailable`.
 
 ### `DELETE /api/leases/{id}/jobs/{job}` — remove a finished job
 
 Removes a finished job's record and its guest job directory (spoond-hwto):
-`204` on success, `409` while the job is still running (signal it and
+`204` on success, `409 job_running` while the job is still running (signal it and
 let it exit first: a running job is never deleted behind the poller's
 back), `404` when the job is not on this lease. Same caller rules as
 exec (the owner, admins, or an `http` share granted exec) — the
@@ -1085,7 +1129,8 @@ mid-job.
 Read and write files inside the lease's filesystem. `{path…}` is the
 guest-absolute path (everything after `/files/`); it is cleaned before
 use, so `…/files/a/../b` is `…/files/b`, and `..` can never escape the
-guest root — a path that cleans to `/` names no file and answers `404`.
+guest root — a path that cleans to `/` names no file and, like other
+malformed path tails, answers `404` with `code: EINVAL`.
 Access follows the strictest lease model: the **owner** (or an admin,
 who may act on any lease); a grantee's `http` share does **not** carry
 file content, and anyone else gets the usual `404`. Every call counts
@@ -1096,13 +1141,14 @@ capacity_wait` with `Retry-After`, `409 lease_busy`). A `lost` lease
 answers `410`
 with `code: lease_lost` (see [Lost leases](#lost-leases)). File
 counts and sizes are capped at **256 MiB**: a bigger upload is refused
-with `413` before anything is written, and a bigger download with
-`413` instead of the bytes.
+with `413` (and `code: EFBIG`) before anything is written, and a bigger
+download with the same instead of the bytes.
 
 **`GET`** downloads the file: `200` with
-`Content-Type: application/octet-stream` and the raw bytes; `404` when
-it does not exist. With `?stat=1` the route returns the metadata
-instead:
+`Content-Type: application/octet-stream` and the raw bytes; `404` with
+`code: ENOENT` when it does not exist, `409` with `code: EISDIR` when
+the path names a directory. With `?stat=1` the route returns the
+metadata instead:
 
 ```json
 {"name":"motd","size":11,"mode":"640","mod_time":"2026-10-05T09:30:00Z","is_dir":false}
@@ -1114,7 +1160,7 @@ fake) from a file.
 
 **`PUT`** replaces the file with the request body (parents are created;
 an existing file is replaced, an existing directory in the way is a
-`409`). The body lands in a private directory beside the target and is
+`409` with `code: EISDIR`). The body lands in a private directory beside the target and is
 renamed into place, so readers never see a partial file and a secret is
 never readable by others while it lands; an existing file is replaced,
 not truncated (hard links and open handles keep the old content). The mode comes from `?mode=0644` — octal, default `0644` —
@@ -1124,17 +1170,24 @@ stat document (as above).
 **`POST ?op=mkdir`** creates the directory and any missing parents.
 `?mode=0755` (octal, default `0755`) applies to the leaf directory;
 existing nodes are left untouched. Response `201` with the stat
-document; anything other than `op=mkdir` is `400`.
+document; a path that goes through an existing file is `409` with
+`code: ENOTDIR`, an existing file at the leaf itself is `409` with
+`code: EEXIST`; anything other than `op=mkdir` is `400` with
+`code: EINVAL`.
 
 **`DELETE`** removes the file or directory. `?recursive=1` removes a
 non-empty directory with everything under it; without it, a non-empty
-directory is refused with `409`. `204 No Content` on success, `404`
-when the path does not exist.
+directory is refused with `409` and `code: ENOTEMPTY`. `204 No Content`
+on success, `404` with `code: ENOENT` when the path does not exist.
 
-Other errors: `400` for a malformed `mode` (not octal, or beyond
-`0777`: setuid, setgid and sticky bits are not applied, so they are
-refused) or a bad `op`; `429` when four file transfers (`GET` content
-or `PUT`) are already in flight on the backend.
+Other errors: `400` with `code: EINVAL` for a malformed `mode` (not
+octal, or beyond `0777`: setuid, setgid and sticky bits are not
+applied, so they are refused) or a bad `op`; `429` with `code:
+too_busy` when four file transfers (`GET` content or `PUT`) are already
+in flight on the backend. `EACCES` (403) rides the paths the guest's
+own error text reaches (write, mkdir's mode, remove): on e2b a `GET`
+content read envd refuses to serve for permissions carries no reason,
+so it answers `502` with `code: EIO` there.
 
 ### `GET /api/leases/{id}/stat` — guest metrics
 
@@ -1177,6 +1230,10 @@ Upgrade to WebSocket; the first client message starts a process:
 | `binary` | `false` | binary framing (below) |
 | `cols`, `rows` | `80`×`24` | initial PTY size |
 
+Before the upgrade the route answers the shared refusals with their
+codes: `429 too_busy` at the per-owner exec/stream cap and `404
+not_found` for a lease that is not the caller's.
+
 The first message is bounded to `MAX_EXEC_BODY_BYTES` (the exec body
 cap; default 8 MiB), as is every later message, so a client cannot make
 the server buffer an unbounded argv/env/secrets frame or stdin chunk.
@@ -1189,7 +1246,12 @@ with no trailing newline:
 - `{"stream":"started","pid":1234,"pty":true}`
 - `{"out":"…"}` — stdout, stderr and PTY output all use this frame
 - `{"exit_code":N}`, then the socket closes
-- `{"error":"…"}`, then the socket closes
+- `{"error":"…","code":"…"}`, then the socket closes. Codes: `EINVAL`
+  for a non-text or non-JSON first frame or an empty `args`,
+  `spawn_error` for a start the substrate refused; a process that
+  errored after it started carries `EIO` (the stream has no time limit
+  of its own, so it never answers `timeout`; the command's own output is not
+  matched), otherwise `EIO`
 
 Client text frames are control JSON:
 
@@ -1244,11 +1306,11 @@ lease cannot resume on use (a dial is work, #145 D2), `409 lease_busy`
 while its pause or another resume is in flight; `410` with
 `code: lease_lost`
 for a lost
-lease (see [Lost leases](#lost-leases)), `429` when the owner's
-concurrent dials are already at their cap — the host default
-`GUEST_DIAL_MAX` (16) or the owner's identity override (`guest_dial`),
-`502` when the lease has no running
-sandbox or the guest port refuses the connection.
+lease (see [Lost leases](#lost-leases)), `429` with `code: too_busy`
+when the owner's concurrent dials are already at their cap — the host
+default `GUEST_DIAL_MAX` (16) or the owner's identity override
+(`guest_dial`, set via the quota route), `502` when the lease has no
+running sandbox or the guest port refuses the connection.
 
 ### `POST /api/leases/{id}/keepalive` — extend a persistent lease
 
@@ -1310,7 +1372,9 @@ already running does nothing and answers `200`
 with the lease as it is: the guest keeps its memory. (Before 2.1.2 it
 restored the pause build again, rolling the guest's memory back.) An
 `owner deleted` (`403`) refuses the resume when the owner's identity was
-removed while the resume was in flight (spoond-q4j). A suspended lease
+removed while the resume was in flight (spoond-q4j); a resume-on-use
+refusal on the files, exec, stream and jobs routes carries
+`code: owner_deleted`. A suspended lease
 the caller owns resumes whatever suspended it; being persistent or
 pinned is not required (v3.0).
 

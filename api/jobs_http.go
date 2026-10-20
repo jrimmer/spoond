@@ -28,20 +28,22 @@ func (s *Server) handleBackgroundExec(w http.ResponseWriter, r *http.Request, le
 	if err != nil {
 		switch {
 		case errors.Is(err, errJobCap):
-			writeError(w, http.StatusTooManyRequests, err.Error())
+			writeErrorCode(w, http.StatusTooManyRequests, "too_many_jobs", err.Error())
 		case errors.Is(err, errLeaseBusySave):
 			// A named-snapshot save holds the lease's secrets gate (2.7,
 			// #83 B2): the job did not start, so retrying is safe.
 			w.Header().Set("Retry-After", "5")
-			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error(), "code": "lease_busy"})
+			writeErrorCode(w, http.StatusConflict, "lease_busy", err.Error())
 		case errors.Is(err, substrate.ErrNotFound), errors.Is(err, substrate.ErrUnavailable):
 			// A confirmed not-found is 409 busy / 410 lease_lost; an
 			// unavailable decision is 503 substrate_unavailable and the
 			// lease is kept.
 			s.writeSandboxOpErrorFor(w, lease, "exec background", err)
 		default:
+			// The command could never start (the agent refused, the guest
+			// rejected the argv): 500 spawn_error.
 			s.svc.log.Printf("exec background: %s: %v", lease.SandboxID, err)
-			writeError(w, http.StatusInternalServerError, "failed to start background job")
+			writeErrorCode(w, http.StatusInternalServerError, "spawn_error", "failed to start background job")
 		}
 		return
 	}
@@ -70,7 +72,7 @@ func (s *Server) jobsTarget(w http.ResponseWriter, r *http.Request) *Lease {
 	owner := ownerFrom(r.Context())
 	lease := s.svc.lookupWithShare(owner, r.PathValue("id"), ShareHTTP)
 	if lease == nil {
-		writeError(w, http.StatusNotFound, "lease not found")
+		writeErrorCode(w, http.StatusNotFound, "not_found", "lease not found")
 		return nil
 	}
 	// Jobs live in the guest: a lost lease has none to list or reach.
@@ -80,21 +82,21 @@ func (s *Server) jobsTarget(w http.ResponseWriter, r *http.Request) *Lease {
 	return lease
 }
 
-// jobTarget resolves a specific job under a lease. It answers 404 when
-// the job is unknown or belongs to another lease.
+// jobTarget resolves a specific job under a lease. It answers 404
+// job_not_found when the job is unknown or belongs to another lease.
 func (s *Server) jobTarget(w http.ResponseWriter, r *http.Request, lease *Lease) (store.JobRow, bool) {
 	row, err := s.svc.db.GetJob(r.Context(), r.PathValue("job"))
 	if errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusNotFound, "job not found")
+		writeErrorCode(w, http.StatusNotFound, "job_not_found", "job not found")
 		return store.JobRow{}, false
 	}
 	if err != nil {
 		s.svc.log.Printf("jobs: get %s: %v", r.PathValue("job"), err)
-		writeError(w, http.StatusInternalServerError, "job lookup failed")
+		writeErrorCode(w, http.StatusInternalServerError, "internal", "job lookup failed")
 		return store.JobRow{}, false
 	}
 	if row.LeaseID != lease.ID {
-		writeError(w, http.StatusNotFound, "job not found")
+		writeErrorCode(w, http.StatusNotFound, "job_not_found", "job not found")
 		return store.JobRow{}, false
 	}
 	return row, true
@@ -110,7 +112,7 @@ func (s *Server) handleJobsList(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.svc.db.ListJobs(r.Context(), lease.ID)
 	if err != nil {
 		s.svc.log.Printf("jobs: list %s: %v", lease.ID, err)
-		writeError(w, http.StatusInternalServerError, "job list failed")
+		writeErrorCode(w, http.StatusInternalServerError, "internal", "job list failed")
 		return
 	}
 	out := make([]jobInfo, 0, len(rows))
@@ -243,7 +245,7 @@ func (s *Server) handleJobDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if row.State == "running" {
-		writeError(w, http.StatusConflict, "job is running; signal it first")
+		writeErrorCode(w, http.StatusConflict, "job_running", "job is running; signal it first")
 		return
 	}
 	// Remove the guest directory first, while the record still exists: a
@@ -255,7 +257,7 @@ func (s *Server) handleJobDelete(w http.ResponseWriter, r *http.Request) {
 	s.svc.cleanupJobFiles(r.Context(), lease.SandboxID, row.JobID)
 	if _, err := s.svc.db.DeleteJob(r.Context(), row.JobID); err != nil {
 		s.svc.log.Printf("jobs: delete %s: %v", row.JobID, err)
-		writeError(w, http.StatusInternalServerError, "job delete failed")
+		writeErrorCode(w, http.StatusInternalServerError, "internal", "job delete failed")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -278,19 +280,19 @@ func (s *Server) handleJobOutput(w http.ResponseWriter, r *http.Request) {
 		stream = "stdout"
 	}
 	if stream != "stdout" && stream != "stderr" {
-		writeError(w, http.StatusBadRequest, "stream must be stdout or stderr")
+		writeErrorCode(w, http.StatusBadRequest, "EINVAL", "stream must be stdout or stderr")
 		return
 	}
 	offset, err := parseNonNeg(r.URL.Query().Get("offset"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "offset must be a non-negative integer")
+		writeErrorCode(w, http.StatusBadRequest, "EINVAL", "offset must be a non-negative integer")
 		return
 	}
 	limit := jobOutputDefaultLimit
 	if raw := r.URL.Query().Get("limit"); raw != "" {
 		v, err := strconv.Atoi(raw)
 		if err != nil || v <= 0 {
-			writeError(w, http.StatusBadRequest, "limit must be a positive integer")
+			writeErrorCode(w, http.StatusBadRequest, "EINVAL", "limit must be a positive integer")
 			return
 		}
 		limit = v
@@ -308,8 +310,10 @@ func (s *Server) handleJobOutput(w http.ResponseWriter, r *http.Request) {
 			// No output yet (or the sandbox is gone): an empty answer.
 			data = nil
 		} else {
+			// The substrate's read failed for a reason that is neither a
+			// confirmed absence nor an unknown state: 502 EIO.
 			s.svc.log.Printf("jobs: output %s %s: %v", row.JobID, stream, err)
-			writeError(w, http.StatusBadGateway, "could not read job output")
+			writeErrorCode(w, http.StatusBadGateway, "EIO", "could not read job output")
 			return
 		}
 	}
@@ -342,9 +346,10 @@ func parseNonNeg(s string) (int, error) {
 }
 
 // handleJobSignal answers POST .../jobs/{job}/signal: signal the job's
-// process group. 409 when the job is not running. The job record is
-// checked BEFORE the lease resumes (review R5): signalling a finished
-// job must not spend hugepages resuming a suspended lease for nothing.
+// process group. 409 job_not_running when the job is not running. The
+// job record is checked BEFORE the lease resumes (review R5): signalling
+// a finished job must not spend hugepages resuming a suspended lease for
+// nothing.
 func (s *Server) handleJobSignal(w http.ResponseWriter, r *http.Request) {
 	lease := s.jobsTarget(w, r)
 	if lease == nil {
@@ -356,7 +361,7 @@ func (s *Server) handleJobSignal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if row.State != "running" {
-		writeError(w, http.StatusConflict, "job is not running")
+		writeErrorCode(w, http.StatusConflict, "job_not_running", "job is not running")
 		return
 	}
 	// Signalling a running job is work: a suspended lease resumes first,
@@ -369,14 +374,14 @@ func (s *Server) handleJobSignal(w http.ResponseWriter, r *http.Request) {
 		Signal string `json:"signal"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		writeErrorCode(w, http.StatusBadRequest, "bad_request", "invalid JSON body")
 		return
 	}
 	if req.Signal == "" {
 		req.Signal = "TERM"
 	}
 	if req.Signal != "TERM" && req.Signal != "KILL" {
-		writeError(w, http.StatusBadRequest, "signal must be TERM or KILL")
+		writeErrorCode(w, http.StatusBadRequest, "EINVAL", "signal must be TERM or KILL")
 		return
 	}
 	if err := s.svc.signalJob(r.Context(), lease.ID, lease.SandboxID, row, req.Signal); err != nil {
@@ -385,11 +390,14 @@ func (s *Server) handleJobSignal(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if errors.Is(err, substrate.ErrNotFound) {
-			writeError(w, http.StatusConflict, "job is not running")
+			// The wrapper never recorded a pid (or the guest lost it): the
+			// job's process group is unreachable, like a finished job.
+			writeErrorCode(w, http.StatusConflict, "job_not_running", "job is not running")
 			return
 		}
+		// The kill could not be issued, or it ran and failed: 502 EIO.
 		s.svc.log.Printf("jobs: signal %s: %v", row.JobID, err)
-		writeError(w, http.StatusBadGateway, "could not signal job")
+		writeErrorCode(w, http.StatusBadGateway, "EIO", "could not signal job")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"job_id": row.JobID, "signal": req.Signal})

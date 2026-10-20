@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"os"
 	"os/exec"
@@ -514,11 +515,23 @@ func (f *Fake) Exec(ctx context.Context, sandboxID string, req substrate.ExecReq
 // It backs the fake's optional exec runner (EnableExecRunner); secrets
 // and cwd are intentionally out of scope (Exec has no cwd field — spoond
 // passes `cd` in the argv).
+//
+// A request carrying a Timeout runs under GNU timeout when the box has
+// it ("timeout -k 2s <dur> cmd…"): a command the timer ends answers
+// exit 124, the "[spoond] exec timed out" note and TimedOut — the same
+// result shape envd's exec timeout produces, so a test can drive
+// ExecResult.TimedOut through the fake. A command that ends on its own
+// (even with 124 or timeout text in its output) sets no flag.
 func (f *Fake) runExec(req substrate.ExecRequest) (substrate.ExecResult, error) {
 	if len(req.Args) == 0 {
 		return substrate.ExecResult{ExitCode: 1}, nil
 	}
-	cmd := exec.Command(req.Args[0], req.Args[1:]...)
+	args, timed := req.Args, false
+	if req.Timeout > 0 && execTimeoutInstalled() {
+		args = append([]string{"timeout", "-k", "2s", execTimeoutArg(req.Timeout), req.Args[0]}, req.Args[1:]...)
+		timed = true
+	}
+	cmd := exec.Command(args[0], args[1:]...)
 	cmd.Env = os.Environ()
 	for k, v := range req.Env {
 		cmd.Env = append(cmd.Env, k+"="+v)
@@ -534,7 +547,51 @@ func (f *Fake) runExec(req substrate.ExecRequest) (substrate.ExecResult, error) 
 			return substrate.ExecResult{}, err
 		}
 	}
+	// The timer ended the command: timeout's 124 (or a "Killed" after the
+	// -k grace) on a command we wrapped is the substrate's end, not the
+	// command's own, so it is marked and answered with the same note and
+	// exit shape envd's timer produces.
+	if timed && timedOutByTimeout(exitCode, stderr.String()) {
+		return substrate.ExecResult{
+			Stdout:   stdout.String(),
+			Stderr:   stderr.String() + fmt.Sprintf("\n[spoond] exec timed out after %ds\n", int(math.Ceil(req.Timeout.Seconds()))),
+			ExitCode: 124,
+			TimedOut: true,
+		}, nil
+	}
 	return substrate.ExecResult{Stdout: stdout.String(), Stderr: stderr.String(), ExitCode: exitCode}, nil
+}
+
+// execTimeoutArg formats a Go duration for GNU timeout, which accepts
+// integers (seconds) and their suffixed forms but not sub-second units:
+// the ceiling, 1 s minimum, so a shorter test timeout still cuts in.
+func execTimeoutArg(d time.Duration) string {
+	if d < time.Second {
+		d = time.Second
+	}
+	secs := int64(d / time.Second)
+	if d%time.Second != 0 {
+		secs++
+	}
+	return strconv.FormatInt(secs, 10) + "s"
+}
+
+// timedOutByTimeout reads a timeout-wrapped run's outcome: exit 124 is
+// timeout's own code for a command it killed at the duration (a command
+// that exits 124 itself is indistinguishable at this layer and is
+// accepted as the timeout answer, like envd's); the post-grace kill
+// is timeout's own 137 (it sends KILL after the grace and exits 128+9).
+// The command's stderr is never read: a command printing "killed" is
+// not a timeout.
+func timedOutByTimeout(exitCode int, _ string) bool {
+	return exitCode == 124 || exitCode == 137
+}
+
+// execTimeoutInstalled reports whether GNU timeout is on PATH, so the
+// exec runner can honor a Timeout.
+func execTimeoutInstalled() bool {
+	_, err := exec.LookPath("timeout")
+	return err == nil
 }
 
 func (f *Fake) Start(ctx context.Context, sandboxID string, req substrate.StartRequest) (substrate.Process, error) {
@@ -1065,7 +1122,7 @@ func (m *memFS) write(name string, data []byte, mode os.FileMode) error {
 		return fmt.Errorf("%w: %s is a directory path", substrate.ErrInvalidOp, name)
 	}
 	if _, ok := m.dirs[name]; ok {
-		return fmt.Errorf("%w: %s is a directory", substrate.ErrInvalidOp, name)
+		return fmt.Errorf("%w: %s is a directory", substrate.ErrIsDir, name)
 	}
 	if mode == 0 {
 		mode = 0o644
@@ -1080,7 +1137,7 @@ func (m *memFS) write(name string, data []byte, mode os.FileMode) error {
 func (m *memFS) read(name string, max int64) ([]byte, error) {
 	name = cleanPath(name)
 	if _, ok := m.dirs[name]; ok {
-		return nil, fmt.Errorf("%w: %s is a directory", substrate.ErrInvalidOp, name)
+		return nil, fmt.Errorf("%w: %s is a directory", substrate.ErrIsDir, name)
 	}
 	f, ok := m.files[name]
 	if !ok {
@@ -1171,7 +1228,7 @@ func (m *memFS) rename(oldName, newName string) error {
 		return fmt.Errorf("%w: %s", substrate.ErrNotFound, oldName)
 	}
 	if _, ok := m.dirs[newName]; ok {
-		return fmt.Errorf("%w: %s is a directory", substrate.ErrInvalidOp, newName)
+		return fmt.Errorf("%w: %s is a directory", substrate.ErrIsDir, newName)
 	}
 	if err := m.mkdirAll(path.Dir(newName), 0o755); err != nil {
 		return err

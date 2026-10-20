@@ -2,10 +2,12 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -339,5 +341,47 @@ func TestMarkResumeFailedEmitsOnlyOnReasonChange(t *testing.T) {
 	}
 	if journal != 1 {
 		t.Fatalf("resume_failed suspend journal lines = %d, want 1:\n%s", journal, buf.String())
+	}
+}
+
+// TestWriteResumeRefusalCodes pins the machine-readable code on every
+// resume-refusal branch: the files, exec, stream and jobs routes answer
+// their resume-on-use refusals through writeResumeRefusal, so each must
+// carry a code beside its message (spoond-wir9). Statuses are unchanged.
+func TestWriteResumeRefusalCodes(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want int
+		code string
+	}{
+		{name: "not persistent -> bad_request", err: errNotPersistent, want: http.StatusBadRequest, code: "bad_request"},
+		{name: "busy -> lease_busy", err: errLeaseBusy, want: http.StatusConflict, code: "lease_busy"},
+		{name: "released -> not_found", err: errLeaseReleased, want: http.StatusNotFound, code: "not_found"},
+		{name: "capacity -> capacity_wait", err: substrate.ErrCapacity, want: http.StatusServiceUnavailable, code: "capacity_wait"},
+		{name: "draining -> capacity_wait", err: errDraining, want: http.StatusServiceUnavailable, code: "capacity_wait"},
+		{name: "substrate unavailable -> substrate_unavailable", err: substrate.ErrUnavailable, want: http.StatusServiceUnavailable, code: "substrate_unavailable"},
+		{name: "owner gone -> owner_deleted", err: errOwnerGone, want: http.StatusForbidden, code: "owner_deleted"},
+		{name: "unexpected failure -> internal", err: errors.New("boom"), want: http.StatusInternalServerError, code: "internal"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			writeResumeRefusal(rec, log.New(io.Discard, "", 0), "lease-1", tc.err)
+			if rec.Code != tc.want {
+				t.Fatalf("status = %d, want %d: %s", rec.Code, tc.want, rec.Body.String())
+			}
+			var body map[string]any
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatalf("body %q: %v", rec.Body.String(), err)
+			}
+			if got, _ := body["code"].(string); got != tc.code {
+				t.Fatalf("code = %q, want %q (body %v)", got, tc.code, body)
+			}
+			if msg, _ := body["error"].(string); msg == "" {
+				t.Fatalf("body %v carries no error message", body)
+			}
+		})
 	}
 }

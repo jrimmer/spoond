@@ -118,7 +118,7 @@ func (s *Server) handleGuestDial(w http.ResponseWriter, r *http.Request) {
 	// Per-owner concurrent cap (429), counted like the exec/stream cap.
 	if !s.acquireDial(owner) {
 		s.metrics.GuestDialsTotal.WithLabelValues("refused").Inc()
-		writeError(w, http.StatusTooManyRequests,
+		writeErrorCode(w, http.StatusTooManyRequests, "too_busy",
 			"too many concurrent dials; try again shortly")
 		return
 	}

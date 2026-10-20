@@ -1073,20 +1073,20 @@ func logInvalidMaxExecBodyBytes() {
 func init() { logInvalidMaxExecBodyBytes() }
 
 // readExecBody reads a request body under maxExecBodyBytes, answering a
-// JSON 413 when the cap trips and a JSON 400 for any other read error.
-// The caller reads the body before ensureRunning so an oversize request
-// cannot resume an idle-suspended lease.
+// JSON 413 EFBIG when the cap trips and a JSON 400 EIO for any other read
+// error. The caller reads the body before ensureRunning so an oversize
+// request cannot resume an idle-suspended lease.
 func readExecBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxExecBodyBytes)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		var mbe *http.MaxBytesError
 		if errors.As(err, &mbe) {
-			writeError(w, http.StatusRequestEntityTooLarge,
-				fmt.Sprintf("request body exceeds the %d byte limit", maxExecBodyBytes))
+			writeErrorCode(w, http.StatusRequestEntityTooLarge,
+				"EFBIG", fmt.Sprintf("request body exceeds the %d byte limit", maxExecBodyBytes))
 			return nil, false
 		}
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		writeErrorCode(w, http.StatusBadRequest, "EIO", "invalid JSON body")
 		return nil, false
 	}
 	return body, true
@@ -1578,6 +1578,22 @@ func (s *Server) handleEndpoint(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// writeStreamError sends the stream's error frame with a stable code
+// beside the message: {"error": msg, "code": code}. The codes are the
+// same ones the HTTP refusals carry (the code is read from the same
+// table), so a client treats a bad first frame and a failed start the
+// same way on both transports.
+func writeStreamError(ws *websocket.Conn, code, msg string) {
+	line, err := json.Marshal(struct {
+		Error string `json:"error"`
+		Code  string `json:"code"`
+	}{msg, code})
+	if err != nil {
+		return
+	}
+	_ = ws.WriteMessage(websocket.TextMessage, line)
+}
+
 // handleStream opens a WebSocket to a sandbox and relays an interactive
 // PTY session: the client sends {"args":[...],"cwd":...,"binary":bool}
 // as the first message. In text mode (the default), server events come
@@ -1592,7 +1608,11 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	// Per-owner activity cap (security review #37 rescan F9).
 	if !s.acquireBusy(owner) {
-		http.Error(w, "too many concurrent exec/stream operations; try again shortly", http.StatusTooManyRequests)
+		// The WebSocket upgrade has not happened yet, so this is a plain
+		// HTTP answer: the JSON error shape with the code beside the
+		// message, like every other refusal (http.Error's text/plain body
+		// had no code).
+		writeErrorCode(w, http.StatusTooManyRequests, "too_busy", "too many concurrent exec/stream operations; try again shortly")
 		return
 	}
 	defer s.releaseBusy(owner)
@@ -1604,7 +1624,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		lease = s.svc.lookupWithShare(owner, id, ShareSSH)
 	}
 	if lease == nil {
-		writeError(w, http.StatusNotFound, "lease not found")
+		writeErrorCode(w, http.StatusNotFound, "not_found", "lease not found")
 		return
 	}
 	s.svc.touch(id) // stream attach is activity for the idle sweeper
@@ -1640,7 +1660,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if mt != websocket.TextMessage {
-		ws.WriteMessage(websocket.TextMessage, []byte(`{"error":"first message must be JSON text"}`))
+		writeStreamError(ws, "EINVAL", "first message must be JSON text")
 		return
 	}
 	var req struct {
@@ -1653,11 +1673,11 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		Rows   uint32            `json:"rows"`
 	}
 	if err := json.Unmarshal(payload, &req); err != nil {
-		ws.WriteMessage(websocket.TextMessage, []byte(`{"error":"bad request JSON"}`))
+		writeStreamError(ws, "EINVAL", "bad request JSON")
 		return
 	}
 	if len(req.Args) == 0 {
-		ws.WriteMessage(websocket.TextMessage, []byte(`{"error":"args required"}`))
+		writeStreamError(ws, "EINVAL", "args required")
 		return
 	}
 	pty := true
@@ -1691,7 +1711,10 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		Stdin: true,
 	})
 	if err != nil {
-		ws.WriteMessage(websocket.TextMessage, []byte(`{"error":"agent unreachable: `+err.Error()+`"}`))
+		// The command could not even be started: the same code a
+		// background job's failed start answers with, on the frame the
+		// stream's protocol already had.
+		writeStreamError(ws, "spawn_error", "agent unreachable: "+err.Error())
 		return
 	}
 	s.svc.log.Printf("stream: %s: start", lease.ID)
@@ -1753,9 +1776,16 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 				_ = ws.WriteMessage(websocket.TextMessage, line)
 				return
 			case substrate.EventError:
+				// A process that errored after it started: the same frame
+				// shape as every error on this route, so a client can read
+				// all of one route's errors the same way. There is no
+				// refusal-style code for an in-flight failure (the codes the
+				// start frames carry name refusals), so the code is the
+				// transport class.
 				line, err := json.Marshal(struct {
 					Error string `json:"error"`
-				}{ev.Err})
+					Code  string `json:"code"`
+				}{ev.Err, "EIO"})
 				if err != nil {
 					return
 				}
@@ -2343,14 +2373,14 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	// Per-owner activity cap (security review #37 rescan F9).
 	if !s.acquireBusy(owner) {
-		writeError(w, http.StatusTooManyRequests, "too many concurrent exec/stream operations; try again shortly")
+		writeErrorCode(w, http.StatusTooManyRequests, "too_busy", "too many concurrent exec/stream operations; try again shortly")
 		return
 	}
 	defer s.releaseBusy(owner)
 	// Shared leases are executable over the API (T6/#33).
 	lease := s.svc.lookupWithShare(owner, id, ShareHTTP)
 	if lease == nil {
-		writeError(w, http.StatusNotFound, "lease not found")
+		writeErrorCode(w, http.StatusNotFound, "not_found", "lease not found")
 		return
 	}
 	// Bound and read the body before the lease is resumed and before
@@ -2404,36 +2434,36 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		Secrets map[string]string `json:"secrets"`
 	}
 	if err := json.NewDecoder(bytes.NewReader(body)).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		writeErrorCode(w, http.StatusBadRequest, "bad_request", "invalid JSON body")
 		return
 	}
 	if req.Cmd == "" {
-		writeError(w, http.StatusBadRequest, "cmd is required")
+		writeErrorCode(w, http.StatusBadRequest, "bad_request", "cmd is required")
 		return
 	}
 	// max_runtime_secs only applies to a background job, but a negative
 	// value is rejected for both, so a client that sends it cannot believe
 	// it shortened a synchronous exec's timeout (spoond-wb5 NIT).
 	if req.MaxRuntimeSecs < 0 {
-		writeError(w, http.StatusBadRequest, "max_runtime_secs must be non-negative")
+		writeErrorCode(w, http.StatusBadRequest, "bad_request", "max_runtime_secs must be non-negative")
 		return
 	}
 	// retention_secs likewise only applies to a background job, but a
 	// negative value is rejected for both for the same reason (spoond-hwto).
 	if req.RetentionSecs < 0 {
-		writeError(w, http.StatusBadRequest, "retention_secs must be non-negative")
+		writeErrorCode(w, http.StatusBadRequest, "bad_request", "retention_secs must be non-negative")
 		return
 	}
 	// output_max_bytes follows its siblings (spoond-hwto): a negative
 	// value is refused even on a synchronous exec so a client cannot
 	// believe it capped anything.
 	if req.OutputMaxBytes < 0 {
-		writeError(w, http.StatusBadRequest, "output_max_bytes must be non-negative")
+		writeErrorCode(w, http.StatusBadRequest, "bad_request", "output_max_bytes must be non-negative")
 		return
 	}
 	execSecrets, err := validateSecrets(req.Secrets)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeErrorCode(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
 	if req.Background {
@@ -2457,7 +2487,7 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		// files.
 		if !s.svc.secretsGate.beginStaging(lease.ID) {
 			w.Header().Set("Retry-After", "5")
-			writeJSON(w, http.StatusConflict, map[string]string{"error": "a named snapshot save is in progress; retry", "code": "lease_busy"})
+			writeErrorCode(w, http.StatusConflict, "lease_busy", "a named snapshot save is in progress; retry")
 			return
 		}
 		defer s.svc.secretsGate.endStaging(lease.ID)
@@ -2476,7 +2506,7 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		if err := s.svc.stageSecrets(r.Context(), lease.SandboxID, execSecrets); err != nil {
 			// The error names a secret file name at most, never a value.
 			s.svc.log.Printf("exec: stage secrets %s: %v", lease.SandboxID, err)
-			writeError(w, http.StatusInternalServerError, "failed to stage secrets")
+			writeErrorCode(w, http.StatusInternalServerError, "internal", "failed to stage secrets")
 			return
 		}
 	}
@@ -2499,7 +2529,11 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		if s.writeSandboxOpErrorFor(w, lease, "exec", err) {
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "exec failed")
+		// Any other failure is the exec's transport: the agent was
+		// unreachable, refused the start, or its stream broke mid-run.
+		// The substrate cannot tell those apart here, so the code is
+		// EIO, not spawn_error (which promises the command never ran).
+		writeErrorCode(w, http.StatusInternalServerError, "EIO", "exec failed")
 		return
 	}
 	// A successful exec proves the guest is alive this instant; the
@@ -2512,30 +2546,40 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	} else {
 		s.svc.recordRootfsAlive(lease.ID)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"stdout": res.Stdout,
 		"stderr": res.Stderr,
 		"exit":   res.ExitCode,
-	})
+	}
+	// A command the substrate ended at its time limit (TimedOut: the
+	// e2b backend's kill at the exec's own timer, exit 124 and the
+	// "[spoond] exec timed out" note) carries code timeout, so a client
+	// learns the cap, not the command, ended it without matching the
+	// note's text or the 124 (a command may produce both itself). The
+	// key is present only then.
+	if res.TimedOut {
+		resp["code"] = "timeout"
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // writeSandboxGone answers a substrate not-found for a lease the store
 // still holds. While a lifecycle operation is in flight on the lease (the
 // periodic checkpoint, a suspend, a restart) the orchestrator reports the
 // sandbox missing for the length of the snapshot, which can be minutes
-// for a large guest: that is 409 with Retry-After, not 410. Clients treat
-// 410 as the lease being gone for good and abandon its work. Only a
-// lease with nothing in flight gets 410.
+// for a large guest: that is 409 lease_busy with Retry-After, not 410.
+// Clients treat 410 as the lease being gone for good and abandon its
+// work. Only a lease with nothing in flight gets 410 lease_lost.
 func (s *Server) writeSandboxGone(w http.ResponseWriter, l *Lease) {
 	s.svc.store.mu.Lock()
 	busy := l.busy
 	s.svc.store.mu.Unlock()
 	if busy {
 		w.Header().Set("Retry-After", "5")
-		writeError(w, http.StatusConflict, "lease is busy (a checkpoint or another lifecycle operation is in progress); retry shortly")
+		writeErrorCode(w, http.StatusConflict, "lease_busy", "lease is busy (a checkpoint or another lifecycle operation is in progress); retry shortly")
 		return
 	}
-	writeError(w, http.StatusGone, "lease no longer exists")
+	writeErrorCode(w, http.StatusGone, "lease_lost", "lease no longer exists")
 }
 
 // substrateUnknownStatusCode is the status a substrate operation answers
