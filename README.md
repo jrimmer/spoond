@@ -41,7 +41,10 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
   Leases and the image catalog persist in SQLite, so a backend restart
   loses nothing. On every lease:
   - **Files**: `/api/leases/{id}/files/{path}` puts, gets, stats, makes
-    and removes files in the guest, up to 256 MiB per file. `GET
+    and removes files in the guest, up to 256 MiB per file, and lists a
+    directory with `?list=1` — a bounded, gitignore-aware walk (depth
+    first, 50000 entries / 4 MiB of entries / 10 s by default, ignored
+    directories pruned without being walked). `GET
     …/files/{dir}?watch=1&recursive=true|false` streams the directory's
     changes as Server-Sent Events: one `ready` event, then `change`
     events (paths coalesced within 100 ms), and finally one terminal

@@ -220,6 +220,27 @@ type FileInfo struct {
 	IsDir   bool
 }
 
+// DirEntry is one entry of Substrate.ListDir: a file ("f"), a directory
+// ("d") or a symlink ("l"), named relative to the listed path.
+type DirEntry struct {
+	Name string
+	Kind string
+}
+
+// DirEntry kinds.
+const (
+	DirFile      = "f"
+	DirDirectory = "d"
+	DirSymlink   = "l"
+)
+
+// PathEntry is one entry of a directory walk: kind ("f", "d", "l")
+// and path relative to the listed directory.
+type PathEntry struct {
+	Path string
+	Kind string
+}
+
 // Process is an interactive guest process. Events is closed after EventExit or EventError.
 type Process interface {
 	Events() <-chan ProcessEvent
@@ -258,6 +279,11 @@ type Substrate interface {
 	ReadFile(ctx context.Context, sandboxID, path string, max int64) ([]byte, error)
 	// Stat returns a path's metadata. ErrNotFound when it does not exist.
 	Stat(ctx context.Context, sandboxID, path string) (FileInfo, error)
+	// ListDir returns the direct children of path: files, directories and
+	// symlinks, each with its kind, in their natural (byte) order. A
+	// missing path wraps ErrNotFound; a path that is not a directory wraps
+	// ErrNotDir. ErrNotFound when the sandbox is unknown.
+	ListDir(ctx context.Context, sandboxID, path string) ([]DirEntry, error)
 	// MakeDir creates path and any missing parents. ErrNotFound when the
 	// sandbox is unknown.
 	MakeDir(ctx context.Context, sandboxID, path string, mode os.FileMode) error

@@ -974,6 +974,29 @@ func (f *Fake) Stat(ctx context.Context, sandboxID, name string) (substrate.File
 	return fs.stat(name)
 }
 
+// ListDir returns the direct children of name (their names and kinds,
+// sorted in byte order). A missing path wraps ErrNotFound; a path that is
+// not a directory wraps ErrNotDir, matching the real substrate so the
+// files API can answer 404 and 409 the same way.
+func (f *Fake) ListDir(ctx context.Context, sandboxID, name string) ([]substrate.DirEntry, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.record("ListDir", sandboxID); err != nil {
+		return nil, err
+	}
+	if host, ok := f.hostFilePathLocked(name); ok {
+		if _, exists := f.sandboxes[sandboxID]; !exists {
+			return nil, fmt.Errorf("fake: ListDir %s %s: %w", sandboxID, name, substrate.ErrNotFound)
+		}
+		return fakeListHost(host)
+	}
+	fs := f.fileFS(sandboxID)
+	if fs == nil {
+		return nil, fmt.Errorf("fake: ListDir %s %s: %w", sandboxID, name, substrate.ErrNotFound)
+	}
+	return fs.listDir(name)
+}
+
 func (f *Fake) MakeDir(ctx context.Context, sandboxID, name string, mode os.FileMode) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -1031,6 +1054,23 @@ func (f *Fake) PunchHoleCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.punchCalls
+}
+
+// WriteSymlink creates a symlink at name pointing at target (the fake
+// only: tests build symlink trees without a guest), parents created. A
+// missing sandbox wraps ErrNotFound; an existing node at name or a file
+// in the way is ErrExist / ErrNotDir like the other writes.
+func (f *Fake) WriteSymlink(ctx context.Context, sandboxID, target, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.record("WriteSymlink", sandboxID); err != nil {
+		return err
+	}
+	fs := f.fileFS(sandboxID)
+	if fs == nil {
+		return fmt.Errorf("fake: WriteSymlink %s %s: %w", sandboxID, name, substrate.ErrNotFound)
+	}
+	return fs.symlink(target, name)
 }
 
 func (f *Fake) Remove(ctx context.Context, sandboxID, name string, recursive bool) error {
@@ -1127,6 +1167,10 @@ func (f *Fake) Rename(ctx context.Context, sandboxID, oldPath, newPath string) e
 type memFS struct {
 	dirs  map[string]os.FileMode // "" is the root, always present
 	files map[string]memFile
+	// symlinks names a guest symlink form: path -> target string. It
+	// rides the fake so tests can pin the walk's symlink handling (a
+	// listed link is named, never followed).
+	symlinks map[string]string
 }
 
 type memFile struct {
@@ -1137,8 +1181,9 @@ type memFile struct {
 
 func newMemFS() *memFS {
 	return &memFS{
-		dirs:  map[string]os.FileMode{"": 0o755 | os.ModeDir},
-		files: map[string]memFile{},
+		dirs:     map[string]os.FileMode{"": 0o755 | os.ModeDir},
+		files:    map[string]memFile{},
+		symlinks: map[string]string{},
 	}
 }
 
@@ -1201,6 +1246,9 @@ func (m *memFS) read(name string, max int64) ([]byte, error) {
 	if _, ok := m.dirs[name]; ok {
 		return nil, fmt.Errorf("%w: %s is a directory", substrate.ErrIsDir, name)
 	}
+	if _, ok := m.symlinks[name]; ok {
+		return nil, fmt.Errorf("%w: %s is a symlink", substrate.ErrInvalidOp, name)
+	}
 	f, ok := m.files[name]
 	if !ok {
 		return nil, fmt.Errorf("%w: %s", substrate.ErrNotFound, name)
@@ -1220,6 +1268,9 @@ func (m *memFS) stat(name string) (substrate.FileInfo, error) {
 			IsDir:   true,
 			ModTime: time.Time{},
 		}, nil
+	}
+	if _, ok := m.symlinks[name]; ok {
+		return substrate.FileInfo{}, fmt.Errorf("%w: %s is a symlink", substrate.ErrInvalidOp, name)
 	}
 	if f, ok := m.files[name]; ok {
 		return substrate.FileInfo{
@@ -1278,7 +1329,74 @@ func (m *memFS) mkdir(name string, mode os.FileMode) error {
 	if _, ok := m.files[name]; ok {
 		return fmt.Errorf("%w: %s", substrate.ErrExist, name)
 	}
+	if _, ok := m.symlinks[name]; ok {
+		return fmt.Errorf("%w: %s", substrate.ErrExist, name)
+	}
 	return m.mkdirAll(name, mode)
+}
+
+// symlink records name as a symlink to target, parents created. An
+// existing node at name is ErrExist; a file in the way is ErrNotDir.
+func (m *memFS) symlink(target, name string) error {
+	name = cleanPath(name)
+	if name == "" {
+		return fmt.Errorf("%w: %s is a directory path", substrate.ErrInvalidOp, name)
+	}
+	if _, ok := m.dirs[name]; ok {
+		return fmt.Errorf("%w: %s is a directory", substrate.ErrInvalidOp, name)
+	}
+	if _, ok := m.files[name]; ok {
+		return fmt.Errorf("%w: %s", substrate.ErrExist, name)
+	}
+	if _, ok := m.symlinks[name]; ok {
+		return fmt.Errorf("%w: %s", substrate.ErrExist, name)
+	}
+	if err := m.mkdirAll(path.Dir(name), 0o755); err != nil {
+		return err
+	}
+	m.symlinks[name] = target
+	return nil
+}
+
+// listDir names the direct children of name (the map's key form; "" is the
+// root) with their kind, sorted in byte order. A missing path wraps
+// ErrNotFound; a file in its place wraps ErrNotDir.
+func (m *memFS) listDir(name string) ([]substrate.DirEntry, error) {
+	name = cleanPath(name)
+	if _, ok := m.files[name]; ok {
+		return nil, fmt.Errorf("%w: %s is not a directory", substrate.ErrNotDir, name)
+	}
+	if name != "" {
+		if _, ok := m.dirs[name]; !ok {
+			return nil, fmt.Errorf("%w: %s", substrate.ErrNotFound, name)
+		}
+	}
+	prefix := ""
+	if name != "" {
+		prefix = name + "/"
+	}
+	seen := map[string]string{}
+	for p := range m.dirs {
+		if strings.HasPrefix(p, prefix) && !strings.Contains(strings.TrimPrefix(p, prefix), "/") {
+			seen[strings.TrimPrefix(p, prefix)] = substrate.DirDirectory
+		}
+	}
+	for p := range m.files {
+		if strings.HasPrefix(p, prefix) && !strings.Contains(strings.TrimPrefix(p, prefix), "/") {
+			seen[strings.TrimPrefix(p, prefix)] = substrate.DirFile
+		}
+	}
+	for p := range m.symlinks {
+		if strings.HasPrefix(p, prefix) && !strings.Contains(strings.TrimPrefix(p, prefix), "/") {
+			seen[strings.TrimPrefix(p, prefix)] = substrate.DirSymlink
+		}
+	}
+	out := make([]substrate.DirEntry, 0, len(seen))
+	for n, kind := range seen {
+		out = append(out, substrate.DirEntry{Name: n, Kind: kind})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
 }
 
 // rename moves oldName to newName, replacing newName. Only files are
@@ -1309,6 +1427,10 @@ func (m *memFS) remove(name string, recursive bool) error {
 		delete(m.files, name)
 		return nil
 	}
+	if _, ok := m.symlinks[name]; ok {
+		delete(m.symlinks, name)
+		return nil
+	}
 	if _, ok := m.dirs[name]; !ok {
 		return fmt.Errorf("%w: %s", substrate.ErrNotFound, name)
 	}
@@ -1331,6 +1453,36 @@ func (m *memFS) remove(name string, recursive bool) error {
 	}
 	delete(m.dirs, name)
 	return nil
+}
+
+// fakeListHost lists a host directory the way fs.listDir lists the
+// in-memory one: names and kinds of files, directories and symlinks,
+// sorted; a missing path wraps ErrNotFound, an unreadable-but-present
+// one ErrPermission, other kinds are left out.
+func fakeListHost(host string) ([]substrate.DirEntry, error) {
+	infos, err := os.ReadDir(host)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("%w: %s", substrate.ErrNotFound, host)
+		}
+		if os.IsPermission(err) {
+			return nil, fmt.Errorf("%w: %s", substrate.ErrPermission, host)
+		}
+		return nil, err
+	}
+	out := make([]substrate.DirEntry, 0, len(infos))
+	for _, e := range infos {
+		switch {
+		case e.IsDir():
+			out = append(out, substrate.DirEntry{Name: e.Name(), Kind: substrate.DirDirectory})
+		case e.Type()&os.ModeSymlink != 0:
+			out = append(out, substrate.DirEntry{Name: e.Name(), Kind: substrate.DirSymlink})
+		case e.Type().IsRegular():
+			out = append(out, substrate.DirEntry{Name: e.Name(), Kind: substrate.DirFile})
+			// Other kinds (sockets, devices, fifos) are left out.
+		}
+	}
+	return out, nil
 }
 
 // FakeProcess is the substrate.Process returned by Fake.Start.

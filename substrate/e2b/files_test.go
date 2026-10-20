@@ -58,6 +58,11 @@ type filesTestEnvd struct {
 	execStderr    string                // that exec's stderr
 	hangExec      bool                  // execs never exit: the client's timer must kill them
 	execEnvs      []map[string]string   // process env of each Start, in order
+
+	listEntries []*filesystem.EntryInfo     // returned by ListDir
+	listErr     connect.Code                // nonzero: ListDir fails with it
+	listMsg     string                      // the ListDir error's message ("" = "list failed")
+	listReqs    []filesystem.ListDirRequest // filesystem.ListDir requests
 }
 
 type uploadRecord struct {
@@ -193,6 +198,18 @@ func (h *fsHandler) Stat(ctx context.Context, r *connect.Request[filesystem.Stat
 		return nil, connect.NewError(connect.CodeNotFound, errors.New("no such file or directory"))
 	}
 	return connect.NewResponse(&filesystem.StatResponse{Entry: h.e.statEntry}), nil
+}
+
+func (h *fsHandler) ListDir(ctx context.Context, r *connect.Request[filesystem.ListDirRequest]) (*connect.Response[filesystem.ListDirResponse], error) {
+	h.e.listReqs = append(h.e.listReqs, filesystem.ListDirRequest{Path: r.Msg.Path, Depth: r.Msg.Depth})
+	if h.e.listErr != 0 {
+		msg := h.e.listMsg
+		if msg == "" {
+			msg = "list failed"
+		}
+		return nil, connect.NewError(h.e.listErr, errors.New(msg))
+	}
+	return connect.NewResponse(&filesystem.ListDirResponse{Entries: h.e.listEntries}), nil
 }
 
 func (h *fsHandler) MakeDir(ctx context.Context, r *connect.Request[filesystem.MakeDirRequest]) (*connect.Response[filesystem.MakeDirResponse], error) {
