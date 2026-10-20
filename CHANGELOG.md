@@ -10,6 +10,160 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+## [3.11.0] - 2026-10-19
+
+### Added
+
+- **Ranged reads on `GET /api/leases/{id}/files/{path…}` (spoond-kb8l).**
+  A single standard `Range` header (`bytes=a-b`, `bytes=a-`,
+  `bytes=-n`) is answered `206` with `Content-Range`, reading only the
+  requested bytes through the substrate's range read, so a caller can
+  page through a file without downloading it. A range past the end is
+  `416`; every answer carries `Accept-Ranges: bytes`. Without a `Range`
+  header the route is unchanged, and a multi-range request is served as
+  the whole file (`200`), as HTTP allows. A range of a file larger than
+  the 256 MiB whole-file cap is still readable.
+
+- **Per-job retention and an output cap for background jobs
+  (spoond-hwto).** Three pieces on the background-exec surface:
+  - `DELETE /api/leases/{id}/jobs/{job}` removes a finished job's record
+    and its guest job directory, owner-checked (the lease's exec rules;
+    also an `http` share granted exec) and admins. `204` on success,
+    `409` while the job is still running (clean up by signalling it
+    first), `404` when the job is not on this lease. Running jobs are
+    never deleted behind the poller's back.
+  - The exec request gains `retention_secs`: how long this job's record
+    and guest files are kept after it finishes, in seconds. It shortens
+    the host's `JOB_RETENTION_SECS` (default 7 days), never lengthens
+    it, mirroring `max_runtime_secs`; the job record and the
+    capabilities doc name the effective window (`retention_secs`).
+  - The exec request gains `output_max_bytes` and reads of a job's
+    output gain the same idea host side (`JOB_OUTPUT_MAX_BYTES`, default
+    unlimited): once a job's stdout or stderr guest file grows past the
+    cap, the job poller punches the file's front out with
+    `fallocate --punch-hole` in the guest (block-aligned, the file's
+    size and later offsets unchanged) and only the tail is kept — a
+    chatty job can no longer fill the disk between polls. A request may
+    shorten the host cap, never lengthen it. A dropped front is
+    reported as `"skipped": {"bytes": N, "newlines": M,
+    "ends_with_newline": B}`: per stream in
+    the job record and `stdout_skipped`/`stderr_skipped` beside the
+    record view's outputs (plus a `stdout_offset`/`stderr_offset`
+    naming the first kept byte), and as `X-Output-Skipped` and
+    `X-Output-Offset` headers on the raw output endpoint.
+    `ends_with_newline` says whether the dropped front's own last byte
+    was a `\n` — the front is punched at a block boundary, so the kept
+    tail often starts mid-line — and describes the latest drop, like
+    the counters; reads
+    (`?offset=`) keep absolute offsets — a read into the dropped front
+    returns the first kept bytes rather than an error. The counters only
+    ever rise, a substrate without hole-punching leaves streams
+    untruncated (nothing is reported dropped), and an exited job's
+    streams are never capped. The per-job request fields and the host
+    default are documented by effect in the README and `docs/api.md`.
+- **Bounded directory listing (`?list=1`, spoond-bvmc).** `GET
+  /api/leases/{id}/files/{path…}?list=1` lists the tree below the path:
+  files, directories and symlinks (never followed), depth first with
+  siblings in byte order, paths relative to the requested directory.
+  `.git` is always skipped with everything below it; inside a git work
+  tree, what `.gitignore` files (of the path, its subdirectories and
+  parents up to the work-tree root) and `.git/info/exclude` ignore is
+  left out and ignored directories are pruned without being walked
+  (`node_modules` never lists). Bounds: `hidden` (default `1`),
+  `gitignore` (default `1`), `exclude` (comma-separated names to skip
+  with everything below), `max_entries` (default `50000`),
+  `max_bytes` (default 4 MiB of response entries) and `timeout_ms`
+  (default 10000); the walk stops at the first entry past the first
+  bound it meets and answers `"truncated": true` with what fit. A
+  missing path answers `404` with `code: ENOENT`, a file `409` with
+  `code: ENOTDIR`.
+
+- **Stable error codes on the files, exec and jobs routes
+  (spoond-wir9).** Every error those routes answer now carries a stable,
+  machine-readable `code` beside the free-form `error` message — files
+  (`ENOENT`, `ENOTDIR`, `EISDIR`, `EEXIST`, `ENOTEMPTY`, `EACCES`,
+  `EFBIG`, `EINVAL`, `EIO`), exec and its stream (`bad_request`,
+  `too_busy`, `spawn_error` for a stream or job that never started,
+  `EIO` for a transport failure, `timeout` beside the timed-out exec's
+  200, `not_found`,
+  `lease_busy`, `lease_lost`, `substrate_unavailable`, `internal`), and
+  background jobs (`too_many_jobs`, `job_not_found`, `job_not_running`,
+  plus the same shapes). The stream's WebSocket error frames — pre-start
+  and in-flight — carry the codes, and the exec's 400 validations gained
+  `bad_request` where they answered no code before. `timeout` rides the
+  substrate's own timeout flag (`ExecResult.TimedOut`, set by the e2b
+  backend's exec timer), so a command that merely prints "timeout" or
+  exits 124 on its own is never mislabelled. Codes are the contract and
+  messages stay diagnostic; README "Error codes" lists the lot. Three
+  e2b file refusals that answered `502` now answer the status their code
+  means: reading a directory `409 EISDIR`, a guest permission refusal
+  `403 EACCES`, and an encoding the guest will not serve `409 EINVAL`.
+  Every other status is unchanged.
+  The guest-port dial route's per-owner cap refusal carries the same
+  `too_busy` code the other exec/stream-family caps answer with.
+  The resume-on-use refusals the files, exec, stream and jobs routes
+  share (through `writeResumeRefusal`) carry codes too: `bad_request`
+  for a non-persistent lease, `lease_busy`, `not_found` for a released
+  one, `capacity_wait`, `substrate_unavailable`, `owner_deleted` for a
+  removed owner's identity and `internal` for an unexpected failure.
+  `owner_deleted` is new: the lifecycle routes' own `403 owner deleted`
+  keep answering no code.
+  The e2b backend's exec now sets `TimedOut` only for its own time
+  limit (a context deadline); a client hang-up cancel returns the error
+  without the flag — no route answer changes (the error path discards
+  the result), but the flag now matches its documented contract.
+
+- **File watch over Server-Sent Events (spoond-j87e).** `GET
+  /api/leases/{id}/files/{dir}?watch=1&recursive=true|false` streams a
+  watched directory's guest-side changes: one `ready` event once the
+  watch is live, `change` events whose `paths` are each coalescing
+  window's (100 ms) deduplicated, sorted set, and finally one terminal
+  `error` event — `lease_suspended`, `lease_lost` or `lease_gone` (or
+  `watch_ended` for any other end, such as a transport drop) — when the
+  lease suspends, is lost or is released, after which the stream ends.
+  The watch rides the files model (owner or admin): a missing
+  path answers `404`, a path that is a file `409`, a full exec/stream
+  pool `429`, and opening it resumes a suspended lease like the other
+  file routes. It holds an exec/stream slot for its lifetime but is not
+  activity: an idle lease with an open watch still suspends on schedule,
+  and the suspension ends the watch with `lease_suspended`. Backed by a
+  new `substrate.Watch` over envd's `filesystem.WatchDir`.
+
+- **`node-base` image.** Node.js 24 LTS (node, npm, npx, corepack) on the
+  dev-base environment, beside `go-base` and `py-base`. Sandboxes have no
+  network, so `npm install` needs a warm npm cache, for example in a named
+  snapshot made from this image.
+
+- **Per-identity exec/stream and guest-dial caps.** The per-owner caps
+  on concurrent exec/stream operations and open guest-port dials are
+  settings now: `EXEC_CONCURRENCY_MAX` (default 8) and `GUEST_DIAL_MAX`
+  (default 16). An admin can raise or lower either for one identity with
+  `POST /api/users/{id}/quota` (`{"exec_concurrency": N, "guest_dial":
+  N}`, 0 clears), so an agent client that holds one stream per working
+  thread can run more of them at once without raising the cap for
+  everyone.
+
+### Changed
+
+- **The memory-floor loop checks every second (spoond-154).** Running
+  VMs fault memory back in at any moment, and free hugepages fell from
+  8.4 GiB to 0.1 GiB in under 15 s on a busy host — faster than the
+  former 15 s check. `MEMORY_FLOOR_MIB`'s tick is now 1 s at every
+  distance from the floor (the near-floor fast interval of 3.10.1,
+  everywhere); the `memory_floor` alert still repeats at most once per
+  10 minutes. Admissions near the floor also read the node fresh: a
+  request whose need sits within two floors of the 15 s admission
+  cache's free value refreshes the node reading instead of trusting it,
+  so a VM faulting memory in between two reads cannot get an
+  admission through on the stale figure. Resumes and give-back were
+  re-checked and already leave the floor free after the lease's full
+  size.
+
+### Fixed
+
+- An empty lease list is `"sandboxes": []`, not `null`: a client no
+  longer has to tell "no leases" from "no answer".
+
 ## [3.10.1] - 2026-10-18
 
 ### Changed

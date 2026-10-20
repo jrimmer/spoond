@@ -41,7 +41,8 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
   Leases and the image catalog persist in SQLite, so a backend restart
   loses nothing. On every lease:
   - **Files**: `/api/leases/{id}/files/{path}` puts, gets, stats, makes
-    and removes files in the guest, up to 256 MiB per file, and lists a
+    and removes files in the guest, up to 256 MiB per file (a `Range`
+    header reads just a slice, so larger files read in pieces), and lists a
     directory with `?list=1` — a bounded, gitignore-aware walk (depth
     first, 50000 entries / 4 MiB of entries / 10 s by default, ignored
     directories pruned without being walked). `GET
@@ -58,6 +59,12 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
     `GET …/jobs/{job}?wait=<s>` long-polls to its exit, and
     `…/jobs/{job}/output` follows stdout/stderr by byte range, while
     `job_started`/`job_exited`/`job_lost` ride the event stream.
+    `DELETE …/jobs/{job}` removes a finished job's record and its guest
+    files at once. An exec can ask for its own `retention_secs`
+    (shortening `JOB_RETENTION_SECS`) and `output_max_bytes`: a stream
+    that grows past the cap has its front punched out
+    (`fallocate --punch-hole`) between polls and only the tail is kept,
+    reported as `skipped` with absolute offsets intact.
   - **Crash test**: on a host with `CRASH_TEST=1`, `POST
     /api/leases/{id}/crash-test` sends the caller's own lease through
     crash recovery (back from its last checkpoint with a new generation,
@@ -360,14 +367,16 @@ stack does not exist yet.
 
 ## Status
 
-**v3.10.1** (2026-10-18) is the current release. spoond 3.x shares a host
+**v3.11.0** (2026-10-19) is the current release. spoond 3.x shares a host
 fairly: every active owner gets an equal, floating slice of memory and
 snapshot disk, and when a request does not fit, spoond takes room back
-from the biggest borrower. Since 3.9 it also pauses a lease on its own
-before the host runs out of memory, and since 3.10 it resumes the
-leases it paused once there is room again; 3.10.1 reacts to memory
-pressure within a second and keeps those resumes from flapping. Clients
-moving from 2.9 read [docs/upgrading-3.0.md](docs/upgrading-3.0.md).
+from the biggest borrower; it pauses a lease on its own before the host
+runs out of memory, now checking every second. 3.11 rounds out the
+guest file and process API for agent clients: stable machine-readable
+error codes, a bounded gitignore-aware directory listing, ranged file
+reads, directory watches, and background jobs that can be deleted,
+kept for less time and capped in output. Clients moving from 2.9 read
+[docs/upgrading-3.0.md](docs/upgrading-3.0.md).
 
 Every release and what changed in it is in [CHANGELOG.md](CHANGELOG.md)
 and on the [releases page](https://github.com/jrimmer/spoond/releases).
@@ -432,8 +441,11 @@ share of snapshot disk kept free, default 5; `MAX_ADMIT_WAIT_SECS`,
 `SWEEP_TIMEOUT`), the
 per-call E2B RPC bounds (`E2B_CREATE_TIMEOUT` and friends), named
 snapshots (`MAX_NAMED_SNAPSHOTS`, `SNAPSHOT_KEEP_VERSIONS`), background jobs
-(`MAX_RUNNING_JOBS_PER_LEASE`, `JOB_RETENTION_SECS`, `JOB_MAX_RUNTIME`),
-`MAX_EXEC_BODY_BYTES`, the runner's `RUNNER_ADMIT_WAIT_SECS` and
+(`MAX_RUNNING_JOBS_PER_LEASE`, `JOB_RETENTION_SECS`, `JOB_MAX_RUNTIME`,
+`JOB_OUTPUT_MAX_BYTES`), `MAX_EXEC_BODY_BYTES`, the per-owner
+concurrency caps (`EXEC_CONCURRENCY_MAX`, default 8, and
+`GUEST_DIAL_MAX`, default 16; an admin can override either for one
+identity through `POST /api/users/{id}/quota`), the runner's `RUNNER_ADMIT_WAIT_SECS` and
 `RUNNER_JOB_TIMEOUT`, `CRASH_TEST`, the
 orphan-build reaper (`ORPHAN_REAP`, default `dryrun`), and
 the saturation gate (`SATURATION_IO_FULL_PCT`, default 20;
