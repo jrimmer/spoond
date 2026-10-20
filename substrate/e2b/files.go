@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -68,7 +69,7 @@ func (c *Client) WriteFile(ctx context.Context, sandboxID, path string, data []b
 }
 
 // errIsDirExit is the stage and place scripts' exit status for a target
-// that is a directory: WriteFile answers it as substrate.ErrInvalidOp.
+// that is a directory: WriteFile answers it as substrate.ErrIsDir.
 const errIsDirExit = 3
 
 // writeStageScript refuses a directory target, creates the target's
@@ -101,12 +102,25 @@ func (c *Client) shExec(ctx context.Context, sandboxID, what, script string, arg
 		return err
 	}
 	if r.ExitCode == errIsDirExit {
-		return fmt.Errorf("e2b: %s %s: %s: %w", what, sandboxID, strings.TrimSpace(r.Stderr), substrate.ErrInvalidOp)
+		return fmt.Errorf("e2b: %s %s: %s: %w", what, sandboxID, strings.TrimSpace(r.Stderr), substrate.ErrIsDir)
 	}
 	if r.ExitCode != 0 {
-		return fmt.Errorf("e2b: %s %s: exit %d: %s", what, sandboxID, r.ExitCode, strings.TrimSpace(r.Stderr))
+		return fmt.Errorf("e2b: %s %s: exit %d: %w", what, sandboxID, r.ExitCode, guestOpError(r.Stderr))
 	}
 	return nil
+}
+
+// guestOpError reads what the kernel (through the guest command) said
+// about a failed file operation: "Permission denied" is eACCES-class
+// (ErrPermission), anything else is a plain failure the API answers 502.
+// envd and the orchestrator's Connect errors do not carry a comparable
+// distinction (a permission failure reaches them as opaque Internal), so
+// this is the one place the two backends can tell one apart from the rest.
+func guestOpError(stderr string) error {
+	if strings.Contains(strings.ToLower(stderr), "permission denied") {
+		return fmt.Errorf("%w: %s", substrate.ErrPermission, strings.TrimSpace(stderr))
+	}
+	return errors.New(strings.TrimSpace(stderr))
 }
 
 // discard removes a failed write's upload directory, best effort: the
@@ -148,9 +162,35 @@ func joinPath(dir, name string) string {
 	return dir + "/" + name
 }
 
+// mapEnvdFileStatus classifies envd's HTTP /files refusals beside the
+// 200 and 404 the two reads switch on (the A2 spec): a path that names
+// a directory is envd's 400 with "is a directory" in its body and maps
+// to ErrIsDir, so the files API answers EISDIR (any other 400 stays a
+// plain failure); 406 names a
+// refused encoding, which is an operation the guest's server would not
+// perform (ErrInvalidOp, EINVAL-class); anything else stays an
+// unexpected status.
+func mapEnvdFileStatus(sandboxID, path string, resp *http.Response) error {
+	switch resp.StatusCode {
+	case http.StatusBadRequest:
+		// envd answers 400 both for a directory ("path '…' is a
+		// directory") and for a path it could not resolve: only the
+		// first is EISDIR.
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		if strings.Contains(strings.ToLower(string(body)), "is a directory") {
+			return fmt.Errorf("e2b: read %s %s: %w", sandboxID, path, substrate.ErrIsDir)
+		}
+		return fmt.Errorf("e2b: read %s %s: %s: %s", sandboxID, path, resp.Status, strings.TrimSpace(string(body)))
+	case http.StatusNotAcceptable:
+		return fmt.Errorf("e2b: read %s %s: %w", sandboxID, path, substrate.ErrInvalidOp)
+	}
+	return fmt.Errorf("e2b: read %s %s: unexpected status %s", sandboxID, path, resp.Status)
+}
+
 // ReadFile downloads path via envd's HTTP GET /files; the error wraps
-// substrate.ErrNotFound for a missing path and substrate.ErrTooLarge when the
-// file is larger than max bytes.
+// substrate.ErrNotFound for a missing path, substrate.ErrIsDir for a
+// directory path (envd's 400 InvalidPath) and substrate.ErrTooLarge when
+// the file is larger than max bytes.
 func (c *Client) ReadFile(ctx context.Context, sandboxID, path string, max int64) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, filesURL(c.cfg.ProxyURL, path), nil)
 	if err != nil {
@@ -166,8 +206,10 @@ func (c *Client) ReadFile(ctx context.Context, sandboxID, path string, max int64
 		// read below
 	case http.StatusNotFound:
 		return nil, fmt.Errorf("e2b: read %s %s: %w", sandboxID, path, substrate.ErrNotFound)
+	case http.StatusBadRequest, http.StatusNotAcceptable:
+		return nil, mapEnvdFileStatus(sandboxID, path, resp)
 	default:
-		return nil, fmt.Errorf("e2b: read %s %s: unexpected status %s", sandboxID, path, resp.Status)
+		return nil, mapEnvdFileStatus(sandboxID, path, resp)
 	}
 	// max+1 so an over-size file is detectable without reading it all; the
 	// clamps keep the arithmetic sane at the extremes.
@@ -228,8 +270,10 @@ func (c *Client) ReadFileRange(ctx context.Context, sandboxID, path string, offs
 		return nil, nil
 	case http.StatusNotFound:
 		return nil, fmt.Errorf("e2b: read range %s %s: %w", sandboxID, path, substrate.ErrNotFound)
+	case http.StatusBadRequest, http.StatusNotAcceptable:
+		return nil, mapEnvdFileStatus(sandboxID, path, resp)
 	default:
-		return nil, fmt.Errorf("e2b: read range %s %s: unexpected status %s", sandboxID, path, resp.Status)
+		return nil, mapEnvdFileStatus(sandboxID, path, resp)
 	}
 	// limit+1 so an over-size answer is detectable without reading it all.
 	readLimit := limit
@@ -355,11 +399,15 @@ func (c *Client) Remove(ctx context.Context, sandboxID, path string, recursive b
 
 // rmdirError maps a failed rmdir to the substrate's errors: "Directory
 // not empty" (coreutils and busybox both say it) is ErrNotEmpty, which
-// the files API answers with 409; anything else stays a plain failure.
+// the files API answers with 409 ENOTEMPTY; "Permission denied" is
+// ErrPermission (403 EACCES); anything else stays a plain failure.
 func rmdirError(sandboxID, path string, exit int, stderr string) error {
 	msg := strings.TrimSpace(stderr)
 	if strings.Contains(strings.ToLower(msg), "not empty") {
 		return fmt.Errorf("e2b: remove %s %s: %w", sandboxID, path, substrate.ErrNotEmpty)
+	}
+	if err := guestOpError(msg); errors.Is(err, substrate.ErrPermission) {
+		return fmt.Errorf("e2b: remove %s %s: %w", sandboxID, path, err)
 	}
 	return fmt.Errorf("e2b: remove %s %s: exit %d: %s", sandboxID, path, exit, msg)
 }
@@ -382,7 +430,11 @@ func (c *Client) chmod(ctx context.Context, sandboxID, path string, mode os.File
 		return err
 	}
 	if r.ExitCode != 0 {
-		return fmt.Errorf("e2b: chmod %s %s: exit %d: %s", sandboxID, path, r.ExitCode, strings.TrimSpace(r.Stderr))
+		msg := strings.TrimSpace(r.Stderr)
+		if gerr := guestOpError(msg); errors.Is(gerr, substrate.ErrPermission) {
+			return fmt.Errorf("e2b: chmod %s %s: exit %d: %w", sandboxID, path, r.ExitCode, gerr)
+		}
+		return fmt.Errorf("e2b: chmod %s %s: exit %d: %s", sandboxID, path, r.ExitCode, msg)
 	}
 	return nil
 }
@@ -454,9 +506,47 @@ func baseName(path string) string {
 }
 
 // mapConnectError converts envd Connect errors to substrate sentinels.
+// envd has no errno codes of its own: NotFound, PermissionDenied and
+// AlreadyExists map directly, and InvalidArgument, FailedPrecondition and
+// Internal carry the filesystem's text (mkdir's "already exists but it is
+// not a directory", list's "path is not a directory", remove's wrapped
+// OS error), so those are classified by exact phrases. The phrases are
+// matched whole ("is a directory", not "directory"), so "no such file or
+// directory" never reads as EISDIR and "does not exist" never as EEXIST.
+// An unclassified message stays a plain failure (502 EIO).
 func mapConnectError(err error) error {
-	if connect.CodeOf(err) == connect.CodeNotFound {
+	switch connect.CodeOf(err) {
+	case connect.CodeNotFound:
 		return fmt.Errorf("%w: %v", substrate.ErrNotFound, err)
+	case connect.CodePermissionDenied:
+		return fmt.Errorf("%w: %v", substrate.ErrPermission, err)
+	case connect.CodeAlreadyExists:
+		return fmt.Errorf("%w: %v", substrate.ErrExist, err)
+	case connect.CodeInvalidArgument, connect.CodeFailedPrecondition, connect.CodeInternal:
+		if sentinel := fileErrorPhrase(strings.ToLower(err.Error())); sentinel != nil {
+			return fmt.Errorf("%w: %v", sentinel, err)
+		}
 	}
 	return err
+}
+
+// fileErrorPhrase maps a filesystem error text to its sentinel by exact
+// phrase, or nil. "already exists" comes first: mkdir over a file says
+// "path already exists but it is not a directory", which is EEXIST.
+func fileErrorPhrase(msg string) error {
+	switch {
+	case strings.Contains(msg, "already exists"), strings.Contains(msg, "file exists"):
+		return substrate.ErrExist
+	case strings.Contains(msg, "no such file"), strings.Contains(msg, "does not exist"), strings.Contains(msg, "not found"):
+		return substrate.ErrNotFound
+	case strings.Contains(msg, "not empty"):
+		return substrate.ErrNotEmpty
+	case strings.Contains(msg, "not a directory"):
+		return substrate.ErrNotDir
+	case strings.Contains(msg, "is a directory"):
+		return substrate.ErrIsDir
+	case strings.Contains(msg, "permission denied"):
+		return substrate.ErrPermission
+	}
+	return nil
 }

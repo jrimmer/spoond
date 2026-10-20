@@ -168,6 +168,25 @@ func TestReadFileNotFound(t *testing.T) {
 	}
 }
 
+// TestReadFileDirectoryIsEnvdInvalidPath pins the e2b read of a
+// directory: envd's GET /files answers 400 "path … is a directory" (the
+// A2 spec's InvalidPath example), and the client maps it to ErrIsDir
+// (409 EISDIR at the files API), never a plain unexpected-status failure
+// (502 EIO). Range reads share the switch.
+func TestReadFileDirectoryIsEnvdInvalidPath(t *testing.T) {
+	e := &filesTestEnvd{fileStatus: http.StatusBadRequest, fileStatusMsg: "{\"message\":\"path '/d' is a directory\",\"code\":400\"}"}
+	c := newFilesEnvd(t, e)
+	defer e.close()
+
+	_, err := c.ReadFile(context.Background(), filesSandboxID, "/d", 10)
+	if !errors.Is(err, substrate.ErrIsDir) {
+		t.Fatalf("ReadFile of a directory = %v, want ErrIsDir", err)
+	}
+	if _, err = c.ReadFileRange(context.Background(), filesSandboxID, "/d", 0, 10); !errors.Is(err, substrate.ErrIsDir) {
+		t.Fatalf("ReadFileRange of a directory = %v, want ErrIsDir", err)
+	}
+}
+
 func TestStatRequestShape(t *testing.T) {
 	e := &filesTestEnvd{statEntry: &filesystem.EntryInfo{
 		Name:         "f.txt",

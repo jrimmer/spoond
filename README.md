@@ -196,6 +196,67 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
   limit. `spoond notify test` checks the setup; see
   [docs/operations.md](docs/operations.md#notifications-to-webhooks).
 
+## Error codes
+
+Every error on the files, exec and jobs routes carries a stable,
+machine-readable `code` beside the free-form `error` message — the same
+shape on the lease create/exec/stream routes' refusals and on the exec
+stream's WebSocket error frames too. Code is the
+contract: programs branch on it. The message is diagnostic only: it can
+change between releases. Codes follow the errno names where a POSIX
+class fits (the e2b substrate's file layer is a filesystem) and
+snake_case verbs where it does not. HTTP statuses are unchanged by
+this and remain the first-class signal.
+
+| Code | Status | Meaning | Caller effect |
+|---|---|---|---|
+| `ENOENT` | 404 | no such file or path (files; also `GET …/stat` of a file) | fix the path |
+| `ENOTDIR` | 409 | a file sits in a path's way | fix the path |
+| `EISDIR` | 409 | the target is a directory (read or write over one) | use the directory ops |
+| `EEXIST` | 409 | the wrong type exists at the path (mkdir over a file) | remove or pick a new name |
+| `ENOTEMPTY` | 409 | non-recursive remove of a non-empty directory | retry with `?recursive=1` |
+| `EACCES` | 403 | the substrate refused a file operation on permissions | check the file's mode/owner in the guest (e2b's `GET` content read has no refusal reason and answers `EIO`) |
+| `EFBIG` | 413 | file or request body over the size cap | send less |
+| `EINVAL` | 400/404 | invalid path, `op`, `mode`, signal, stream or job-output parameter | fix the request |
+| `EIO` | 400/502 | a request body's bytes could not be read (400), or a substrate read/write failure that is none of the above (502) | retry; investigate if persistent |
+
+| Code | Status | Meaning | Caller effect |
+|---|---|---|---|
+| `bad_request` | 400 | request body failed validation (exec/jobs/secrets) | fix the request |
+| `invalid_size` | 400 | create body's size fields are unusable | fix `memory_mb`/`disk_mb`/`vcpu` |
+| `not_found` | 404 | the lease is not the caller's (or unknown) | check the lease id and token |
+| `owner_deleted` | 403 | a resume-on-use refusal on the files, exec, stream and jobs routes: the owner's identity was removed while the request was in flight | stop; the owner is gone |
+| `lease_suspended` | 409 | a non-work path hit a suspended lease | resume the lease first |
+| `lease_busy` | 409 | a checkpoint or other lifecycle operation is in flight | retry after `Retry-After` |
+| `lease_lost` | 410 | the sandbox is gone with nothing in flight | create a new lease (data is lost) |
+| `lease_not_live` | 409 | the lease has no live sandbox for the operation | start or resume the lease |
+| `cannot_start` | 409 | the lease failed to reach a running sandbox | inspect the lease's `failed_state` |
+| `save_in_progress` | 409 | a named-snapshot save already holds the lease | retry after `Retry-After` |
+| `not_secret_free` | 409 | a snapshot grant of a lease that had secrets | share only secret-free leases |
+| `secrets_in_use` | 409 | a background job with staged secrets blocks the save | retry after the job exits |
+| `snapshot_in_use` | 409 | a live lease is started from the named snapshot | stop (or delete) that lease first |
+| `snapshot_limit` | 409 | the owner's `MAX_NAMED_SNAPSHOTS` cap is reached | delete a named snapshot first |
+| `scrub_failed` | 500 | the save could not scrub `/run/secrets` | inspect the guest; retry the save |
+| `kept_budget` | 409 | too many kept checkpoints for the lease | unpin or delete a kept one |
+| `image_mismatch` | 409 | snapshot start with a mismatching `image` | omit `image` or use the snapshot's |
+| `path_removed` | 409 | a create idempotency replay raced its DELETE | create a fresh lease id |
+| `box_full` | 429 | the host's box is full and take-back freed nothing | wait; poll the lease list |
+| `capacity_wait` | 503 | no room for the operation right now | retry after `Retry-After` |
+| `substrate_unavailable` | 503 | the substrate could not confirm the sandbox state | retry after `Retry-After` |
+| `too_busy` | 429 | the caller's per-owner exec/stream/file-transfer/dial cap is reached (identity overrides raised via the quota route) | retry once one of the caller's own calls ends (no `Retry-After`) |
+| `too_many_jobs` | 429 | the lease is at its running background-job cap | wait for a job to exit |
+| `spawn_error` | 500 | the stream's command or a background job could never start (agent unreachable) | retry; inspect the sandbox |
+| `EIO` | 500 | a sync exec, or a stream after its start, failed in the transport (whether the command ran is unknown) | check for its effects before re-running |
+| `job_not_found` | 404 | unknown job id, or the job belongs to another lease | check `job_id` |
+| `job_not_running` | 409 | signal of a finished job, or its pid never appeared | read the record's `state` |
+| `job_running` | 409 | delete of a job that is still running | signal it, wait for it to exit, then delete |
+| `timeout` | 200 | a sync exec was ended by the substrate's own time limit (beside `exit: 124`, from the result's timeout flag, never from the output) | re-run with a longer `timeout` |
+| `internal` | 500 | an unexpected backend or store failure | retry once; report if persistent |
+
+The full per-route tables (including the statuses' history) are in
+[docs/api.md](docs/api.md); `GET /api/capabilities` self-describes the
+deployment.
+
 ## Dashboard
 
 `spoond dash` is a read-only, live view of one spoond host in the

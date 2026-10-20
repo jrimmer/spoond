@@ -220,9 +220,10 @@ func (ts *testSub) Exec(ctx context.Context, sandboxID string, req substrate.Exe
 			return substrate.ExecResult{}, fmt.Errorf("exec %s: %w", sandboxID, substrate.ErrUnavailable)
 		}
 		if ts.rootfsTimeout[sandboxID] {
-			// The e2b backend kills a probe that outlives its timer and
-			// returns exit 124 with a nil error rather than an error.
-			return substrate.ExecResult{Stderr: "[spoond] exec timed out after 10s", ExitCode: 124}, nil
+			// The e2b-shaped timeout: the timer killed the probe (exit 124,
+			// the note on stderr) and the flag says so; a backend without
+			// the flag is classified by the note's text.
+			return substrate.ExecResult{Stderr: "[spoond] exec timed out after 10s", ExitCode: 124, TimedOut: true}, nil
 		}
 		if msg, bad := ts.rootfsFail[sandboxID]; bad {
 			return substrate.ExecResult{Stderr: msg, ExitCode: 1}, nil

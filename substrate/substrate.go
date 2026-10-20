@@ -156,6 +156,12 @@ type ExecRequest struct {
 type ExecResult struct {
 	Stdout, Stderr string
 	ExitCode       int
+	// TimedOut is set when the substrate itself ended the command at its
+	// time limit (the e2b backend's exec timeout): the exit code is the
+	// marker's 124 and the output is the command's own. A command that
+	// merely printed "timeout" or exited 124 on its own does not set it,
+	// so callers can trust it where the output text is not evidence.
+	TimedOut bool
 }
 
 type StartRequest struct {

@@ -45,6 +45,41 @@ summarised from README "Status".
     streams are never capped. The per-job request fields and the host
     default are documented by effect in the README and `docs/api.md`.
 
+- **Stable error codes on the files, exec and jobs routes
+  (spoond-wir9).** Every error those routes answer now carries a stable,
+  machine-readable `code` beside the free-form `error` message — files
+  (`ENOENT`, `ENOTDIR`, `EISDIR`, `EEXIST`, `ENOTEMPTY`, `EACCES`,
+  `EFBIG`, `EINVAL`, `EIO`), exec and its stream (`bad_request`,
+  `too_busy`, `spawn_error` for a stream or job that never started,
+  `EIO` for a transport failure, `timeout` beside the timed-out exec's
+  200, `not_found`,
+  `lease_busy`, `lease_lost`, `substrate_unavailable`, `internal`), and
+  background jobs (`too_many_jobs`, `job_not_found`, `job_not_running`,
+  plus the same shapes). The stream's WebSocket error frames — pre-start
+  and in-flight — carry the codes, and the exec's 400 validations gained
+  `bad_request` where they answered no code before. `timeout` rides the
+  substrate's own timeout flag (`ExecResult.TimedOut`, set by the e2b
+  backend's exec timer), so a command that merely prints "timeout" or
+  exits 124 on its own is never mislabelled. Codes are the contract and
+  messages stay diagnostic; README "Error codes" lists the lot. Three
+  e2b file refusals that answered `502` now answer the status their code
+  means: reading a directory `409 EISDIR`, a guest permission refusal
+  `403 EACCES`, and an encoding the guest will not serve `409 EINVAL`.
+  Every other status is unchanged.
+  The guest-port dial route's per-owner cap refusal carries the same
+  `too_busy` code the other exec/stream-family caps answer with.
+  The resume-on-use refusals the files, exec, stream and jobs routes
+  share (through `writeResumeRefusal`) carry codes too: `bad_request`
+  for a non-persistent lease, `lease_busy`, `not_found` for a released
+  one, `capacity_wait`, `substrate_unavailable`, `owner_deleted` for a
+  removed owner's identity and `internal` for an unexpected failure.
+  `owner_deleted` is new: the lifecycle routes' own `403 owner deleted`
+  keep answering no code.
+  The e2b backend's exec now sets `TimedOut` only for its own time
+  limit (a context deadline); a client hang-up cancel returns the error
+  without the flag — no route answer changes (the error path discards
+  the result), but the flag now matches its documented contract.
+
 ### Removed
 
 - **The `/api/sandboxes` path alias (4.0, spoond-4-0-s10).** Every

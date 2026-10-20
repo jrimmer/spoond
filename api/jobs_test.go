@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log"
@@ -1649,8 +1650,19 @@ func TestJobDelete(t *testing.T) {
 
 	// A running job: 409, and the record stays.
 	running, _ := startBackgroundJob(t, ts, id, map[string]any{"cmd": "sleep 611"})
-	if resp := del("/api/leases/"+id+"/jobs/"+running, "token-a"); resp.StatusCode != http.StatusConflict {
-		t.Fatalf("delete running job = %d, want 409", resp.StatusCode)
+	req, _ := http.NewRequest("DELETE", ts.URL+"/api/leases/"+id+"/jobs/"+running, nil)
+	req.Header.Set("Authorization", "Bearer token-a")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("delete running job: %v", err)
+	}
+	var refusal struct {
+		Code string `json:"code"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&refusal)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict || refusal.Code != "job_running" {
+		t.Fatalf("delete running job = %d %q, want 409 job_running", resp.StatusCode, refusal.Code)
 	}
 	if _, err := db.GetJob(context.Background(), running); err != nil {
 		t.Fatalf("running record deleted: %v", err)

@@ -3,6 +3,7 @@ package fake
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -127,6 +128,49 @@ func TestExecRunnerSeesEnvNotArgv(t *testing.T) {
 	joined := strings.Join(f.LastExec().Args, "\x00")
 	if strings.Contains(joined, "env-secret-value") {
 		t.Fatalf("env value leaked into argv: %v", f.LastExec().Args)
+	}
+}
+
+// TestExecRunnerTimeoutMarker: a command the runner's own timer ends
+// (a sleep past its Timeout, on a box with GNU timeout) answers exit
+// 124, the marker line and TimedOut — the same shape envd's exec
+// timeout answers with, so an api test can drive the flag through the
+// fake too.
+func TestExecRunnerTimeoutMarker(t *testing.T) {
+	if _, err := exec.LookPath("timeout"); err != nil {
+		t.Skip("no GNU timeout on this box")
+	}
+	f := New()
+	f.EnableExecRunner()
+
+	const sandboxID = "i0123456789abcdefghij"
+	if _, err := f.Create(t.Context(), substrate.CreateRequest{SandboxID: sandboxID}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	res, err := f.Exec(t.Context(), sandboxID, substrate.ExecRequest{
+		Args: []string{"/bin/sleep", "30"}, Timeout: 200 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if res.ExitCode != 124 || !res.TimedOut {
+		t.Fatalf("result = %+v, want exit 124 and TimedOut", res)
+	}
+	if !strings.Contains(res.Stderr, "exec timed out") {
+		t.Fatalf("stderr = %q, want the timeout note", res.Stderr)
+	}
+
+	// A command that ends on its own — even with 124 and timeout text —
+	// sets no flag.
+	res, err = f.Exec(t.Context(), sandboxID, substrate.ExecRequest{
+		Args: []string{"/bin/bash", "-c", "echo connection timed out"}, Timeout: 5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if res.TimedOut {
+		t.Fatalf("self-exit result = %+v, want TimedOut unset", res)
 	}
 }
 

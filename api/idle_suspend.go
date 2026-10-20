@@ -196,7 +196,10 @@ func resumeNoRoomMessage(err error) string {
 
 // writeResumeRefusal is the free-function form shared by the API server
 // and the per-lease LLM gateway, which has no *Server. log names the
-// default-case diagnostics.
+// default-case diagnostics. Every branch carries a machine-readable
+// code: the files, exec, stream and jobs routes answer their
+// resume-on-use refusals here, so a client can branch on the code
+// rather than the message.
 func writeResumeRefusal(w http.ResponseWriter, log interface{ Printf(string, ...any) }, id string, err error) {
 	if writeLeaseLostErr(w, err) {
 		// The reason already lives in the error message; writeLeaseLostErr
@@ -205,11 +208,11 @@ func writeResumeRefusal(w http.ResponseWriter, log interface{ Printf(string, ...
 	}
 	switch {
 	case errors.Is(err, errNotPersistent):
-		writeError(w, http.StatusBadRequest, "lease is not a workspace-backed persistent lease")
+		writeErrorCode(w, http.StatusBadRequest, "bad_request", "lease is not a workspace-backed persistent lease")
 	case errors.Is(err, errLeaseBusy):
 		writeErrorCode(w, http.StatusConflict, "lease_busy", err.Error())
 	case errors.Is(err, errLeaseReleased):
-		writeError(w, http.StatusNotFound, "lease not found")
+		writeErrorCode(w, http.StatusNotFound, "not_found", "lease not found")
 	case isBoxFull(err):
 		// The resume's class re-admission needed room and every take-back
 		// candidate is pinned (FS5): the same 429 box_full refusal a create
@@ -231,9 +234,9 @@ func writeResumeRefusal(w http.ResponseWriter, log interface{ Printf(string, ...
 		// The owner's identity was removed while the resume was in
 		// flight (spoond-q4j): the user is gone, so the resume is
 		// refused rather than run ownerless.
-		writeError(w, http.StatusForbidden, "owner deleted")
+		writeErrorCode(w, http.StatusForbidden, "owner_deleted", "owner deleted")
 	default:
 		log.Printf("resume %s: %v", id, err)
-		writeError(w, http.StatusInternalServerError, "resume failed")
+		writeErrorCode(w, http.StatusInternalServerError, "internal", "resume failed")
 	}
 }

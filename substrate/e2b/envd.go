@@ -381,6 +381,10 @@ func (c *Client) Exec(ctx context.Context, sandboxID string, req substrate.ExecR
 		}
 		return substrate.ExecResult{}, err
 	}
+	// Exec owns one process to completion: whether it exits, hits the
+	// timer or errors, the client stream ends here, so the guest side is
+	// never left running detached and its stream context never leaks.
+	defer p.cancel()
 	var stdout, stderr bytes.Buffer
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
@@ -404,9 +408,21 @@ func (c *Client) Exec(ctx context.Context, sandboxID string, req substrate.ExecR
 				Stdout:   stdout.String(),
 				Stderr:   stderr.String() + fmt.Sprintf("\n[spoond] exec timed out after %ds\n", int(math.Ceil(timeout.Seconds()))),
 				ExitCode: 124,
+				// The marker above stays for existing readers (the rootfs
+				// probe matches its text), but the flag is the machine-ready
+				// signal: the substrate, not the command, ended the exec.
+				TimedOut: true,
 			}, nil
 		case <-ctx.Done():
 			_ = p.Signal(true)
+			// The timer and the request's context are the same deadline
+			// (timeout); a context cancel while the timer has not fired yet
+			// is still that deadline ending, so it keeps the flag. A
+			// client-hung-up cancel (context.Canceled with no deadline) is
+			// not the substrate's doing: no flag.
+			if ctx.Err() == context.DeadlineExceeded {
+				return substrate.ExecResult{TimedOut: true}, ctx.Err()
+			}
 			return substrate.ExecResult{}, ctx.Err()
 		case ev, ok := <-p.Events():
 			if !ok {

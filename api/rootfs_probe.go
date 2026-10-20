@@ -283,14 +283,18 @@ func (s *Service) probeRootfsOnce(parent context.Context, l *Lease) rootfsProbeO
 	return rootfsProbeOK
 }
 
-// rootfsProbeTimedOut reports whether an exec result is the substrate's
-// own timeout marker. The e2b backend kills a process that outlives its
+// rootfsProbeTimedOut reports whether the substrate itself ended an exec
+// at its time limit. The e2b backend kills a process that outlives its
 // timer and returns exit code 124 with a "[spoond] exec timed out" line
-// and a nil error, so a hung probe can arrive as an ordinary non-zero
-// result; the wording check also catches other substrates that report a
-// timeout the same way.
+// and a nil error, so it must be recognized from the result markers
+// (exit 124, or the note's text on backends that report a timeout the
+// same way); a backend that flags the result directly does too. The
+// wording checks stay for such backends, but they can over-match output
+// a command that exited on its own happened to contain — acceptable for
+// a probe (a false timeout counts a liveness failure), which is why the
+// exec API's own answers use TimedOut only.
 func rootfsProbeTimedOut(res substrate.ExecResult) bool {
-	if res.ExitCode == 124 {
+	if res.TimedOut || res.ExitCode == 124 {
 		return true
 	}
 	text := strings.ToLower(res.Stderr + "\n" + res.Stdout)

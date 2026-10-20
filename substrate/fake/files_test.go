@@ -141,8 +141,9 @@ func TestFileErrors(t *testing.T) {
 		t.Fatalf("MakeDir under a file: %v", err)
 	}
 
-	// Reading a directory.
-	if _, err := f.ReadFile(t.Context(), id, "/dir", 1<<20); !errors.Is(err, substrate.ErrInvalidOp) {
+	// Reading a directory: the target is a directory, ErrIsDir, not a
+	// generic invalid operation (the files API answers it EISDIR).
+	if _, err := f.ReadFile(t.Context(), id, "/dir", 1<<20); !errors.Is(err, substrate.ErrIsDir) {
 		t.Fatalf("ReadFile on a dir: %v", err)
 	}
 
@@ -240,7 +241,10 @@ func TestWriteFileOntoDirectoryFails(t *testing.T) {
 	if err := f.MakeDir(t.Context(), id, "/d", 0o755); err != nil {
 		t.Fatalf("MakeDir: %v", err)
 	}
-	if err := f.WriteFile(t.Context(), id, "/d", []byte("x"), 0o644); !errors.Is(err, substrate.ErrInvalidOp) {
-		t.Fatalf("WriteFile onto a directory: %v, want ErrInvalidOp", err)
+	if err := f.WriteFile(t.Context(), id, "/d", []byte("x"), 0o644); !errors.Is(err, substrate.ErrIsDir) {
+		t.Fatalf("WriteFile onto a directory: %v, want ErrIsDir", err)
+	}
+	if _, err := f.ReadFile(t.Context(), id, "/d", 1<<20); !errors.Is(err, substrate.ErrIsDir) {
+		t.Fatalf("ReadFile on a directory: %v, want ErrIsDir", err)
 	}
 }
