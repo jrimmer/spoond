@@ -58,6 +58,12 @@ type Fake struct {
 	// pass spent or skipped one).
 	punchCalls int
 
+	// filesystem watchers (Watch): live registrations by id, with the
+	// sandbox and subtree each covers, plus the channel each serves.
+	nextWatcherID int
+	watchers      map[int]watcherEntry
+	watchersByID  map[int]*fakeWatcher
+
 	execHandler func(sandboxID string, req substrate.ExecRequest) substrate.ExecResult
 	lastExec    substrate.ExecRequest
 	// lastCreate is the most recent successful Create's request, kept so
@@ -85,12 +91,14 @@ type failSpec struct {
 // 1<<20 free 2 MiB pages and no outstanding work.
 func New() *Fake {
 	return &Fake{
-		sandboxes:  map[string]substrate.Sandbox{},
-		files:      map[string]*memFS{},
-		procs:      map[uint32]*FakeProcess{},
-		jobProcs:   map[uint32]*FakeProcess{},
-		jobPIDOf:   map[string]uint32{},
-		healthErrs: map[string]error{},
+		sandboxes:    map[string]substrate.Sandbox{},
+		files:        map[string]*memFS{},
+		procs:        map[uint32]*FakeProcess{},
+		jobProcs:     map[uint32]*FakeProcess{},
+		jobPIDOf:     map[string]uint32{},
+		healthErrs:   map[string]error{},
+		watchers:     map[int]watcherEntry{},
+		watchersByID: map[int]*fakeWatcher{},
 		nodeInfo: substrate.NodeInfo{
 			Status:            "healthy",
 			HugepagesTotal:    1 << 20,
@@ -398,6 +406,7 @@ func (f *Fake) Delete(ctx context.Context, sandboxID string) error {
 	}
 	delete(f.sandboxes, sandboxID) // nil when already gone
 	delete(f.files, sandboxID)     // the sandbox's files go with it
+	f.endSandboxWatchersLocked(sandboxID)
 	return nil
 }
 
@@ -408,6 +417,7 @@ func (f *Fake) Pause(ctx context.Context, sandboxID, templateID string) (string,
 		return "", substrate.BuildRefs{}, err
 	}
 	delete(f.sandboxes, sandboxID)
+	f.endSandboxWatchersLocked(sandboxID)
 	return uuid.NewString(), substrate.BuildRefs{}, nil
 }
 
@@ -860,6 +870,7 @@ func (f *Fake) WriteFile(ctx context.Context, sandboxID, name string, data []byt
 		if err := os.MkdirAll(filepath.Dir(host), 0o755); err != nil {
 			return err
 		}
+		f.notifyLocked(sandboxID, cleanPath(name))
 		if mode == 0 {
 			mode = 0o644
 		}
@@ -869,7 +880,11 @@ func (f *Fake) WriteFile(ctx context.Context, sandboxID, name string, data []byt
 	if fs == nil {
 		return fmt.Errorf("fake: WriteFile %s %s: %w", sandboxID, name, substrate.ErrNotFound)
 	}
-	return fs.write(name, data, mode)
+	if err := fs.write(name, data, mode); err != nil {
+		return err
+	}
+	f.notifyLocked(sandboxID, cleanPath(name))
+	return nil
 }
 
 func (f *Fake) ReadFile(ctx context.Context, sandboxID, name string, max int64) ([]byte, error) {
@@ -969,7 +984,11 @@ func (f *Fake) MakeDir(ctx context.Context, sandboxID, name string, mode os.File
 	if fs == nil {
 		return fmt.Errorf("fake: MakeDir %s %s: %w", sandboxID, name, substrate.ErrNotFound)
 	}
-	return fs.mkdir(name, mode)
+	if err := fs.mkdir(name, mode); err != nil {
+		return err
+	}
+	f.notifyLocked(sandboxID, cleanPath(name))
+	return nil
 }
 
 // PunchHole deallocates a byte range of a guest file without shifting
@@ -1039,7 +1058,42 @@ func (f *Fake) Remove(ctx context.Context, sandboxID, name string, recursive boo
 	if fs == nil {
 		return fmt.Errorf("fake: Remove %s %s: %w", sandboxID, name, substrate.ErrNotFound)
 	}
-	return fs.remove(name, recursive)
+	// Collect the paths the remove touches before it runs, so the
+	// watchers hear them (the remove deletes its own records).
+	var changed []string
+	collectRemovedLocked(fs, name, recursive, &changed)
+	if err := fs.remove(name, recursive); err != nil {
+		return err
+	}
+	f.notifyLocked(sandboxID, changed...)
+	return nil
+}
+
+// collectRemovedLocked gathers the clean paths a Remove at name deletes:
+// the path itself, or it and everything under it when recursive. Call
+// with f.mu held (and the filesystem still intact).
+func collectRemovedLocked(fs *memFS, name string, recursive bool, changed *[]string) {
+	clean := cleanPath(name)
+	if clean == "" {
+		return
+	}
+	if _, ok := fs.files[clean]; ok {
+		*changed = append(*changed, clean)
+		return
+	}
+	if _, ok := fs.dirs[clean]; !ok {
+		return
+	}
+	*changed = append(*changed, clean)
+	if !recursive {
+		return
+	}
+	prefix := clean + "/"
+	for p := range fs.files {
+		if strings.HasPrefix(p, prefix) {
+			*changed = append(*changed, p)
+		}
+	}
 }
 
 // Rename moves oldPath to newPath, replacing newPath, through the
@@ -1055,7 +1109,15 @@ func (f *Fake) Rename(ctx context.Context, sandboxID, oldPath, newPath string) e
 	if fs == nil {
 		return fmt.Errorf("fake: Rename %s %s: %w", sandboxID, oldPath, substrate.ErrNotFound)
 	}
-	return fs.rename(oldPath, newPath)
+	// The rename-away is a change at the old path and the rename-in a
+	// change at the new one; a directory rename moves its whole subtree,
+	// so the watchers hear the directory paths only (each watcher decides
+	// whether either path is inside its own subtree).
+	if err := fs.rename(oldPath, newPath); err != nil {
+		return err
+	}
+	f.notifyLocked(sandboxID, cleanPath(oldPath), cleanPath(newPath))
+	return nil
 }
 
 // memFS is an in-memory filesystem with real path semantics: absolute,

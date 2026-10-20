@@ -42,7 +42,15 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
   Leases and the image catalog persist in SQLite, so a backend restart
   loses nothing. On every lease:
   - **Files**: `/api/leases/{id}/files/{path}` puts, gets, stats, makes
-    and removes files in the guest, up to 256 MiB per file.
+    and removes files in the guest, up to 256 MiB per file. `GET
+    …/files/{dir}?watch=1&recursive=true|false` streams the directory's
+    changes as Server-Sent Events: one `ready` event, then `change`
+    events (paths coalesced within 100 ms), and finally one terminal
+    `error` event — `lease_suspended`, `lease_lost` or `lease_gone` (or
+    `watch_ended` for any other end) — when the lease suspends, is lost
+    or is released, after which the stream ends. A watch holds an
+    exec/stream slot but is not activity:
+    an idle lease with an open watch still suspends on schedule.
   - **Background jobs**: `POST /api/leases/{id}/exec` with
     `"background": true` starts a tracked job (202 + `job_id`);
     `GET …/jobs/{job}?wait=<s>` long-polls to its exit, and

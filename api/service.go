@@ -2291,6 +2291,12 @@ func (s *Service) releaseBecauseIf(ctx context.Context, l *Lease, reason string,
 	delete(s.store.runningJobs, l.ID)
 	s.deleteLeaseLocked(l.ID)
 	s.store.mu.Unlock()
+	// The lease is out of the store by now; emit the release before the
+	// cleanup so watchers that terminate on lease_gone (file watch)
+	// still find the lease state and resolve their terminal code while
+	// they can.
+	s.emitLeaseEvent(l.ID, l.Owner, LeaseReleased,
+		releasePeakDetail(reason, hasPeak, releasePeak))
 	// A version that retention spared only because this lease ran from it
 	// is dropped once no live lease uses it (S5): re-run the name's
 	// retention now that the lease row is gone.
@@ -2298,8 +2304,6 @@ func (s *Service) releaseBecauseIf(ctx context.Context, l *Lease, reason string,
 	if len(l.ExposePorts) > 0 {
 		s.refreshPeersAsync(ctx)
 	}
-	s.emitLeaseEvent(l.ID, l.Owner, LeaseReleased,
-		releasePeakDetail(reason, hasPeak, releasePeak))
 	journalReason := journalReleaseReason(l, reason)
 	s.journalLeaseRelease(l, journalReason, peakMiB, hasPeak)
 	// The history row (records A) names the start_ms / max_nap_secs

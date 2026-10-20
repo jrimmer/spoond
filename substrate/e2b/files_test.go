@@ -3,6 +3,7 @@ package e2b
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -35,6 +36,13 @@ type filesTestEnvd struct {
 	makeDirs []string // filesystem.MakeDir request paths
 	removed  []string // filesystem.Remove request paths
 	statReqs []string // filesystem.Stat request paths
+
+	// watchReqs records WatchDir requests as "path recursive=<bool>";
+	// the scripted watchEvents are sent after the start event, then the
+	// stream ends (watchErr, when set, is the terminal stream error).
+	watchReqs   []string
+	watchEvents []*filesystem.FilesystemEvent
+	watchErr    error
 
 	statEntry     *filesystem.EntryInfo // returned by Stat; nil = CodeNotFound
 	protoErr      connect.Code          // nonzero: Stat/MakeDir/Remove fail with it
@@ -193,6 +201,25 @@ func (h *fsHandler) MakeDir(ctx context.Context, r *connect.Request[filesystem.M
 		return nil, connect.NewError(h.e.protoErr, errors.New(h.e.protoErrMsg()))
 	}
 	return connect.NewResponse(&filesystem.MakeDirResponse{Entry: &filesystem.EntryInfo{Name: "x"}}), nil
+}
+
+// WatchDir records the request, sends the start event and then each
+// scripted filesystem event, and returns (ending the stream) — or
+// watchErr when the test asked for a terminal error.
+func (h *fsHandler) WatchDir(ctx context.Context, r *connect.Request[filesystem.WatchDirRequest], stream *connect.ServerStream[filesystem.WatchDirResponse]) error {
+	h.e.watchReqs = append(h.e.watchReqs, fmt.Sprintf("%s recursive=%v", r.Msg.GetPath(), r.Msg.GetRecursive()))
+	if err := stream.Send(&filesystem.WatchDirResponse{Event: &filesystem.WatchDirResponse_Start{Start: &filesystem.WatchDirResponse_StartEvent{}}}); err != nil {
+		return err
+	}
+	if h.e.watchErr != nil {
+		return h.e.watchErr
+	}
+	for _, ev := range h.e.watchEvents {
+		if err := stream.Send(&filesystem.WatchDirResponse{Event: &filesystem.WatchDirResponse_Filesystem{Filesystem: ev}}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (h *fsHandler) Remove(ctx context.Context, r *connect.Request[filesystem.RemoveRequest]) (*connect.Response[filesystem.RemoveResponse], error) {

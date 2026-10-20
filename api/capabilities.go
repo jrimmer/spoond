@@ -216,7 +216,7 @@ var endpointTable = []endpointSpec{
 	ep("PUT", "/api/leases/{id}/idle-policy", "set the idle reclamation threshold"),
 	ep("POST", "/api/leases/{id}/restore", "roll back to a kept checkpoint"),
 	ep("POST", "/api/leases/{id}/crash-test", "crash a lease and recover it (CRASH_TEST hosts)"),
-	ep("GET", "/api/leases/{id}/files/{path...}", "download a lease file"),
+	ep("GET", "/api/leases/{id}/files/{path...}", "download a lease file; ?watch=1 streams its directory's changes (SSE)"),
 	ep("PUT", "/api/leases/{id}/files/{path...}", "upload a lease file"),
 	ep("POST", "/api/leases/{id}/files/{path...}", "stat/mkdir/remove a lease path"),
 	ep("DELETE", "/api/leases/{id}/files/{path...}", "delete a lease file"),

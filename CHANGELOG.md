@@ -80,6 +80,22 @@ summarised from README "Status".
   without the flag — no route answer changes (the error path discards
   the result), but the flag now matches its documented contract.
 
+- **File watch over Server-Sent Events (spoond-j87e).** `GET
+  /api/leases/{id}/files/{dir}?watch=1&recursive=true|false` streams a
+  watched directory's guest-side changes: one `ready` event once the
+  watch is live, `change` events whose `paths` are each coalescing
+  window's (100 ms) deduplicated, sorted set, and finally one terminal
+  `error` event — `lease_suspended`, `lease_lost` or `lease_gone` (or
+  `watch_ended` for any other end, such as a transport drop) — when the
+  lease suspends, is lost or is released, after which the stream ends.
+  The watch rides the files model (owner or admin): a missing
+  path answers `404`, a path that is a file `409`, a full exec/stream
+  pool `429`, and opening it resumes a suspended lease like the other
+  file routes. It holds an exec/stream slot for its lifetime but is not
+  activity: an idle lease with an open watch still suspends on schedule,
+  and the suspension ends the watch with `lease_suspended`. Backed by a
+  new `substrate.Watch` over envd's `filesystem.WatchDir`.
+
 ### Removed
 
 - **The `/api/sandboxes` path alias (4.0, spoond-4-0-s10).** Every
