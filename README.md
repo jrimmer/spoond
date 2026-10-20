@@ -42,7 +42,8 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
   Leases and the image catalog persist in SQLite, so a backend restart
   loses nothing. On every lease:
   - **Files**: `/api/leases/{id}/files/{path}` puts, gets, stats, makes
-    and removes files in the guest, up to 256 MiB per file, and lists a
+    and removes files in the guest, up to 256 MiB per file (a `Range`
+    header reads just a slice, so larger files read in pieces), and lists a
     directory with `?list=1` — a bounded, gitignore-aware walk (depth
     first, 50000 entries / 4 MiB of entries / 10 s by default, ignored
     directories pruned without being walked). `GET
@@ -326,14 +327,16 @@ the result.
 
 ## Status
 
-**v3.10.1** (2026-10-18) is the current release. spoond 3.x shares a host
+**v3.11.0** (2026-10-19) is the current release. spoond 3.x shares a host
 fairly: every active owner gets an equal, floating slice of memory and
 snapshot disk, and when a request does not fit, spoond takes room back
-from the biggest borrower. Since 3.9 it also pauses a lease on its own
-before the host runs out of memory, and since 3.10 it resumes the
-leases it paused once there is room again; 3.10.1 reacts to memory
-pressure within a second and keeps those resumes from flapping. Clients
-moving from 2.9 read [docs/upgrading-3.0.md](docs/upgrading-3.0.md).
+from the biggest borrower; it pauses a lease on its own before the host
+runs out of memory, now checking every second. 3.11 rounds out the
+guest file and process API for agent clients: stable machine-readable
+error codes, a bounded gitignore-aware directory listing, ranged file
+reads, directory watches, and background jobs that can be deleted,
+kept for less time and capped in output. Clients moving from 2.9 read
+[docs/upgrading-3.0.md](docs/upgrading-3.0.md).
 
 Every release and what changed in it is in [CHANGELOG.md](CHANGELOG.md)
 and on the [releases page](https://github.com/jrimmer/spoond/releases).
