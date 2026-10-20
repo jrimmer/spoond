@@ -10,6 +10,8 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+## [3.11.1] - 2026-10-20
+
 ### Fixed
 
 - **The CI runner checks out the commit that triggered the run.** A
