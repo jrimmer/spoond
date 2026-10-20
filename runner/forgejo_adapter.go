@@ -208,17 +208,29 @@ func (a *ForgejoAdapter) Fetch(ctx context.Context, version int64) (*Job, int64,
 // Forgejo TaskState and reports it.
 func (a *ForgejoAdapter) Report(ctx context.Context, state *JobState, outputs map[string]string) error {
 	ctx = withAuth(ctx, a.authHeaders())
+	// A final state carries its stop time: Forgejo reads a missing one as
+	// 1970 and shows "Failing after -497923h".
+	now := time.Now()
 	ts := &runnerv1.TaskState{
-		Id:     state.ID,
-		Result: resultToProto(state.Result),
+		Id:        state.ID,
+		Result:    resultToProto(state.Result),
+		StoppedAt: timestamppb.New(now),
 	}
 	for _, s := range state.Steps {
-		ts.Steps = append(ts.Steps, &runnerv1.StepState{
+		ps := &runnerv1.StepState{
 			Id:        s.ID,
 			Result:    resultToProto(s.Result),
 			LogIndex:  s.LogIndex,
 			LogLength: s.LogLength,
-		})
+			StoppedAt: timestamppb.New(now),
+		}
+		if !s.Started.IsZero() {
+			ps.StartedAt = timestamppb.New(s.Started)
+		}
+		if !s.Stopped.IsZero() {
+			ps.StoppedAt = timestamppb.New(s.Stopped)
+		}
+		ts.Steps = append(ts.Steps, ps)
 	}
 	_, err := a.svc.UpdateTask(ctx, connect.NewRequest(&runnerv1.UpdateTaskRequest{
 		State:   ts,

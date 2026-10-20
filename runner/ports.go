@@ -41,6 +41,10 @@ type StepState struct {
 	// so a failure can be named locally without re-parsing log rows.
 	Name string
 	Exit int
+	// Started and Stopped bound the step. Forgejo shows a step's (and a
+	// task's) duration from these; a missing stop time reads as 1970.
+	Started time.Time
+	Stopped time.Time
 }
 
 // JobState is the outcome of a whole job.

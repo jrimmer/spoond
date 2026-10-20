@@ -10,6 +10,19 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Fixed
+
+- **The CI runner checks out the commit that triggered the run.** A
+  checkout step cloned the default branch and stopped there, so a pull
+  request or branch push ran the default branch's tree and reported its
+  result for the PR. It now fetches the step's `with: ref:`, else
+  `github.sha` (falling back to `github.ref`), and checks it out detached.
+  If neither can be fetched the step fails; it never runs another tree in
+  their place.
+- **CI commit statuses show real durations.** The runner's final report
+  now carries stop times for the task and each step; without them Forgejo
+  read the stop as 1970 and showed "Failing after -497923h".
+
 ### Changed
 
 - **The periodic checkpoint waits for open streams and sync execs
