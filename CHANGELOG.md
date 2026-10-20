@@ -42,6 +42,16 @@ summarised from README "Status".
 
 ### Changed
 
+- **The periodic checkpoint waits for open streams and sync execs
+  (spoond-g0ok).** A checkpoint pauses the guest, which resets its
+  connections: every open interactive stream ended and a synchronous
+  exec in flight failed. A due lease with either open now waits, and is
+  checkpointed on the first pass after that work ends — or after at most
+  one effective checkpoint interval since it first became due, so the
+  crash-loss window stays bounded. Background jobs do not defer it: a
+  pause stops them without ending them. On-demand checkpoints and the
+  implicit checkpoint of clone, fork and restart do not wait.
+
 - **README: a dashboard screenshot, and a shorter dashboard section**
   that says what the dashboard shows rather than how each panel is drawn.
 - **README: Status names the current release only**; the release history
@@ -181,16 +191,6 @@ summarised from README "Status".
   everyone.
 
 ### Changed
-
-- **The periodic checkpoint waits for open streams and sync execs
-  (spoond-g0ok).** A checkpoint pauses the guest, which resets its
-  connections: every open interactive stream ended and a synchronous
-  exec in flight failed. A due lease with either open now waits, and is
-  checkpointed on the first pass after that work ends — or after at most
-  one effective checkpoint interval since it first became due, so the
-  crash-loss window stays bounded. Background jobs do not defer it: a
-  pause stops them without ending them. On-demand checkpoints and the
-  implicit checkpoint of clone, fork and restart do not wait.
 
 - **The memory-floor loop checks every second (spoond-154).** Running
   VMs fault memory back in at any moment, and free hugepages fell from
