@@ -516,6 +516,12 @@ type ServiceConfig struct {
 	// job may ask for a shorter max_runtime_secs, never a longer one. 0
 	// = DefaultJobMaxRuntimeSecs; a negative value disables the cap.
 	JobMaxRuntimeSecs int64
+	// JobOutputMaxBytes is the host default output cap per background-job
+	// stream (spoond-hwto): once a guest stdout or stderr file grows past
+	// it, the job poller punches the front of the file out and only the
+	// tail is kept. 0 = unlimited (the default: no cap unless a job asks
+	// for its own output_max_bytes).
+	JobOutputMaxBytes int64
 	// MaxAdmitWaitSecs caps how long a create may wait for admission
 	// (#129 part 1). MAX_ADMIT_WAIT_SECS, default DefaultMaxAdmitWaitSecs;
 	// 0 disables waiting (the request field is accepted and ignored).
@@ -646,8 +652,11 @@ type Service struct {
 	sub substrate.Substrate
 	// db persists leases, shares, the pool and the sandbox catalog
 	// (U05/U08). Required.
-	db    *store.DB
-	store *Store
+	db *store.DB
+	// dbJobs is the narrowed jobs surface db serves; tests swap it (the
+	// *store.DB, or a failing wrapper) wholesale.
+	dbJobs store.JobStore
+	store  *Store
 	// tokens maps a consumer token to its consumer id (legacy mode).
 	tokens map[string]string
 	// ownerDeleteMu guards deletedOwners (spoond-q4j): the owners whose
@@ -1097,6 +1106,7 @@ func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string,
 	svc := &Service{
 		sub:                       sub,
 		db:                        db,
+		dbJobs:                    db,
 		store:                     newStore(),
 		tokens:                    tokens,
 		cfg:                       cfg,

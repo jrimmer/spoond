@@ -508,7 +508,7 @@ more, only labels.
 | `GET`/`PUT`/`POST`/`DELETE /api/leases/{id}/files/...` (read, write, stat, list, mkdir, remove) | yes | `503 capacity_wait` + `Retry-After` | `429 box_full` | `409 lease_busy` | `410 lease_lost` |
 | `GET /api/leases/{id}/ports/{port}/dial` | yes | `503 capacity_wait` + `Retry-After` | `429 box_full` | `409 lease_busy` | `410 lease_lost` |
 | the HTTP proxy (`<lease>-<port>.<suffix>`) | yes | `503 capacity_wait` + `Retry-After` | `429 box_full` | `409 lease_busy` | `410 lease_lost` |
-| background jobs (`POST .../exec` `background:true`, `POST .../jobs/{job}/signal`) | yes | `503 capacity_wait` + `Retry-After` | `429 box_full` | `409 lease_busy` | `410 lease_lost` |
+| background jobs (`POST .../exec` `background:true`, `POST .../jobs/{job}/signal`, `DELETE .../jobs/{job}`) | yes | `503 capacity_wait` + `Retry-After` | `429 box_full` | `409 lease_busy` | `410 lease_lost` |
 | the LLM gateway (`/llm/{lease-id}/...`) | yes | `503 capacity_wait` + `Retry-After` | `429 box_full` | `409 lease_busy` | `410 lease_lost` |
 | `POST /api/leases/{id}/network` | yes | `503 capacity_wait` + `Retry-After` | `429 box_full` | `409 lease_busy` | `410 lease_lost` |
 | `POST /api/leases/{id}/prompt` | yes | `503 capacity_wait` + `Retry-After` | `429 box_full` | `409 lease_busy` | `410 lease_lost` |
@@ -803,6 +803,7 @@ failed; the confirmed-absence answer is unchanged in every row.
 | `POST …/exec` `background:true` (`api/jobs_http.go`) | `410 lease no longer exists` (no code) | `503 substrate_unavailable` |
 | `PUT …/files/{path}` and directory remove (`api/files.go`) | `404 file not found` | `503 substrate_unavailable` |
 | `POST …/jobs/{job}/signal` (`api/jobs_http.go`) | `409 job is not running` | `503 substrate_unavailable` |
+| `DELETE …/jobs/{job}` (`api/jobs_http.go`) | `404 job is not on this lease` | `503 substrate_unavailable` |
 | `GET …/stream` (`api/server.go`, `handleStream`) | `error` frame | `error` frame naming `substrate: unavailable` |
 
 The exec-stream path has already committed a protocol (a WebSocket
@@ -897,6 +898,29 @@ background job; a synchronous exec ignores a non-negative value, but a
 negative value is still `400` so a client cannot think it changed the
 exec's timeout.
 
+Two more optional fields tune this job alone:
+
+- `retention_secs` shortens the host's `JOB_RETENTION_SECS` (default
+  7 days) for this job's record and guest files only, never lengthens
+  it; a negative value is `400`. The record names the effective window
+  (`retention_secs` in the job object).
+- `output_max_bytes` caps each of the job's stdout and stderr guest
+  files, in bytes: once a file grows past it, the job poller punches the
+  file's front out between polls (`fallocate --punch-hole` in the guest,
+  block-aligned, so the file's size and every later offset stay put) and
+  only the tail is kept, so a chatty job cannot fill the disk between
+  polls. It shortens the host's `JOB_OUTPUT_MAX_BYTES` (default 0 =
+  unlimited), never lengthens it; a negative value is `400` even on a
+  synchronous exec, so a client cannot believe it capped anything. A
+  dropped front is reported as `"skipped": {"bytes": N, "newlines": M}`
+  — see [Read one job](#get-apileasesidjobsjob) and
+  [Stream job output](#get-apileasesidjobsjoboutput); offsets stay
+  absolute, so a byte range an uncapped read answers is answered the
+  same after a punch. On a substrate without hole-punching the streams
+  are left untruncated (nothing is reported dropped, the log says why).
+  The counters only ever rise, and an already-exited job's streams are
+  never capped (its stderr tail is the record's own copy).
+
 Response `202 Accepted` as soon as the process has started:
 
 ```json
@@ -970,7 +994,10 @@ continue — a cold restart, restore, crash recovery or generation bump).
 stderr. `reason` is `timed_out` when the max runtime, not the command,
 ended the job, and omits otherwise. `max_runtime_secs` is the effective
 cap the job runs under, in whole seconds, and is omitted when 0 (the
-host cap is disabled). Owner, admins and `http` shares as exec has them.
+host cap is disabled). `retention_secs` (spoond-hwto) names the window
+the record and guest files are kept under; `skipped` (see the next
+endpoint) names each stream the output cap has dropped anything from.
+Owner, admins and `http` shares as exec has them.
 
 ### `GET /api/leases/{id}/jobs/{job}` — read one job
 
@@ -985,9 +1012,15 @@ has no output or the sandbox is not reachable, e.g. a suspended lease);
 on a non-fatal read failure an extra `stdout_error` / `stderr_error`
 key marks it rather than dropping the field.
 
-With `?wait=<seconds>` (at most 900) the request long-polls until the
-job is no longer running or the wait ends, then answers the current
-record. This is the easy way to follow a job to completion.
+The record names what the output cap has dropped (spoond-hwto): the
+`job` object carries `"skipped": {"stdout": {"bytes": N, "newlines":
+M}, …}` per stream that dropped anything (omitted whole while none
+did), and a stream whose answer skips a dropped front also carries
+`stdout_offset`/`stderr_offset` (the absolute offset the answer starts
+at) with `stdout_skipped`/`stderr_skipped` beside it. With `?wait=`
+(at most 900) the request long-polls until the job is no longer
+running or the wait ends, then answers the current record. This is the
+easy way to follow a job to completion.
 
 ### `GET /api/leases/{id}/jobs/{job}/output` — stream job output
 
@@ -996,8 +1029,17 @@ Returns raw bytes from one stream so a client can follow output:
 | Query | Default | Notes |
 |---|---|---|
 | `stream` | `stdout` | `stdout` or `stderr` |
-| `offset` | `0` | byte offset |
+| `offset` | `0` | byte offset (omitted: the last `limit` bytes) |
 | `limit` | `1048576` (1 MiB) | capped at 16 MiB |
+
+Offsets are absolute and stable across the output cap (spoond-hwto): a
+read (`?offset=`, or the no-`offset` tail) answers the same bytes before
+and after a front was punched out — a request into the dropped front is
+not an error, it returns the first kept bytes. Once anything has been
+dropped the response carries `X-Output-Offset` (the absolute offset the
+body starts at) and `X-Output-Skipped` (`{"bytes": N, "newlines": M}`,
+the front the cap dropped); both are absent while nothing is dropped,
+so an uncapped response keeps its exact old shape.
 
 ### `POST /api/leases/{id}/jobs/{job}/signal` — signal a job
 
@@ -1007,6 +1049,16 @@ Returns raw bytes from one stream so a client can follow output:
 
 `TERM` or `KILL`; signals the job's process group. `200` on success,
 `409` when the job is not running.
+
+### `DELETE /api/leases/{id}/jobs/{job}` — remove a finished job
+
+Removes a finished job's record and its guest job directory (spoond-hwto):
+`204` on success, `409` while the job is still running (signal it and
+let it exit first: a running job is never deleted behind the poller's
+back), `404` when the job is not on this lease. Same caller rules as
+exec (the owner, admins, or an `http` share granted exec) — the
+record's own retention (`JOB_RETENTION_SECS` or the job's
+`retention_secs`) also prunes it by itself; this is the at-once path.
 
 Background jobs emit `job_started` (detail: the command, cut to 120
 chars), `job_exited` (detail: `exit <code>` and the last 10 stderr
