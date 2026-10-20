@@ -19,6 +19,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -818,24 +819,145 @@ func TestAdmitCapacityWithoutFloor(t *testing.T) {
 	}
 }
 
-// TestPressureFastIntervalNearFloor: under twice the floor the loop
-// checks every pressureFastInterval; with more room, or no usable
-// reading, at the normal interval (spoond-90ia).
-func TestPressureFastIntervalNearFloor(t *testing.T) {
+// TestAdmitResumeLeavesFloorFreeNearFloor: a take-back-paused lease
+// resumes through the holder's ordinary path (resumeForUse), which
+// re-passes admission with the floor as headroom (spoond-154's
+// floor-buffer rule). Near the floor that means refused: with free
+// below the lease's memory plus the floor, the resume answers capacity
+// and the lease stays paused with the floor still free (nothing
+// debited, no other lease taken back); exactly at memory + floor the
+// resume is granted, and the node's free hugepages once the VM holds
+// its pages are exactly the floor.
+func TestAdmitResumeLeavesFloorFreeNearFloor(t *testing.T) {
+	// One MiB short of the lease's 1024 plus the 2048 floor: the resume
+	// is refused and nothing moves.
+	svc, _, ctx, ls, _ := giveBackFixture(t, 1, 3070)
+	l := ls[0]
+	warmFairShares(svc, ctx) // the fixture's freeMiB is below; re-warm after the dynamic node install
+	if free, err := svc.cachedFreeHugepageMiB(ctx); err != nil || free != 3070 {
+		t.Fatalf("setup: cached free = %d, %v; want 3070", free, err)
+	}
+	if _, err := svc.resumeForUse(ctx, l); !errors.Is(err, substrate.ErrCapacity) {
+		t.Fatalf("resume at free 3070 (need 1024 + 2048) = %v, want a capacity refusal", err)
+	}
+	if !l.Suspended || l.State != "suspended" {
+		t.Fatalf("refused resume left the lease state %q suspended=%v, want still suspended", l.State, l.Suspended)
+	}
+	if free, err := svc.cachedFreeHugepageMiB(ctx); err != nil || free != 3070 {
+		t.Fatalf("cached free after the refused resume = %d, %v; want 3070 (nothing debited)", free, err)
+	}
+
+	// Exactly memory + floor: the resume is granted, and the node's free
+	// hugepages after the VM holds its pages are exactly the floor —
+	// admission started the VM only into its own memory, never into the
+	// floor's buffer.
+	svc2, _, ctx2, ls2, _ := giveBackFixture(t, 1, 3072)
+	l2 := ls2[0]
+	warmFairShares(svc2, ctx2)
+	if _, err := svc2.resumeForUse(ctx2, l2); err != nil {
+		t.Fatalf("resume at exactly 1024 + 2048 free: %v", err)
+	}
+	if l2.State != "running" || l2.Suspended {
+		t.Fatalf("resumed lease state = %q suspended=%v, want running", l2.State, l2.Suspended)
+	}
+	// The refreshed cache carries the debit: 3072 - 1024 = 2048, the
+	// floor, still free.
+	if free, err := svc2.cachedFreeHugepageMiB(ctx2); err != nil || free != 2048 {
+		t.Fatalf("cached free after the resume = %d, %v; want 2048 (the floor free after the lease's full size)", free, err)
+	}
+}
+
+// TestAdmitRefreshesNearFloor: spoond-154 — inside the node cache's TTL
+// (15 s), an admission whose request plus the floor sits within
+// nearFloorMarginMiB of the cached free value refreshes the NodeInfo and
+// is judged on the fresh reading: the fake's free pages dropped between
+// the two reads (a VM faulted its memory back in), and the cached value
+// would have admitted what the node no longer has. Away from that edge
+// the cache behaves as before — a request comfortably above it does not
+// make a second call the cached reading already answers.
+func TestAdmitRefreshesNearFloor(t *testing.T) {
+	svc, sub, ctx := newPressureService(t)
+	alice := preemptOwner(t, svc, "alice")
+	svc.cfg.MemoryFloorMiB = 2048
+
+	// The node reads 4096 MiB free; the fake's nodeInfoFn is replaced so
+	// the NEXT read reports the collapse to 512 MiB free — inside the
+	// cache's 15 s window, the shape a fast drop has.
+	sub.SetNodeInfo(substrate.NodeInfo{
+		Status: "healthy", HugepagesTotal: 4096, HugepageSizeBytes: 2 << 20, HugepagesUsed: 2048,
+	}, nil)
+	warmFairShares(svc, ctx) // fills the cache (and the fair snapshot)
+	if free, err := svc.cachedFreeHugepageMiB(ctx); err != nil || free != 4096 {
+		t.Fatalf("setup: cached free = %d, %v; want 4096", free, err)
+	}
+	sub.SetNodeInfo(substrate.NodeInfo{
+		Status: "healthy", HugepagesTotal: 4096, HugepageSizeBytes: 2 << 20, HugepagesUsed: 3584,
+	}, nil)
+
+	// The 1024 MiB request plus the 2048 floor passes the old cache
+	// (4096 >= 3072) but not the fresh value (512). Without spoond-154's
+	// near-floor refresh freeHugepageMiBForRequestLocked would never have
+	// called the substrate again within the TTL and the create would
+	// wrongly be granted.
+	nCalls := len(sub.CallLog())
+	_, err := svc.grantLease(ctx, leaseRequest{owner: alice, image: "mid", ttl: time.Hour, persistent: true})
+	if err == nil || !strings.Contains(err.Error(), "capacity") {
+		t.Fatalf("1024 MiB request inside the cache window = %v, want a capacity refusal on the fresh reading", err)
+	}
+	node := 0
+	for _, c := range sub.CallLog()[nCalls:] {
+		if c == "NodeInfo" {
+			node++
+		}
+	}
+	if node < 2 {
+		t.Fatalf("%d NodeInfo reads during the near-floor grant, want at least 2 (the cache was fresh; the near-floor refresh re-read the substrate inside the TTL)", node)
+	}
+
+	// The same shape with the box away from the floor's edge: a request
+	// whose headroom need is met with plenty to spare trusts the cached
+	// reading and makes no refresh call for it.
+	svc2, sub2, ctx2 := newPressureService(t)
+	bob := preemptOwner(t, svc2, "bob")
+	svc2.cfg.MemoryFloorMiB = 2048
+	sub2.SetNodeInfo(substrate.NodeInfo{
+		Status: "healthy", HugepagesTotal: 1 << 22, HugepageSizeBytes: 2 << 20, HugepagesUsed: 0,
+	}, nil) // free 8192 MiB of an 8 GiB pool: far above the 1024 + 2048 + 2048 edge
+	warmFairShares(svc2, ctx2)
+	callsBefore := len(sub2.CallLog())
+	if _, err := svc2.grantLease(ctx2, leaseRequest{owner: bob, image: "mid", ttl: time.Hour, persistent: true}); err != nil {
+		t.Fatalf("grant with room: %v", err)
+	}
+	node = 0
+	for _, c := range sub2.CallLog()[callsBefore:] {
+		if c == "NodeInfo" {
+			node++
+		}
+	}
+	if node != 1 {
+		t.Fatalf("%d NodeInfo reads during the roomy grant, want 1 (admitCapacity's own check; no near-floor refresh away from the edge)", node)
+	}
+}
+
+// TestPressureChecksEverySecond: the loop's pressureInterval is one
+// second — its normal cadence is a 1 s check with free memory far above
+// the floor (spoond-154), not the old 15 s — while the near-floor fast
+// interval stays a second too (spoond-90ia).
+func TestPressureChecksEverySecond(t *testing.T) {
+	if pressureInterval != time.Second {
+		t.Fatalf("pressureInterval = %s, want 1s (spoond-154)", pressureInterval)
+	}
+	if pressureFastInterval != time.Second {
+		t.Fatalf("pressureFastInterval = %s, want 1s", pressureFastInterval)
+	}
 	svc, sub, ctx, _, _ := giveBackFixture(t, 1, 3072) // 3072 < 2 x 2048
 	svc.pressureCheck(ctx)
-	if got := svc.pressureNextInterval(); got != pressureFastInterval {
-		t.Fatalf("next interval near the floor = %s, want %s", got, pressureFastInterval)
+	if got := svc.pressureNextInterval(); got != time.Second {
+		t.Fatalf("next interval near the floor = %s, want 1s", got)
 	}
-	installDynamicNode(t, svc, sub, 4096, 0, 512) // 8192 MiB free
+	installDynamicNode(t, svc, sub, 4096, 0, 512) // 8192 MiB free, far above the floor
 	svc.pressureCheck(ctx)
-	if got := svc.pressureNextInterval(); got != pressureInterval {
-		t.Fatalf("next interval with room = %s, want %s", got, pressureInterval)
-	}
-	svc.pressureNear.Store(true)
-	sub.SetNodeInfo(substrate.NodeInfo{Status: "draining", HugepagesTotal: 4096, HugepageSizeBytes: 2 << 20}, nil)
-	svc.pressureCheck(ctx)
-	if got := svc.pressureNextInterval(); got != pressureInterval {
-		t.Fatalf("next interval on a bad reading = %s, want %s", got, pressureInterval)
+	if got := svc.pressureNextInterval(); got != time.Second {
+		t.Fatalf("next interval far above the floor = %s, want 1s (a whole second at every distance)", got)
 	}
 }

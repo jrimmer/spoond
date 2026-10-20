@@ -11,17 +11,20 @@ import (
 // one hugepage pool and take-back (admitMemory, memVictims,
 // takeBackPause) is the only way an over-full box makes room.
 
-// fits reports whether the node's free hugepages (from the cache,
-// already net of earlier admissions) can host memoryMB. An unhealthy
-// node reports true: there is nothing to reclaim for, and the ordinary
-// capacity check answers. A node that cannot be read reports false so
-// the caller may try take-back; if nothing can be taken the plain
-// capacity check still answers.
+// fits reports whether the node's free hugepages can host memoryMB. An
+// unhealthy node reports true: there is nothing to reclaim for, and the
+// ordinary capacity check answers. A node that cannot be read reports
+// false so the caller may try take-back; if nothing can be taken the
+// plain capacity check still answers. Near the floor the reading is
+// refreshed against the substrate first (admission.go, spoond-154), so
+// a request that could pass or fail on a 15 s-old cache value is judged
+// on fresh pages; away from that edge the cache behaves exactly as
+// before.
 func (s *Service) fits(ctx context.Context, memoryMB int) (bool, error) {
 	running := s.runningMemoryMiB()
 	s.nodeInfoMu.Lock()
 	defer s.nodeInfoMu.Unlock()
-	freeMiB, err := s.freeHugepageMiBLocked(ctx)
+	freeMiB, err := s.freeHugepageMiBForRequestLocked(ctx, memoryMB)
 	if err != nil {
 		return false, err
 	}

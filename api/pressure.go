@@ -10,7 +10,7 @@ import (
 // Low-memory take-back (MEMORY_FLOOR_MIB, spoond-l3lq). The overcommit
 // cap (MEMORY_OVERCOMMIT) keeps admission from promising more memory
 // than the running VMs may fault back in; the floor is the running
-// counterpart: every 15 s the backend reads the node's free hugepages
+// counterpart: every second the backend reads the node's free hugepages
 // fresh and, when they sit under the floor, takes back exactly one
 // lease (pressureVictim: the least recently used unpinned lease of the
 // owner furthest over their fair slice, non-busy before busy). One
@@ -19,11 +19,14 @@ import (
 // breach sheds load a lease at a time instead of pausing a stack at
 // once.
 //
-// Near the floor (free under twice MEMORY_FLOOR_MIB) the loop checks
-// every second instead (spoond-90ia): on 2026-10-17 two VMs faulting in
-// memory at full speed ate the 2 GiB floor and the rest of the pool
-// inside one 15 s interval, and died of hugepage exhaustion 4 s before
-// the next tick would have paused one.
+// The check runs every second at every distance from the floor
+// (spoond-154, extending spoond-90ia's near-floor interval to the whole
+// loop): running VMs fault memory in at any moment, and on 2026-10-19
+// free hugepages fell from 8.4 GiB to 0.1 GiB in under 15 s — faster
+// than any standing interval — so the floor's check is never slower
+// than the fall it must catch. pressureNear (free under twice
+// MEMORY_FLOOR_MIB) is still recorded on every good reading, and the
+// alert and log rate limits below keep a 1 s loop from spamming.
 //
 // Anti-cycling (round 2): admission keeps the floor as headroom, so a
 // lease the loop paused resumes only with the floor free on top of its
@@ -38,14 +41,20 @@ const (
 	// DefaultMemoryFloorMiB is MEMORY_FLOOR_MIB when unset: keep 2 GiB
 	// of hugepage memory free.
 	DefaultMemoryFloorMiB = 2048
-	// pressureInterval is how often the loop checks the floor.
-	pressureInterval = 15 * time.Second
+	// pressureInterval is how often the loop checks the floor: every
+	// second, at every distance from the floor (spoond-154) — running VMs
+	// fault memory in at any moment, and the check must keep up.
+	pressureInterval = time.Second
 	// pressureFastInterval is how often it checks while free memory sits
-	// under twice the floor.
+	// under twice the floor (the same second; kept as its own knob so the
+	// near-floor branch of pressureNextInterval stays explicit).
 	pressureFastInterval = time.Second
 	// pressureAlertEvery is how often a floor that cannot be met may
 	// repeat its alert.
 	pressureAlertEvery = 10 * time.Minute
+	// pressureNodeInfoLogEvery is how often a failing NodeInfo read may
+	// repeat its log line while the orchestrator stays down.
+	pressureNodeInfoLogEvery = time.Minute
 	// pressurePauseTimeout bounds one floor pause: a snapshot write runs
 	// about 9 s for a 4 GiB lease on sb and up to 35 s under I/O load,
 	// so 2 min is the bound of a bounded operation, not a guess.
@@ -57,11 +66,11 @@ const (
 	pressureRequester = "memory_pressure"
 )
 
-// pressureLoop runs until ctx is done: every pressureInterval (every
-// pressureFastInterval near the floor), keep the box's free hugepage
-// memory at or above MEMORY_FLOOR_MIB. Each interval starts when the
-// previous check returns, so a pause (up to 35 s) is judged by a reading
-// taken after it freed its pages.
+// pressureLoop runs until ctx is done: every second (pressureInterval,
+// the same as pressureFastInterval near the floor), keep the box's free
+// hugepage memory at or above MEMORY_FLOOR_MIB. Each interval starts
+// when the previous check returns, so a pause (up to 35 s) is judged by
+// a reading taken after it freed its pages.
 func (s *Service) pressureLoop(ctx context.Context) {
 	t := time.NewTimer(s.pressureCheckInterval)
 	defer t.Stop()
@@ -77,7 +86,8 @@ func (s *Service) pressureLoop(ctx context.Context) {
 }
 
 // pressureNextInterval is the wait before the next check: the fast
-// interval while the last good reading sat under twice the floor.
+// interval while the last good reading sat under twice the floor, the
+// normal one otherwise — both one second now.
 func (s *Service) pressureNextInterval() time.Duration {
 	if s.pressureNear.Load() && s.pressureFastInterval > 0 {
 		return s.pressureFastInterval
@@ -133,8 +143,11 @@ func (s *Service) pressureCheck(ctx context.Context) bool {
 	// blur it. The next admission refreshes the cache anyway.
 	info, err := s.sub.NodeInfo(ctx)
 	if err != nil {
-		s.log.Printf("memory floor: node info: %v", err)
-		s.pressureNear.Store(false) // no reading: do not poll a failing orchestrator every second
+		if now := s.now(); s.pressureNodeInfoLogAt.IsZero() || now.Sub(s.pressureNodeInfoLogAt) >= pressureNodeInfoLogEvery {
+			s.pressureNodeInfoLogAt = now
+			s.log.Printf("memory floor: node info: %v", err)
+		}
+		s.pressureNear.Store(false) // no reading: never a near-floor reading either
 		return false
 	}
 	// Bad readings are not a floor breach (round 2): an orchestrator

@@ -102,6 +102,39 @@ func TestGiveBackNeedsRoom(t *testing.T) {
 	}
 }
 
+// TestGiveBackNeverEatsTheFloor: give-back never resumes a lease into
+// the floor's buffer (spoond-154). The margin only ADDS room: with it
+// off, the lease's memory plus the floor is still the need (1024 +
+// 2048), so 3071 MiB free (3070 in whole 2 MiB pages) stays short and the lease is paused;
+// at exactly 3072 MiB free the resume is granted, and the node reads
+// back exactly the floor free once the VM holds its pages.
+func TestGiveBackNeverEatsTheFloor(t *testing.T) {
+	svc, _, ctx, ls, _ := giveBackFixture(t, 1, 3071)
+	svc.cfg.GiveBackMarginMiB = -1 // the margin off
+	if svc.pressureCheck(ctx) {
+		t.Fatal("pressureCheck gave back into the floor's buffer")
+	}
+	if !ls[0].Suspended {
+		t.Fatal("lease resumed although the floor would have been left short")
+	}
+
+	// Exactly memory + floor: the resume is granted, and the node's free
+	// hugepages after the VM holds its pages are exactly the floor.
+	svc2, _, ctx2, ls2, _ := giveBackFixture(t, 1, 3072)
+	svc2.cfg.GiveBackMarginMiB = -1
+	if !svc2.pressureCheck(ctx2) {
+		t.Fatal("pressureCheck gave nothing back with exactly memory + floor free")
+	}
+	if ls2[0].State != "running" || ls2[0].Suspended {
+		t.Fatalf("given-back lease state = %q suspended=%v, want running", ls2[0].State, ls2[0].Suspended)
+	}
+	// The refreshed cache carries the resumed lease's debit: exactly the
+	// floor still free.
+	if free, err := svc2.cachedFreeHugepageMiB(ctx2); err != nil || free != 2048 {
+		t.Fatalf("cached free after the give-back = %d, %v; want 2048 (the floor free after the lease's full size)", free, err)
+	}
+}
+
 // TestGiveBackQuietAfterTakeBack: within fifteen minutes of a floor
 // take-back nothing is given back, room or not.
 func TestGiveBackQuietAfterTakeBack(t *testing.T) {

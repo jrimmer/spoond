@@ -17,6 +17,15 @@ import (
 // spoond_node_hugepages_free_bytes.
 const nodeInfoCacheTTL = 15 * time.Second
 
+// nearFloorMarginMiB is the slack under which a cached free reading is
+// no longer trusted (spoond-154): when the cached free sits under
+// request + MEMORY_FLOOR_MIB + this margin, it cannot be told apart
+// from a floor breach, so the request's admission refreshes the
+// NodeInfo instead of trusting the cache window. A whole floor in MiB:
+// a VM faulting memory in can move free pages by more than the floor
+// between two reads (8.4 GiB to 0.1 GiB in under 15 s in production).
+const nearFloorMarginMiB = 2048
+
 // freeHugepageMiB reports the node's free hugepage memory in MiB, from
 // the substrate's NodeInfo cached for at most nodeInfoCacheTTL, less
 // what admissions have taken since that reading (see debitNodeInfoLocked).
@@ -36,6 +45,48 @@ func (s *Service) freeHugepageMiBLocked(ctx context.Context) (uint64, error) {
 		}
 	}
 	return s.nodeInfoCache.FreeHugepageBytes() / (1024 * 1024), nil
+}
+
+// freeHugepageMiBForRequestLocked is freeHugepageMiBLocked with a
+// near-floor refresh (spoond-154): inside nodeInfoCacheTTL's window the
+// cached reading can be up to 15 s stale exactly where staleness matters —
+// when a request plus the floor could pass or fail on the cached value
+// alone. When the cached free sits under request + floor +
+// nearFloorMarginMiB, it refreshes the NodeInfo from the substrate
+// first (ignoring the TTL): the admission's answer is built on a
+// reading no older than the round trip, the same shape the floor loop's
+// own fresh read gives the pause it takes. Away from that edge it is
+// freeHugepageMiBLocked exactly: the cache's one round trip per window
+// still holds. A failed refresh keeps the cached value — staleness
+// beats a wrong refusal, as above; the error only ever comes from
+// freeHugepageMiBLocked with nothing ever cached. The caller holds
+// nodeInfoMu across the read and its debit.
+func (s *Service) freeHugepageMiBForRequestLocked(ctx context.Context, memoryMB int) (uint64, error) {
+	free, err := s.freeHugepageMiBLocked(ctx)
+	if err != nil {
+		return free, err
+	}
+	trigger := uint64(memoryMB + s.floorFor(ctx) + nearFloorMarginMiB)
+	if free >= trigger {
+		return free, nil
+	}
+	if info, rerr := s.sub.NodeInfo(ctx); rerr == nil {
+		s.nodeInfoCache = info
+		s.nodeInfoAt = s.now()
+		free = info.FreeHugepageBytes() / (1024 * 1024)
+	}
+	// A failed refresh keeps the cached reading (with its inflight
+	// debits); the caller's take-back plan and the capacity check answer
+	// on it.
+	return free, nil
+}
+
+// freshFreeHugepageMiB is freeHugepageMiBForRequestLocked with
+// nodeInfoMu taken: the take-back loop's reads (takeBackForAdmission).
+func (s *Service) freshFreeHugepageMiB(ctx context.Context, memoryMB int) (uint64, error) {
+	s.nodeInfoMu.Lock()
+	defer s.nodeInfoMu.Unlock()
+	return s.freeHugepageMiBForRequestLocked(ctx, memoryMB)
 }
 
 // isHostMemoryExhausted reports whether err is the host running out of
