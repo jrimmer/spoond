@@ -515,3 +515,200 @@ func TestFilesSubstrateUnavailable(t *testing.T) {
 		t.Fatalf("lease state = %q, must not be lost", got)
 	}
 }
+
+// fileRangeReq GETs a file with an optional Range header and returns the
+// response with its body read.
+func fileRangeReq(t *testing.T, ts *httptest.Server, id, p, rangeHeader string) (*http.Response, string) {
+	t.Helper()
+	req, err := http.NewRequest("GET", filesURL(ts, id, p, ""), nil)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer token-a")
+	if rangeHeader != "" {
+		req.Header.Set("Range", rangeHeader)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET %s: %v", p, err)
+	}
+	return resp, filesBody(t, resp)
+}
+
+// rangeCalls counts the fake's ReadFile and ReadFileRange calls since
+// mark, so a ranged download can prove it did not read the whole file.
+func rangeCalls(sub *testSub, mark int) (readFile, readRange int) {
+	for _, c := range sub.Fake.CallLog()[mark:] {
+		if strings.HasPrefix(c, "ReadFile ") {
+			readFile++
+		}
+		if strings.HasPrefix(c, "ReadFileRange ") {
+			readRange++
+		}
+	}
+	return readFile, readRange
+}
+
+func TestFileRangeSingle(t *testing.T) {
+	ts, _, _, id := filesSetup(t)
+	content := "0123456789abcdefghijklmnopqrstuvwxyz"
+	resp := filesDo(t, "PUT", filesURL(ts, id, "/range.txt", ""), "token-a", content)
+	if resp.StatusCode != 201 {
+		t.Fatalf("PUT: %d %s", resp.StatusCode, filesBody(t, resp))
+	}
+
+	cases := []struct {
+		name, header, wantBody, wantRange string
+		wantStatus                        int
+	}{
+		{"closed", "bytes=10-19", content[10:20], "bytes 10-19/36", 206},
+		{"open", "bytes=30-", content[30:], "bytes 30-35/36", 206},
+		{"suffix", "bytes=-5", content[31:], "bytes 31-35/36", 206},
+		{"clamped", "bytes=30-999", content[30:], "bytes 30-35/36", 206},
+		{"whole", "bytes=0-", content, "bytes 0-35/36", 206},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, body := fileRangeReq(t, ts, id, "/range.txt", tc.header)
+			if resp.StatusCode != tc.wantStatus {
+				t.Fatalf("status = %d, want %d (%s)", resp.StatusCode, tc.wantStatus, body)
+			}
+			if got := resp.Header.Get("Accept-Ranges"); got != "bytes" {
+				t.Fatalf("Accept-Ranges = %q", got)
+			}
+			if got := resp.Header.Get("Content-Range"); got != tc.wantRange {
+				t.Fatalf("Content-Range = %q, want %q", got, tc.wantRange)
+			}
+			if body != tc.wantBody {
+				t.Fatalf("body = %q, want %q", body, tc.wantBody)
+			}
+		})
+	}
+}
+
+func TestFileRangeReadsOnlyTheRange(t *testing.T) {
+	ts, _, sub, id := filesSetup(t)
+	content := strings.Repeat("abcdefghij", 10)
+	resp := filesDo(t, "PUT", filesURL(ts, id, "/big.txt", ""), "token-a", content)
+	if resp.StatusCode != 201 {
+		t.Fatalf("PUT: %d %s", resp.StatusCode, filesBody(t, resp))
+	}
+	mark := len(sub.Fake.CallLog())
+
+	resp, body := fileRangeReq(t, ts, id, "/big.txt", "bytes=95-99")
+	if resp.StatusCode != 206 {
+		t.Fatalf("status = %d, want 206 (%s)", resp.StatusCode, body)
+	}
+	if body != content[95:100] {
+		t.Fatalf("body = %q, want %q", body, content[95:100])
+	}
+	if got := resp.Header.Get("Content-Range"); got != "bytes 95-99/100" {
+		t.Fatalf("Content-Range = %q", got)
+	}
+	readFile, readRange := rangeCalls(sub, mark)
+	if readFile != 0 || readRange != 1 {
+		t.Fatalf("substrate reads: ReadFile=%d ReadFileRange=%d, want 0 and 1", readFile, readRange)
+	}
+}
+
+func TestFileRangeUnsatisfiable(t *testing.T) {
+	ts, _, _, id := filesSetup(t)
+	resp := filesDo(t, "PUT", filesURL(ts, id, "/small.txt", ""), "token-a", "abc")
+	if resp.StatusCode != 201 {
+		t.Fatalf("PUT: %d %s", resp.StatusCode, filesBody(t, resp))
+	}
+	resp, body := fileRangeReq(t, ts, id, "/small.txt", "bytes=100-")
+	if resp.StatusCode != http.StatusRequestedRangeNotSatisfiable {
+		t.Fatalf("status = %d, want 416 (%s)", resp.StatusCode, body)
+	}
+	if got := resp.Header.Get("Accept-Ranges"); got != "bytes" {
+		t.Fatalf("Accept-Ranges = %q", got)
+	}
+	if got := resp.Header.Get("Content-Range"); got != "bytes */3" {
+		t.Fatalf("Content-Range = %q", got)
+	}
+}
+
+func TestFileRangeMultiServesWhole(t *testing.T) {
+	ts, _, _, id := filesSetup(t)
+	resp := filesDo(t, "PUT", filesURL(ts, id, "/multi.txt", ""), "token-a", "abcdef")
+	if resp.StatusCode != 201 {
+		t.Fatalf("PUT: %d %s", resp.StatusCode, filesBody(t, resp))
+	}
+	resp, body := fileRangeReq(t, ts, id, "/multi.txt", "bytes=0-1,3-4")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", resp.StatusCode, body)
+	}
+	if got := resp.Header.Get("Accept-Ranges"); got != "bytes" {
+		t.Fatalf("Accept-Ranges = %q", got)
+	}
+	if body != "abcdef" {
+		t.Fatalf("body = %q", body)
+	}
+}
+
+// TestFileRangeBeyondWholeReadCap: a ranged GET of a file larger than the
+// whole-file cap still answers its range, because only the range is read
+// from the substrate.
+func TestFileRangeBeyondWholeReadCap(t *testing.T) {
+	defer func(n int64) { maxFileBytes = n }(maxFileBytes)
+	maxFileBytes = 64
+	ts, svc, _, id := filesSetup(t)
+
+	content := strings.Repeat("0123456789", 10) // 100 bytes, over the cap
+	svc.store.mu.Lock()
+	sbxID := svc.store.leases[id].SandboxID
+	svc.store.mu.Unlock()
+	if err := svc.sub.WriteFile(context.Background(), sbxID, "/over.txt", []byte(content), 0o644); err != nil {
+		t.Fatalf("seed over-cap file: %v", err)
+	}
+
+	resp, body := fileRangeReq(t, ts, id, "/over.txt", "")
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("whole GET over cap: %d, want 413 (%s)", resp.StatusCode, body)
+	}
+	resp, body = fileRangeReq(t, ts, id, "/over.txt", "bytes=90-99")
+	if resp.StatusCode != http.StatusPartialContent {
+		t.Fatalf("ranged GET: %d, want 206 (%s)", resp.StatusCode, body)
+	}
+	if body != content[90:] {
+		t.Fatalf("ranged body = %q, want %q", body, content[90:])
+	}
+	if got := resp.Header.Get("Content-Range"); got != "bytes 90-99/100" {
+		t.Fatalf("Content-Range = %q", got)
+	}
+}
+
+// TestFileRangeEdges: a ranged GET of a directory is 409 EISDIR, an
+// unsatisfiable range carries code EINVAL, and one answer never carries
+// more than maxFileBytes (Content-Range names the short range served).
+func TestFileRangeEdges(t *testing.T) {
+	ts, _, _, id := filesSetup(t)
+	resp := filesDo(t, "PUT", filesURL(ts, id, "/edge.txt", ""), "token-a", "0123456789")
+	if resp.StatusCode != 201 {
+		t.Fatalf("PUT: %d %s", resp.StatusCode, filesBody(t, resp))
+	}
+	resp, body := fileRangeReq(t, ts, id, "/edge.txt", "bytes=50-")
+	if resp.StatusCode != http.StatusRequestedRangeNotSatisfiable || !strings.Contains(body, `"code":"EINVAL"`) {
+		t.Fatalf("unsatisfiable = %d %s, want 416 EINVAL", resp.StatusCode, body)
+	}
+
+	defer func(n int64) { maxFileBytes = n }(maxFileBytes)
+	maxFileBytes = 4
+	resp, body = fileRangeReq(t, ts, id, "/edge.txt", "bytes=2-")
+	if resp.StatusCode != 206 || body != "2345" {
+		t.Fatalf("capped range = %d %q, want 206 \"2345\"", resp.StatusCode, body)
+	}
+	if got := resp.Header.Get("Content-Range"); got != "bytes 2-5/10" {
+		t.Fatalf("Content-Range = %q, want bytes 2-5/10", got)
+	}
+	maxFileBytes = 1 << 20
+
+	if resp = filesDo(t, "POST", filesURL(ts, id, "/edgedir", "op=mkdir"), "token-a", ""); resp.StatusCode/100 != 2 {
+		t.Fatalf("mkdir: %d %s", resp.StatusCode, filesBody(t, resp))
+	}
+	resp, body = fileRangeReq(t, ts, id, "/edgedir", "bytes=0-3")
+	if resp.StatusCode != http.StatusConflict || !strings.Contains(body, `"code":"EISDIR"`) {
+		t.Fatalf("directory range = %d %s, want 409 EISDIR", resp.StatusCode, body)
+	}
+}

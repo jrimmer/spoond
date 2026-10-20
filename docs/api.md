@@ -1139,13 +1139,23 @@ answers `410`
 with `code: lease_lost` (see [Lost leases](#lost-leases)). File
 counts and sizes are capped at **256 MiB**: a bigger upload is refused
 with `413` (and `code: EFBIG`) before anything is written, and a bigger
-download with the same instead of the bytes.
+whole-file download with the same instead of the bytes (a ranged
+download reads only its range, so it is not subject to that cap).
 
 **`GET`** downloads the file: `200` with
 `Content-Type: application/octet-stream` and the raw bytes; `404` with
 `code: ENOENT` when it does not exist, `409` with `code: EISDIR` when
-the path names a directory. With `?stat=1` the route returns the
-metadata instead:
+the path names a directory. Every answer carries `Accept-Ranges: bytes`.
+A single standard `Range` header (`bytes=a-b`, `bytes=a-` or `bytes=-n`)
+is served as `206 Partial Content` with `Content-Range: bytes a-b/size`,
+reading only that range from the substrate (a range of a file larger
+than the 256 MiB whole-file cap is therefore still readable). A range
+that starts at or past the end answers `416` with `code: EINVAL` and
+`Content-Range: bytes */size`. One answer carries at most 256 MiB: a
+larger range is served short, and `Content-Range` names the bytes sent,
+so ask again from where it stopped. Multi-range requests are answered
+with the whole file (`200`), as HTTP allows. With `?stat=1` the route
+returns the metadata instead:
 
 ```json
 {"name":"motd","size":11,"mode":"640","mod_time":"2026-10-05T09:30:00Z","is_dir":false}

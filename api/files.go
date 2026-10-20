@@ -1,12 +1,15 @@
 package api
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jrimmer/spoond/v3/substrate"
@@ -181,10 +184,21 @@ func (s *Server) filesGate(w http.ResponseWriter, r *http.Request) *Lease {
 	return lease
 }
 
+// fileRangeReader is the optional substrate extension the file download
+// uses to read one byte range without fetching everything before it. The
+// e2b and fake substrates implement it.
+type fileRangeReader interface {
+	ReadFileRange(ctx context.Context, sandboxID, path string, offset, limit int64) ([]byte, error)
+}
+
 // handleFileDownload answers GET .../files/{path}: the file's bytes as
 // application/octet-stream. ?stat=1 returns the metadata document
-// instead. 404 when the path does not exist, 413 beyond 256 MiB.
+// instead. A single standard Range header is served as 206 with
+// Content-Range; a range past the end is 416. Multi-range requests (and
+// malformed ones) are answered with the whole file, as HTTP allows. 404
+// when the path does not exist, 413 beyond 256 MiB.
 func (s *Server) handleFileDownload(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Accept-Ranges", "bytes")
 	lease := s.filesGate(w, r)
 	if lease == nil {
 		return
@@ -207,6 +221,11 @@ func (s *Server) handleFileDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer s.releaseXfer()
+	rng, ranged := parseByteRange(r.Header.Get("Range"))
+	if ranged {
+		s.serveFileRange(w, r, lease, guestPath, rng)
+		return
+	}
 	data, err := s.svc.sub.ReadFile(r.Context(), lease.SandboxID, guestPath, maxFileBytes)
 	if err != nil {
 		s.mapFileError(w, lease, "read", err)
@@ -215,6 +234,144 @@ func (s *Server) handleFileDownload(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+}
+
+// byteRange is one parsed Range header: the forms bytes=a-b, bytes=a-
+// and bytes=-n. first is -1 for a suffix range; last is -1 for an open
+// one.
+type byteRange struct {
+	first, last int64
+}
+
+// parseByteRange parses a single standard byte Range header. ok is false
+// when there is no header, it names another unit, it is malformed, or it
+// asks for several ranges: the caller then serves the whole file, which
+// HTTP permits.
+func parseByteRange(header string) (byteRange, bool) {
+	header = strings.TrimSpace(header)
+	if header == "" {
+		return byteRange{}, false
+	}
+	unit, spec, found := strings.Cut(header, "=")
+	if !found || !strings.EqualFold(strings.TrimSpace(unit), "bytes") {
+		return byteRange{}, false
+	}
+	spec = strings.TrimSpace(spec)
+	if spec == "" || strings.Contains(spec, ",") {
+		return byteRange{}, false
+	}
+	if strings.HasPrefix(spec, "-") {
+		n, err := strconv.ParseInt(strings.TrimSpace(spec[1:]), 10, 64)
+		if err != nil || n < 0 {
+			return byteRange{}, false
+		}
+		return byteRange{first: -1, last: n}, true
+	}
+	firstStr, lastStr, found := strings.Cut(spec, "-")
+	if !found {
+		return byteRange{}, false
+	}
+	first, err := strconv.ParseInt(strings.TrimSpace(firstStr), 10, 64)
+	if err != nil || first < 0 {
+		return byteRange{}, false
+	}
+	last := int64(-1)
+	if lastStr = strings.TrimSpace(lastStr); lastStr != "" {
+		last, err = strconv.ParseInt(lastStr, 10, 64)
+		if err != nil || last < first {
+			return byteRange{}, false
+		}
+	}
+	return byteRange{first: first, last: last}, true
+}
+
+// resolveRange turns a parsed range into an absolute, inclusive
+// [start, end] for a file of size bytes. satisfiable is false for a
+// range that begins at or past the end (416).
+func (br byteRange) resolve(size int64) (start, end int64, satisfiable bool) {
+	if br.first < 0 {
+		// Suffix range: the last n bytes. n == 0 names no byte.
+		if br.last <= 0 || size == 0 {
+			return 0, 0, false
+		}
+		start = size - br.last
+		if start < 0 {
+			start = 0
+		}
+		return start, size - 1, true
+	}
+	if br.first >= size {
+		return 0, 0, false
+	}
+	end = size - 1
+	if br.last >= 0 && br.last < end {
+		end = br.last
+	}
+	return br.first, end, true
+}
+
+// serveFileRange reads only the requested byte range and answers 206
+// with Content-Range. It stats the file first for its size, which the
+// Content-Range and a suffix range both need.
+func (s *Server) serveFileRange(w http.ResponseWriter, r *http.Request, lease *Lease, guestPath string, br byteRange) {
+	info, err := s.svc.sub.Stat(r.Context(), lease.SandboxID, guestPath)
+	if err != nil {
+		s.mapFileError(w, lease, "stat", err)
+		return
+	}
+	if info.IsDir {
+		writeErrorCode(w, http.StatusConflict, "EISDIR", guestPath+" is a directory")
+		return
+	}
+	start, end, ok := br.resolve(info.Size)
+	if !ok {
+		w.Header().Set("Content-Range", "bytes */"+strconv.FormatInt(info.Size, 10))
+		writeErrorCode(w, http.StatusRequestedRangeNotSatisfiable, "EINVAL", "range not satisfiable")
+		return
+	}
+	// One answer carries at most maxFileBytes: a larger range is served
+	// short, and Content-Range says so (HTTP lets a client ask again
+	// from where the answer stopped).
+	if end-start+1 > maxFileBytes {
+		end = start + maxFileBytes - 1
+	}
+	length := end - start + 1
+	var data []byte
+	if rr, ok := s.svc.sub.(fileRangeReader); ok {
+		data, err = rr.ReadFileRange(r.Context(), lease.SandboxID, guestPath, start, length)
+	} else {
+		// A substrate without the optional range read: fetch the whole
+		// file and slice, still capped at maxFileBytes like a plain GET.
+		data, err = s.svc.sub.ReadFile(r.Context(), lease.SandboxID, guestPath, maxFileBytes)
+		if err == nil {
+			if start >= int64(len(data)) {
+				data = nil
+			} else {
+				data = data[start:]
+				if int64(len(data)) > length {
+					data = data[:length]
+				}
+			}
+		}
+	}
+	if err != nil {
+		s.mapFileError(w, lease, "read", err)
+		return
+	}
+	if len(data) == 0 {
+		// The file shrank under the range between the stat and the read.
+		w.Header().Set("Content-Range", "bytes */"+strconv.FormatInt(info.Size, 10))
+		writeErrorCode(w, http.StatusRequestedRangeNotSatisfiable, "EINVAL", "range not satisfiable")
+		return
+	}
+	// Content-Range names the bytes actually read, which a file that
+	// shrank since the stat can make fewer than asked.
+	end = start + int64(len(data)) - 1
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, info.Size))
+	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+	w.WriteHeader(http.StatusPartialContent)
 	_, _ = w.Write(data)
 }
 

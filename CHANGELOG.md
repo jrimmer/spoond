@@ -12,6 +12,16 @@ summarised from README "Status".
 
 ### Added
 
+- **Ranged reads on `GET /api/leases/{id}/files/{path…}` (spoond-kb8l).**
+  A single standard `Range` header (`bytes=a-b`, `bytes=a-`,
+  `bytes=-n`) is answered `206` with `Content-Range`, reading only the
+  requested bytes through the substrate's range read, so a caller can
+  page through a file without downloading it. A range past the end is
+  `416`; every answer carries `Accept-Ranges: bytes`. Without a `Range`
+  header the route is unchanged, and a multi-range request is served as
+  the whole file (`200`), as HTTP allows. A range of a file larger than
+  the 256 MiB whole-file cap is still readable.
+
 - **Per-job retention and an output cap for background jobs
   (spoond-hwto).** Three pieces on the background-exec surface:
   - `DELETE /api/leases/{id}/jobs/{job}` removes a finished job's record
