@@ -474,7 +474,7 @@ type ServiceConfig struct {
 	MemoryOvercommit     float64
 	PinnedIdleNoticeDays int
 	// MemoryFloorMiB is MEMORY_FLOOR_MIB (spoond-l3lq): the free hugepage
-	// memory the backend keeps on the box, checked every 15 s by the
+	// memory the backend keeps on the box, checked every second by the
 	// low-memory loop (api/pressure.go). Below the floor it pauses one
 	// lease through pressureVictim (the least recently used unpinned
 	// lease of the owner furthest over their fair slice — pinned leases
@@ -740,9 +740,10 @@ type Service struct {
 	// shrink it.
 	pressureCheckInterval time.Duration
 	// pressureFastInterval is the loop's interval while the last reading
-	// was near the floor (under twice MEMORY_FLOOR_MIB): VMs faulting in
-	// memory can eat the floor's headroom inside one 15 s interval
-	// (spoond-90ia). A field so tests can shrink it.
+	// was near the floor (under twice MEMORY_FLOOR_MIB) (spoond-90ia).
+	// The normal interval is every second now too (spoond-154), so the
+	// two are the same duration; the field stays for the near-floor
+	// distinction. A field so tests can shrink it.
 	pressureFastInterval time.Duration
 	// pressureNear is set by each pressureCheck that got a good reading:
 	// whether free memory sat under twice the floor. The loop picks
@@ -839,6 +840,11 @@ type Service struct {
 	// instead of every tick. Written only by pressureCheck, which the
 	// loop calls alone (no other goroutine reads or writes it).
 	pressureAlertAt time.Time
+	// pressureNodeInfoLogAt is when the low-memory loop last logged a
+	// failed NodeInfo read: against a down orchestrator the 1 s loop logs
+	// at most once per pressureNodeInfoLogEvery. Written only by
+	// pressureCheck, like pressureAlertAt.
+	pressureNodeInfoLogAt time.Time
 	// lastTakeBackAt is the UnixNano of the last take-back of any kind
 	// (admission or floor): give-back stays quiet for giveBackQuiet
 	// after it. Written by every takeBackPause.
@@ -1929,7 +1935,7 @@ func (s *Service) Start(ctx context.Context) {
 	// Usage history (#140 U4): one usage_samples row per owner every
 	// sample interval, old rows pruned past the retention window.
 	go s.runUsageHistoryLoop(ctx)
-	// Low-memory take-back (MEMORY_FLOOR_MIB, spoond-l3lq): every 15 s
+	// Low-memory take-back (MEMORY_FLOOR_MIB, spoond-l3lq): every second
 	// keep the free hugepages at or above the floor by pausing one lease
 	// through the ordinary take-back rules.
 	go s.pressureLoop(ctx)

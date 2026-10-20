@@ -1028,12 +1028,16 @@ cannot become the door an over-slice owner walks its memory through;
 an owner inside its slice is served as before.
 
 **Low-memory floor** (`MEMORY_FLOOR_MIB`, spoond-l3lq). The overcommit
-cap guards admission; the floor is the running counterpart: every 15 s
-the backend reads the node's free hugepages fresh (never the admission
-cache, whose credits and debits blur a standing condition) and, below
-the floor, pauses exactly one lease — repeating on the next tick, after
-the pause's snapshot write has actually freed the pages. Default
-`2048` (MiB); `0` disables the check. The victim is the lease
+cap guards admission; the floor is the running counterpart: every
+second the backend reads the node's free hugepages fresh (never the
+admission cache, whose credits and debits blur a standing condition)
+and, below the floor, pauses exactly one lease — repeating on the next
+tick, after the pause's snapshot write has actually freed the pages.
+The check runs at every distance from the floor (spoond-154): running
+VMs fault memory back in at any moment, and free hugepages fell from
+8.4 GiB to 0.1 GiB in under 15 s in production, faster than any
+standing interval. Default `2048` (MiB); `0` disables the check. The
+victim is the lease
 pressureVictim picks: the owner with the highest used/slice among the
 owners over their slice, and inside that owner the least recently used
 unpinned lease, non-busy before busy — so a single-lease owner over
