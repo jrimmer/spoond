@@ -52,6 +52,9 @@ const (
 	// pressureAlertEvery is how often a floor that cannot be met may
 	// repeat its alert.
 	pressureAlertEvery = 10 * time.Minute
+	// pressureNodeInfoLogEvery is how often a failing NodeInfo read may
+	// repeat its log line while the orchestrator stays down.
+	pressureNodeInfoLogEvery = time.Minute
 	// pressurePauseTimeout bounds one floor pause: a snapshot write runs
 	// about 9 s for a 4 GiB lease on sb and up to 35 s under I/O load,
 	// so 2 min is the bound of a bounded operation, not a guess.
@@ -140,7 +143,10 @@ func (s *Service) pressureCheck(ctx context.Context) bool {
 	// blur it. The next admission refreshes the cache anyway.
 	info, err := s.sub.NodeInfo(ctx)
 	if err != nil {
-		s.log.Printf("memory floor: node info: %v", err)
+		if now := s.now(); s.pressureNodeInfoLogAt.IsZero() || now.Sub(s.pressureNodeInfoLogAt) >= pressureNodeInfoLogEvery {
+			s.pressureNodeInfoLogAt = now
+			s.log.Printf("memory floor: node info: %v", err)
+		}
 		s.pressureNear.Store(false) // no reading: never a near-floor reading either
 		return false
 	}

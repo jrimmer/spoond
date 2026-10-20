@@ -49,7 +49,7 @@ func (s *Service) freeHugepageMiBLocked(ctx context.Context) (uint64, error) {
 
 // freeHugepageMiBForRequestLocked is freeHugepageMiBLocked with a
 // near-floor refresh (spoond-154): inside nodeInfoCacheTTL's window the
-// cached reading can be minutes stale exactly where staleness matters —
+// cached reading can be up to 15 s stale exactly where staleness matters —
 // when a request plus the floor could pass or fail on the cached value
 // alone. When the cached free sits under request + floor +
 // nearFloorMarginMiB, it refreshes the NodeInfo from the substrate

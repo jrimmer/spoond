@@ -105,7 +105,7 @@ func TestGiveBackNeedsRoom(t *testing.T) {
 // TestGiveBackNeverEatsTheFloor: give-back never resumes a lease into
 // the floor's buffer (spoond-154). The margin only ADDS room: with it
 // off, the lease's memory plus the floor is still the need (1024 +
-// 2048), so 3071 MiB free stays short by one and the lease is paused;
+// 2048), so 3071 MiB free (3070 in whole 2 MiB pages) stays short and the lease is paused;
 // at exactly 3072 MiB free the resume is granted, and the node reads
 // back exactly the floor free once the VM holds its pages.
 func TestGiveBackNeverEatsTheFloor(t *testing.T) {

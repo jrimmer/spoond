@@ -840,6 +840,11 @@ type Service struct {
 	// instead of every tick. Written only by pressureCheck, which the
 	// loop calls alone (no other goroutine reads or writes it).
 	pressureAlertAt time.Time
+	// pressureNodeInfoLogAt is when the low-memory loop last logged a
+	// failed NodeInfo read: against a down orchestrator the 1 s loop logs
+	// at most once per pressureNodeInfoLogEvery. Written only by
+	// pressureCheck, like pressureAlertAt.
+	pressureNodeInfoLogAt time.Time
 	// lastTakeBackAt is the UnixNano of the last take-back of any kind
 	// (admission or floor): give-back stays quiet for giveBackQuiet
 	// after it. Written by every takeBackPause.
