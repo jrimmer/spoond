@@ -10,6 +10,8 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+## [3.12.0] - 2026-10-20
+
 ### Added
 
 - **A lease-scoped self token (spoond #156).** A create with
@@ -30,7 +32,9 @@ summarised from README "Status".
   "released from inside the lease" unless it gives its own. The two
   secret name spaces are separate: `spoond-lease-token`,
   `spoond-lease-id` and `spoond-api-url` are reserved, and a create or
-  exec secret using one is a `400`.
+  exec secret using one is a `400`. Both path forms work: the token
+  reaches the same two routes under `/api/sandboxes` too. Schema 32 → 33
+  (two `ADD COLUMN`s on `leases`).
 
 ## [3.11.1] - 2026-10-20
 
