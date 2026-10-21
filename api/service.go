@@ -102,6 +102,12 @@ type Lease struct {
 	// in whole seconds (records A). A later release's history row
 	// carries it. 0 = none yet.
 	MaxNapSecs int64 `json:"-"`
+	// SelfToken marks a lease created with a lease-scoped self token
+	// (#156): a guest credential that may release and keep alive this
+	// lease alone. SelfTokenHash is the sha256 hex of the current token
+	// (never the token itself); it is cleared when the lease ends.
+	SelfToken     bool   `json:"self_token"`
+	SelfTokenHash string `json:"-"`
 	// PinnedIdleSince is when a pinned lease's LastActive first passed
 	// PINNED_IDLE_NOTICE_DAYS (FS5): visibility only — GET returns it as
 	// "pinned_idle_since", a lease.pinned_idle event fires once per
@@ -304,6 +310,9 @@ func (l *Lease) setState(state string) {
 		if l.LostAt.IsZero() {
 			l.LostAt = time.Now()
 		}
+		// A lost lease's self token is revoked at once (#156): its sandbox
+		// is gone, and any copy of the token must stop working.
+		l.SelfTokenHash = ""
 		return
 	}
 	l.LostAt = time.Time{}
@@ -438,6 +447,10 @@ type ServiceConfig struct {
 	EventsToken     string // EVENTS_TOKEN: bearer that may read the lease event stream only (dashboards)
 	HostAPIPort     int    // HOST_API_PORT: lease API port lan/internet guests may reach on HostGuestAddr (0 = none)
 	ProxyURL        string // E2B orchestrator sandbox proxy (e.g. http://127.0.0.1:5007)
+	// SelfTokenAPIURL is the lease API base URL written into a
+	// self-token lease's guest as /run/secrets/spoond-api-url (#156).
+	// Empty writes no URL file.
+	SelfTokenAPIURL string
 	// CheckpointIntervalDefault is the host default checkpoint interval
 	// in seconds (2.3, #122) applied to leases whose own interval is -1
 	// ("the host default"). 0 = never. CHECKPOINT_INTERVAL_MINS.
@@ -897,6 +910,10 @@ type Service struct {
 	// caller re-sends them on its next exec. Keyed by lease id.
 	secretsMu     sync.Mutex
 	createSecrets map[string]map[string]string
+	// selfTokens holds each self-token lease's current token (#156),
+	// memory only like createSecrets; the store keeps the hash. Guarded
+	// by secretsMu.
+	selfTokens map[string]string
 	// notifier receives the bus's person-relevant events (2.2, #117:
 	// lease lost, held-lease rule actions). Nil until SetNotifier; the
 	// notify loop is only started when it is set.
@@ -2266,6 +2283,10 @@ func (s *Service) releaseBecauseIf(ctx context.Context, l *Lease, reason string,
 		return
 	}
 	l.released = true
+	// The lease's self token dies with it (#156): clear the hash under the
+	// same lock that marks it released, so a token presented after this
+	// point never authenticates.
+	l.SelfTokenHash = ""
 	// The measured peak (#130 step 1) is read before the sampler loses
 	// the lease's entry: peakRelease reads and forgets under one lock, so
 	// a sampler tick in flight cannot slip in between and a later forget
@@ -2764,7 +2785,10 @@ type leaseRequest struct {
 	comment string
 	// pinned asks spoond never to pause or delete the new lease before
 	// its own expiry (FS5). The holder labels never pin.
-	pinned        bool
+	pinned bool
+	// selfToken asks for a lease-scoped self token (#156): a guest
+	// credential that may release or keep alive this lease alone.
+	selfToken     bool
 	createSecrets map[string]string
 	exposePorts   []int
 	burst         bool
@@ -2982,6 +3006,7 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 		HolderUrl:   req.holderURL,
 		Comment:     req.comment,
 		Pinned:      req.pinned,
+		SelfToken:   req.selfToken,
 		State:       "running",
 		// The lease's MiB charge (#128): the very number reserveQuota
 		// admitted with, so accounting and release always agree and quota
@@ -3319,18 +3344,22 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 	// the probe never runs with them present, and before the lease is
 	// registered, so a staging failure cannot hand out (or strand) a
 	// lease without its secrets.
-	if len(req.createSecrets) > 0 {
-		// The lease is not registered yet: the flag is written with its
-		// first row below (#141).
-		lease.HadSecrets = true
-		if err := s.stageSecrets(ctx, lease.SandboxID, req.createSecrets); err != nil {
+	if len(req.createSecrets) > 0 || lease.SelfToken {
+		// The lease is not registered yet: the flags (and a self token's
+		// hash) are written with its first row below (#141, #156).
+		if len(req.createSecrets) > 0 {
+			lease.HadSecrets = true
+		}
+		if err := s.stageCreateSecrets(ctx, lease, req.createSecrets, false); err != nil {
 			_ = s.sub.Delete(ctx, lease.SandboxID)
 			s.deleteSandboxRow(lease.SandboxID)
 			s.endCreatingSandbox(lease.SandboxID)
 			s.forgetAppliedEgress(lease.ID)
 			return nil, fmt.Errorf("stage lease secrets: %w", err)
 		}
-		s.setCreateSecrets(lease.ID, req.createSecrets)
+		if len(req.createSecrets) > 0 {
+			s.setCreateSecrets(lease.ID, req.createSecrets)
+		}
 	}
 
 	// The guest's generation file always exists (2.2): generation 1 on a
@@ -4413,6 +4442,7 @@ func (s *Service) clone(ctx context.Context, owner, srcID string) (*Lease, strin
 	// Read under the store lock: markHadSecrets writes it there (#141).
 	s.store.mu.Lock()
 	srcHadSecrets := src.HadSecrets
+	srcSelfToken := src.SelfToken
 	s.store.mu.Unlock()
 	now := time.Now()
 	lease := &Lease{
@@ -4435,9 +4465,13 @@ func (s *Service) clone(ctx context.Context, owner, srcID string) (*Lease, strin
 		VCPU:               vcpu,   // the source's size (#151 Z1)
 		Sized:              src.Sized,
 		HadSecrets:         srcHadSecrets, // a clone carries the source's memory (#141)
-		DiskMB:             diskMB,        // the running reservation (FS3a)
-		Generation:         1,             // every lease starts on generation 1 (2.2)
-		TemplateID:         img.TemplateID,
+		// A clone of a self-token lease gets its own token (#156), written
+		// over the copy the snapshot carried; the source's token never
+		// works on it (it is bound to the source's id anyway).
+		SelfToken:  srcSelfToken,
+		DiskMB:     diskMB, // the running reservation (FS3a)
+		Generation: 1,      // every lease starts on generation 1 (2.2)
+		TemplateID: img.TemplateID,
 	}
 	// Memory admission (FS2b-1): the clone takes its own charge against
 	// the one pool, like every lease.
@@ -4466,6 +4500,15 @@ func (s *Service) clone(ctx context.Context, owner, srcID string) (*Lease, strin
 	lease.ExposedIP = sb.HostIP
 	lease.BuildID = b.BuildID
 	s.writeGeneration(lease)
+	if lease.SelfToken {
+		if err := s.stageCreateSecrets(ctx, lease, nil, false); err != nil {
+			_ = s.sub.Delete(ctx, sb.ID)
+			s.deleteSandboxRow(sb.ID)
+			s.endCreatingSandbox(sb.ID)
+			s.forgetAppliedEgress(lease.ID)
+			return nil, "", fmt.Errorf("stage self token: %w", err)
+		}
+	}
 	s.store.mu.Lock()
 	// Final guard against a delete that raced this clone (spoond-q4j B1).
 	// The clone reserved quota before the owner could be marked and then
@@ -4576,6 +4619,7 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 	// Read under the store lock: markHadSecrets writes it there (#141).
 	s.store.mu.Lock()
 	srcHadSecrets := src.HadSecrets
+	srcSelfToken := src.SelfToken
 	s.store.mu.Unlock()
 
 	// The whole batch's memory is admitted at once, before any child
@@ -4649,9 +4693,13 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 			VCPU:               vcpu,   // the source's size (#151 Z1)
 			Sized:              src.Sized,
 			HadSecrets:         srcHadSecrets, // a fork carries the source's memory (#141)
-			DiskMB:             diskMB,        // the running reservation (FS3a)
-			Generation:         1,             // every lease starts on generation 1 (2.2)
-			TemplateID:         img.TemplateID,
+			// A fork child of a self-token lease gets its own token (#156),
+			// written over the copy the snapshot carried; the source's token
+			// never works on the child.
+			SelfToken:  srcSelfToken,
+			DiskMB:     diskMB, // the running reservation (FS3a)
+			Generation: 1,      // every lease starts on generation 1 (2.2)
+			TemplateID: img.TemplateID,
 		}
 		// Hold this child's egress memo in flight until it is in the store
 		// (or rolled back), so a refresh mid-create does not prune it
@@ -4667,6 +4715,12 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 		lease.ExposedIP = sb.HostIP
 		lease.BuildID = b.BuildID
 		s.writeGeneration(lease)
+		if lease.SelfToken {
+			if err := s.stageCreateSecrets(ctx, lease, nil, false); err != nil {
+				s.endAppliedEgress(lease.ID)
+				return rollback(fmt.Errorf("stage self token: %w", err))
+			}
+		}
 		s.store.mu.Lock()
 		// Final guard against a delete that raced this fork (spoond-q4j
 		// B1): each child commits under the store lock, so either the
@@ -5237,6 +5291,11 @@ func (s *Service) leaseMap(l *Lease, ms *memSampler, checkpointInterval, idleSus
 		// PINNED_IDLE_NOTICE_DAYS (visibility only).
 		"pinned": l.Pinned,
 	}
+	// A lease-scoped self token (#156): the lease reports that it has
+	// one; neither the token nor its hash is ever returned.
+	if l.SelfToken {
+		m["self_token"] = true
+	}
 	// The lease's own size (#151 Z1): what its VM runs with and what it
 	// is charged. Omitted while unknown (a lease from before the stamps
 	// over a vanished image).
@@ -5649,6 +5708,8 @@ func leaseToRow(l *Lease) store.LeaseRow {
 		VCPU:                  l.VCPU,
 		Sized:                 l.Sized,
 		HadSecrets:            l.HadSecrets,
+		SelfToken:             l.SelfToken,
+		SelfTokenHash:         l.SelfTokenHash,
 		DiskMB:                l.DiskMB,
 		PreemptedAt:           l.PreemptedAt,
 		SnapshotBuildID:       l.SnapshotBuildID,
@@ -5705,6 +5766,8 @@ func rowToLease(r store.LeaseRow) *Lease {
 		VCPU:                  r.VCPU,
 		Sized:                 r.Sized,
 		HadSecrets:            r.HadSecrets,
+		SelfToken:             r.SelfToken,
+		SelfTokenHash:         r.SelfTokenHash,
 		DiskMB:                r.DiskMB,
 		PreemptedAt:           r.PreemptedAt,
 		SnapshotBuildID:       r.SnapshotBuildID,

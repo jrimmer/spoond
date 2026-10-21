@@ -10,6 +10,28 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Added
+
+- **A lease-scoped self token (spoond #156).** A create with
+  `"self_token": true` mints a `spl_` credential for the lease and
+  writes it, the lease id and (when `SELF_TOKEN_API_URL` is set) the API
+  URL into the guest as `/run/secrets/spoond-lease-token`,
+  `spoond-lease-id` and `spoond-api-url` (mode 0600, the secrets tmpfs).
+  The token reaches exactly two routes, both for its own lease only:
+  `DELETE /api/leases/{id}` and `POST /api/leases/{id}/keepalive`; every
+  other request answers `403 lease_token_scope`, and the handlers
+  re-check the lease id. Only the token's sha256 is stored. The token
+  stays the same for the lease's life, so a guest may read it once: a
+  resume, restart, crash recovery, restore or named-snapshot save writes
+  the same token again (after a backend restart, by keeping the guest's
+  copy when it matches the stored hash), and a new one is minted only
+  when no copy is left. Fork and clone children get their own, and a
+  lease that ends (delete, expiry, lost) clears its hash at once. A DELETE with a lease token records the release reason
+  "released from inside the lease" unless it gives its own. The two
+  secret name spaces are separate: `spoond-lease-token`,
+  `spoond-lease-id` and `spoond-api-url` are reserved, and a create or
+  exec secret using one is a `400`.
+
 ## [3.11.1] - 2026-10-20
 
 ### Fixed

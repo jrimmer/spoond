@@ -846,6 +846,33 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		// L5). hit() returns true when the caller is now over the
 		// limit; valid tokens always pass and reset the window.
 		ip := clientIP(r.RemoteAddr)
+		// A lease-scoped self token (#156) is not a consumer token: it
+		// authenticates as the lease's owner and reaches exactly the two
+		// routes that may end or keep alive that one lease. Anything else
+		// it asks for is refused; an unknown token counts as a bad auth.
+		if isSelfTokenBearer(token) {
+			lease := s.svc.leaseBySelfToken(token)
+			if lease == nil {
+				s.metrics.AuthFailures.Inc()
+				if s.authFails.hit(ip) {
+					s.metrics.AuthThrottled.Inc()
+					writeError(w, http.StatusTooManyRequests, "too many failed auth attempts; try again shortly")
+					return
+				}
+				writeError(w, http.StatusUnauthorized, "invalid token")
+				return
+			}
+			s.authFails.clear(ip)
+			if id, ok := selfTokenPathID(r); !ok || id != lease.ID {
+				writeErrorCode(w, http.StatusForbidden, "lease_token_scope",
+					"this token may only release or keep alive its own lease")
+				return
+			}
+			ctx := context.WithValue(r.Context(), ctxOwnerKey{}, lease.Owner)
+			ctx = context.WithValue(ctx, ctxLeaseToken{}, lease.ID)
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
 		owner, ok := s.svc.ResolveOwner(token)
 		if !ok {
 			s.metrics.AuthFailures.Inc()
@@ -907,6 +934,7 @@ type ctxOwnerKey struct{}
 type ctxUserKey struct{}
 type ctxEventsToken struct{} // set when the caller authenticated with the events-only EVENTS_TOKEN
 type ctxAdminMint struct{}   // set when the request was exempted for the break-glass token mint (#138 A3)
+type ctxLeaseToken struct{}  // set to the lease id when a lease-scoped self token authenticated the request (#156)
 
 // authFailLimiter throttles repeated failed token auths per client IP
 // (security review #37 L5). Tokens are high-entropy so brute force is
@@ -1193,6 +1221,12 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		// (mode 0600, on a 0700 tmpfs). Values are kept in memory only,
 		// never stored, logged or returned.
 		Secrets map[string]string `json:"secrets"`
+		// SelfToken asks for a lease-scoped credential (#156) that the
+		// guest may use to release or keep alive this lease only. It is
+		// written into the guest's /run/secrets with the lease id (and
+		// the API URL when configured); the token and its hash are never
+		// returned.
+		SelfToken bool `json:"self_token"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
@@ -1358,6 +1392,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		netPolicy: req.NetPolicy, netAllow: req.NetAllow, holder: req.Holder, holderURL: req.HolderURL,
 		comment:       req.Comment,
 		pinned:        req.Pinned,
+		selfToken:     req.SelfToken,
 		createSecrets: secrets, exposePorts: expose,
 		snapshot: start,
 		vcpu:     sizeVCPU, memoryMB: sizeMemoryMB,
@@ -1529,6 +1564,11 @@ func (s *Server) writeCreatedLease(w http.ResponseWriter, r *http.Request, lease
 		"generation":          lease.Generation,
 		"checkpoint_interval": s.svc.effectiveCheckpointInterval(lease),
 		"idle_suspend":        s.svc.effectiveIdleSuspend(lease),
+	}
+	// A lease-scoped self token (#156): report that the lease has one;
+	// the token and its hash are never returned.
+	if lease.SelfToken {
+		body["self_token"] = true
 	}
 	// A lease started from a named snapshot carries what it started from
 	// (A3).
@@ -1928,6 +1968,13 @@ func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleKeepAlive(w http.ResponseWriter, r *http.Request) {
 	owner := ownerFrom(r.Context())
 	id := r.PathValue("id")
+	// Defence in depth for a lease-scoped self token (#156), as in
+	// handleDelete.
+	if tokenID, ok := leaseTokenID(r.Context()); ok && tokenID != id {
+		writeErrorCode(w, http.StatusForbidden, "lease_token_scope",
+			"this token may only release or keep alive its own lease")
+		return
+	}
 	var req struct {
 		TTL int `json:"ttl"` // seconds; 0 = maxTTL
 	}
@@ -2809,13 +2856,25 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// Defence in depth for a lease-scoped self token (#156): the auth
+	// middleware already allowed exactly this lease, but the handler
+	// re-checks the marker's id against the path.
+	if tokenID, ok := leaseTokenID(r.Context()); ok && tokenID != id {
+		writeErrorCode(w, http.StatusForbidden, "lease_token_scope",
+			"this token may only release or keep alive its own lease")
+		return
+	}
 	lease := s.svc.lookup(owner, id)
 	if lease == nil {
 		writeError(w, http.StatusNotFound, "lease not found")
 		return
 	}
 	if reason == "" {
-		reason = "deleted through the API"
+		if _, ok := leaseTokenID(r.Context()); ok {
+			reason = selfTokenReleaseReason
+		} else {
+			reason = "deleted through the API"
+		}
 	}
 	s.svc.releaseBecause(r.Context(), lease, reason)
 	w.WriteHeader(http.StatusNoContent)

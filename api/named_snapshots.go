@@ -295,10 +295,10 @@ func (s *Service) saveNamedSnapshot(ctx context.Context, l *Lease, name, key str
 		if pending := s.drainDeferredSecretRemovals(l.ID); len(pending) > 0 {
 			s.removeSecrets(l.SandboxID, pending)
 		}
-		if len(create) == 0 {
+		if len(create) == 0 && !l.SelfToken {
 			return
 		}
-		if err := s.stageSecrets(rctx, l.SandboxID, create); err != nil {
+		if err := s.stageCreateSecrets(rctx, l, create, true); err != nil {
 			s.log.Printf("snapshot: re-stage secrets on %s: %v", l.ID, err)
 		}
 	}()

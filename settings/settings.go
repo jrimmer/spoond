@@ -185,6 +185,7 @@ var Known = []string{
 	"SANDBOX_PROBE_TIMEOUT_SECS",
 	"SATURATION_CPU_SOME_PCT",
 	"SATURATION_IO_FULL_PCT",
+	"SELF_TOKEN_API_URL",
 	"SERVICE_RESULT",
 	"SHELLY_BINARY_URL",
 	"SIZE_PRESETS",
@@ -527,7 +528,8 @@ var Specs = []Spec{
 	{"SANDBOX_PROBE_TIMEOUT_SECS", TypeInt, Backend, false},
 	{"SATURATION_CPU_SOME_PCT", TypePercent, Backend, false},
 	{"SATURATION_IO_FULL_PCT", TypePercent, Backend, false},
-	{"SERVICE_RESULT", TypeString, Drain, false}, // systemd's own variable, read verbatim
+	{"SELF_TOKEN_API_URL", TypeURL, Backend, true}, // its name carries TOKEN, so config show hides it
+	{"SERVICE_RESULT", TypeString, Drain, false},   // systemd's own variable, read verbatim
 	{"SHELLY_BINARY_URL", TypeURL, Gateway, false},
 	{"SIZE_PRESETS", TypeString, Backend, false}, // name=vcpu:memory_mb spec; sizes.Parse fails startup on a malformed value
 	{"SNAPSHOT_KEEP_VERSIONS", TypeInt, Backend, false},

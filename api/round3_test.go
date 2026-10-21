@@ -100,6 +100,8 @@ func TestSweepExpiredSparesMigratedPinnedTLLLease(t *testing.T) {
 			`ALTER TABLE leases DROP COLUMN start_ms`,
 			`ALTER TABLE leases DROP COLUMN nap_since`,
 			`ALTER TABLE leases DROP COLUMN max_nap_secs`,
+			`ALTER TABLE leases DROP COLUMN self_token`,
+			`ALTER TABLE leases DROP COLUMN self_token_hash`,
 			// 0030's column (spoond-hwto): the rewind reruns 0029 but must not
 			// leave retention_secs in place for 0030 to collide with; nor the
 			// 0031 columns (spoond-hwto) for the output cap to collide with.

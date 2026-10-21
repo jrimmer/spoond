@@ -22,6 +22,11 @@ import (
 // that the events panel and a notifier stay readable.
 const maxReleaseReason = 120
 
+// selfTokenReleaseReason is the reason a DELETE made with a
+// lease-scoped self token records when the request gives none (#156):
+// the guest ended its own lease.
+const selfTokenReleaseReason = "released from inside the lease"
+
 // releaseReason resolves the optional reason a DELETE carries (2.5,
 // #132 part 2): the ?reason= query wins, else a JSON body {"reason"}.
 // The text is sanitised (control and format characters become a plain

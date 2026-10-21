@@ -28,6 +28,9 @@
 //	                  resolver allowance)
 //	SPOOND_PROXY_HOST_SUFFIX  wildcard hostname suffix the HTTP proxy
 //	                  routes (default .sandbox.example.com)
+//	SELF_TOKEN_API_URL  lease API base URL written into a self-token
+//	                  lease's guest as /run/secrets/spoond-api-url (#156;
+//	                  empty = no file)
 //	METRICS_TOKEN     bearer that may read /metrics and nothing else
 //	                  (Prometheus, spoond dash); empty disables
 //	EVENTS_TOKEN      bearer that may read the lease event streams and
@@ -610,6 +613,11 @@ func Main(args []string) int {
 	proxyAuthSecret := secret("PROXY_AUTH_SECRET")
 	bootstrapToken := secret("BOOTSTRAP_TOKEN")
 	adminToken := secret("ADMIN_TOKEN")
+	// The self token's API URL (SELF_TOKEN_API_URL, #156) is a URL, but
+	// its name carries TOKEN, so settings' rule treats it as a secret:
+	// it resolves through the same reader (NAME_FILE works too), and the
+	// admin config view masks it. Empty = no /run/secrets/spoond-api-url.
+	selfTokenAPIURL := secret("SELF_TOKEN_API_URL")
 	bindAddr := envOr("BIND_ADDR", "127.0.0.1:8890")
 	proxyAddr := envOr("PROXY_ADDR", "") // e.g. 0.0.0.0:8891 (Caddy wildcard front)
 	// TLS_CERT and TLS_KEY may list several pairs (comma-separated, paired by
@@ -828,6 +836,7 @@ func Main(args []string) int {
 		MetricsToken:              metricsToken,
 		EventsToken:               eventsToken,
 		ProxyURL:                  cfg.ProxyURL,
+		SelfTokenAPIURL:           selfTokenAPIURL,
 		CheckpointIntervalDefault: int64(checkpointDefault / time.Second),
 		IdleSuspendDefault:        idleSuspendDefault,
 		TemplateStoragePath:       storagePath,

@@ -144,6 +144,8 @@ func TestMigration29LeaseHistoryOnV28Database(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN start_ms`,
 		`ALTER TABLE leases DROP COLUMN nap_since`,
 		`ALTER TABLE leases DROP COLUMN max_nap_secs`,
+		`ALTER TABLE leases DROP COLUMN self_token`,
+		`ALTER TABLE leases DROP COLUMN self_token_hash`,
 		`DROP TABLE IF EXISTS lease_history`,
 		// Rewinding under migration 0030 (spoond-hwto) must also drop the
 		// column it adds and its version row: with 30 still recorded the
@@ -159,7 +161,7 @@ func TestMigration29LeaseHistoryOnV28Database(t *testing.T) {
 		`ALTER TABLE lease_jobs DROP COLUMN stderr_dropped_newlines`,
 		`ALTER TABLE lease_jobs DROP COLUMN stdout_dropped_ends_with_newline`,
 		`ALTER TABLE lease_jobs DROP COLUMN stderr_dropped_ends_with_newline`,
-		`DELETE FROM schema_migrations WHERE version IN (29, 30, 31, 32)`,
+		`DELETE FROM schema_migrations WHERE version IN (29, 30, 31, 32, 33)`,
 	} {
 		if _, err := db28.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
