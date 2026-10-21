@@ -988,6 +988,15 @@ type Service struct {
 	// would otherwise spend that wait on every pass. Guarded by
 	// timingOutMu.
 	jobKillNotBefore map[string]time.Time
+	// jobPIDSeen holds the running jobs whose pid file the reconcile has
+	// seen; jobNoPIDSince is when it first found one with neither an rc
+	// nor a pid file in a live guest; jobStartErr is the stream error a
+	// job's start broke with before the guest said the process started.
+	// A job still without a pid file a grace period later never started
+	// and is marked lost (jobNeverStarted). Guarded by timingOutMu.
+	jobPIDSeen    map[string]struct{}
+	jobNoPIDSince map[string]time.Time
+	jobStartErr   map[string]string
 	// stagedExecSecrets counts leases with synchronous exec-time secrets
 	// staged right now (between stageSecrets and its deferred cleanup). A
 	// named snapshot save refuses while any is staged (2.7, #83): the
@@ -1171,6 +1180,9 @@ func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string,
 		liveJobSecrets:            map[string][]string{},
 		timingOut:                 map[string]struct{}{},
 		jobKillNotBefore:          map[string]time.Time{},
+		jobPIDSeen:                map[string]struct{}{},
+		jobNoPIDSince:             map[string]time.Time{},
+		jobStartErr:               map[string]string{},
 		stagedExecSecrets:         map[string]int{},
 		stagedExecSecretNames:     map[string][]string{},
 		pendingSecretRemovals:     map[string][]string{},

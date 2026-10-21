@@ -874,8 +874,11 @@ func (s *Service) startJob(ctx context.Context, lease *Lease, owner, cmd, cwd st
 // running the job: a cold restart must not make this path read the new
 // sandbox's files or remove the job's secrets from it.
 func (s *Service) watchJob(proc substrate.Process, job store.JobRow, sandboxID string, generation int64) {
+	started := false
 	for ev := range proc.Events() {
 		switch ev.Kind {
+		case substrate.EventStarted:
+			started = true
 		case substrate.EventExit:
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			s.finishJobFromGuest(ctx, job, sandboxID, generation)
@@ -886,6 +889,13 @@ func (s *Service) watchJob(proc substrate.Process, job store.JobRow, sandboxID s
 			// The stream broke: the detached command may still be running,
 			// so leave the record for the reconcile pass.
 			s.log.Printf("jobs: %s: stream error: %s", job.JobID, ev.Err)
+			if !started {
+				// The command may never have run: keep the error for the
+				// reconcile, which decides from the pid file.
+				s.timingOutMu.Lock()
+				s.jobStartErr[job.JobID] = ev.Err
+				s.timingOutMu.Unlock()
+			}
 			_ = proc.Close()
 			return
 		}
@@ -1123,7 +1133,12 @@ func (s *Service) jobFinishedMetrics(result string) {
 // max-runtime cap was already killing loses its in-memory timed-out
 // intent: the lost record, not the cap, owns the outcome now.
 func (s *Service) markJobLost(ctx context.Context, job store.JobRow, sandboxID string, generation int64, detail string) {
-	changed, err := s.db.MarkJobLost(ctx, job.JobID, time.Now().UTC())
+	s.markJobLostReason(ctx, job, sandboxID, generation, "", detail)
+}
+
+// markJobLostReason is markJobLost with the reason the record carries.
+func (s *Service) markJobLostReason(ctx context.Context, job store.JobRow, sandboxID string, generation int64, reason, detail string) {
+	changed, err := s.db.MarkJobLostReason(ctx, job.JobID, time.Now().UTC(), reason)
 	if err != nil {
 		s.storeError("mark_job_lost", job.JobID, err)
 		return
@@ -1227,6 +1242,21 @@ func (s *Service) pruneJobKillState(rows []store.JobRow) {
 	for id := range s.jobKillNotBefore {
 		if _, ok := running[id]; !ok {
 			delete(s.jobKillNotBefore, id)
+		}
+	}
+	for id := range s.jobPIDSeen {
+		if _, ok := running[id]; !ok {
+			delete(s.jobPIDSeen, id)
+		}
+	}
+	for id := range s.jobNoPIDSince {
+		if _, ok := running[id]; !ok {
+			delete(s.jobNoPIDSince, id)
+		}
+	}
+	for id := range s.jobStartErr {
+		if _, ok := running[id]; !ok {
+			delete(s.jobStartErr, id)
 		}
 	}
 	s.timingOutMu.Unlock()
@@ -1499,6 +1529,14 @@ func (s *Service) reconcileJobs(ctx context.Context) {
 			s.log.Printf("jobs: reconcile %s: read rc: %v", job.JobID, err)
 			continue
 		}
+		// A job with no rc and no pid file a grace period after its start
+		// never ran: its start broke before the guest wrapper did. No rc
+		// will ever appear, so mark it lost instead of leaving it running
+		// (and its lease awake) until the max runtime.
+		if !done && s.jobNeverStarted(ctx, job, sandboxID, now) {
+			s.markJobLostReason(ctx, job, sandboxID, generation, store.JobReasonNeverStarted, s.neverStartedDetail(job.JobID))
+			continue
+		}
 		// The output cap runs only for a job still appending (spoond-hwto):
 		// an exited one cannot grow its files, and a finished stderr tail
 		// must not be re-punched behind the record's own tail copy.
@@ -1518,6 +1556,63 @@ func (s *Service) reconcileJobs(ctx context.Context) {
 			s.log.Printf("jobs: reconcile %s: finish: %v", job.JobID, err)
 		}
 	}
+}
+
+// jobNeverStartedGrace is how long a running job may go without a pid
+// file, in a guest that answers, before the reconcile calls it never
+// started. The wrapper writes the pid within about half a second of its
+// start, so a minute leaves a wide margin for a slow guest.
+const jobNeverStartedGrace = time.Minute
+
+// jobNeverStarted reports whether a running job's command never started:
+// its pid file is missing while the guest answers for its root, and has
+// stayed missing for jobNeverStartedGrace since both the job's start and
+// the first pass that saw it missing (so a lease resumed after a long
+// pause gets the full grace again). Once a pid file is seen the job is
+// never checked again. A failed read is not evidence either way.
+func (s *Service) jobNeverStarted(ctx context.Context, job store.JobRow, sandboxID string, now time.Time) bool {
+	s.timingOutMu.Lock()
+	_, seen := s.jobPIDSeen[job.JobID]
+	s.timingOutMu.Unlock()
+	if seen {
+		return false
+	}
+	_, err := s.sub.Stat(ctx, sandboxID, jobPath(job.JobID, "pid"))
+	if err == nil {
+		s.timingOutMu.Lock()
+		s.jobPIDSeen[job.JobID] = struct{}{}
+		delete(s.jobNoPIDSince, job.JobID)
+		s.timingOutMu.Unlock()
+		return false
+	}
+	if !errors.Is(err, substrate.ErrNotFound) {
+		return false
+	}
+	// A missing sandbox also reads as not found: only a guest that
+	// answers for its root shows the file, not the guest, is missing.
+	if _, err := s.sub.Stat(ctx, sandboxID, "/"); err != nil {
+		return false
+	}
+	s.timingOutMu.Lock()
+	since, ok := s.jobNoPIDSince[job.JobID]
+	if !ok {
+		since = now
+		s.jobNoPIDSince[job.JobID] = now
+	}
+	s.timingOutMu.Unlock()
+	return now.Sub(since) >= jobNeverStartedGrace && now.Sub(job.StartedAt) >= jobNeverStartedGrace
+}
+
+// neverStartedDetail is the job_lost event detail of a job that never
+// started, with the start stream's error when this backend saw it.
+func (s *Service) neverStartedDetail(jobID string) string {
+	s.timingOutMu.Lock()
+	why := s.jobStartErr[jobID]
+	s.timingOutMu.Unlock()
+	if why == "" {
+		return "the command never started in the sandbox"
+	}
+	return cutDetail("the command never started in the sandbox (its start failed: "+why+")", jobEventCmdChars*2)
 }
 
 // pruneJobs removes exited job records past their retention windows and
