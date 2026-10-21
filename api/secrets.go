@@ -125,6 +125,9 @@ func validateSecrets(secrets map[string]string) (map[string]string, error) {
 		if !secretNameRe.MatchString(name) {
 			return nil, fmt.Errorf("invalid secret name %q: must match [A-Za-z0-9_.-]{1,64}", name)
 		}
+		if reservedSecretName(name) {
+			return nil, fmt.Errorf("secret name %q is reserved for the lease's self token", name)
+		}
 		total += len(value)
 		out[name] = value
 	}
@@ -244,11 +247,13 @@ func (s *Service) createSecretsFor(leaseID string) map[string]string {
 	return out
 }
 
-// clearCreateSecrets drops a lease's create-time secrets.
+// clearCreateSecrets drops a lease's create-time secrets and its self
+// token.
 func (s *Service) clearCreateSecrets(leaseID string) {
 	s.secretsMu.Lock()
 	defer s.secretsMu.Unlock()
 	delete(s.createSecrets, leaseID)
+	delete(s.selfTokens, leaseID)
 }
 
 // scrubAllSecrets removes everything under /run/secrets through a
@@ -434,17 +439,18 @@ func (s *Service) hasRunningJobWithSecrets(leaseID string) bool {
 }
 
 // restageCreateSecrets re-writes a lease's create-time secrets after
-// the sandbox came back (resume, restart, crash recovery): a fresh
-// sandbox never had the tmpfs, and a rewrite after a snapshot resume is
-// harmless.
+// the sandbox came back (resume, restart, crash recovery, restore, and
+// a named-snapshot save's re-stage): a fresh sandbox never had the
+// tmpfs, and a rewrite after a snapshot resume is harmless. A
+// self-token lease keeps its token (#156; selfTokenFiles).
 // Failure is logged and otherwise ignored — the lease still runs, and
 // the caller can re-send secrets on its next exec.
 func (s *Service) restageCreateSecrets(ctx context.Context, l *Lease, what string) {
 	secrets := s.createSecretsFor(l.ID)
-	if len(secrets) == 0 {
+	if len(secrets) == 0 && !l.SelfToken {
 		return
 	}
-	if err := s.stageSecrets(ctx, l.SandboxID, secrets); err != nil {
+	if err := s.stageCreateSecrets(ctx, l, secrets, true); err != nil {
 		s.log.Printf("%s %s: re-stage lease secrets: %v", what, l.ID, err)
 	}
 }
@@ -473,8 +479,12 @@ func (s *Service) restageSecrets(sandboxID string, names []string, create map[st
 // this backend lost track of (R4); the union keeps a still-known
 // exec/job file from being miscounted as forgotten (Q3).
 func (s *Service) knownSecretNames(leaseID string, create map[string]string) map[string]bool {
-	known := make(map[string]bool, len(create))
+	known := make(map[string]bool, len(create)+3)
 	for name := range create {
+		known[name] = true
+	}
+	// The self token's files are ours, not forgotten secrets (#156).
+	for name := range selfTokenSecretNames {
 		known[name] = true
 	}
 	s.secretsMu.Lock()

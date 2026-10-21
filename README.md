@@ -76,6 +76,15 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
   - **Secrets as files**: a `secrets` object on create or exec becomes
     0600 files under `/run/secrets` on a guest tmpfs, never environment
     variables, argv, the store or logs.
+  - **Lease-scoped self token**: `"self_token": true` on create puts a
+    token, the lease id and (when `SELF_TOKEN_API_URL` is set) the API
+    URL under `/run/secrets` (`spoond-lease-token`, `spoond-lease-id`,
+    `spoond-api-url`). The token releases or keeps alive exactly its own
+    lease and nothing else; every other call answers `403
+    lease_token_scope`. It stays the same across a resume, restart,
+    recovery or snapshot save, so the guest can read it once; fork and
+    clone children get their own. Only its sha256 is stored; it dies with
+    the lease.
   - **Event stream**: `GET /api/leases/events` (or one lease's
     `/events`) streams lifecycle events over SSE, with resumable
     positions.
