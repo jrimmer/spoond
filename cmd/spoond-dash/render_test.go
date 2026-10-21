@@ -2581,3 +2581,31 @@ func TestUsedOfGiB(t *testing.T) {
 		}
 	}
 }
+
+// TestLeasesTableUncapped: the leases table is the host's runtime
+// picture, so every live lease gets a row at every width, however many
+// there are, and the oldest row's holder link still lands on its row.
+// Ids differ in their first six characters, all the narrowest layout
+// shows.
+func TestLeasesTableUncapped(t *testing.T) {
+	s := healthySnapshot()
+	s.Rows = nil
+	for i := range 30 {
+		s.Rows = append(s.Rows, LeaseRow{ID: fmt.Sprintf("%02dlease000", i), Image: "py-base",
+			Owner: "o", State: "running", Age: "5m", Left: "∞"})
+	}
+	s.Rows[29].Holder, s.Rows[29].HolderURL = "last-holder", "https://example.test/last"
+	for _, w := range []int{minW, DefaultWidth, maxW} {
+		p := Draw(s, w, fixedNow, "h").Plain()
+		for _, r := range s.Rows {
+			if !strings.Contains(p, r.ID[:6]) {
+				t.Fatalf("width %d: lease %s has no row:\n%s", w, r.ID, p)
+			}
+		}
+		lines := strings.Split(p, "\n")
+		links := holderLinks(s, w, fixedNow)
+		if len(links) != 1 || links[0].row >= len(lines) || !strings.Contains(lines[links[0].row], "29leas") {
+			t.Fatalf("width %d: holder link not on the oldest lease's row: %+v", w, links)
+		}
+	}
+}
