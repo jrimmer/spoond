@@ -942,11 +942,7 @@ func holderLinks(s Snapshot, w int, now time.Time) []linkAt {
 		l.panelsH() + l.throughputH()
 	leaseY := base + 1 // + the leases panel's title row
 	var out []linkAt
-	rows := l.s.Rows
-	if n := maxLeaseRows(l.w); len(rows) > n {
-		rows = rows[:n]
-	}
-	for i, r := range rows {
+	for i, r := range l.shownRows() {
 		if r.HolderURL != "" {
 			out = append(out, linkAt{row: leaseY + 1 + i, text: r.Holder, url: r.HolderURL})
 		}
@@ -1835,13 +1831,11 @@ func (l *layout) hasLeaseLegend() bool {
 	return len(l.shownRows()) > 0
 }
 
-// shownRows is the leases table's rows after the row cap.
+// shownRows is the leases table's rows: every live lease, uncapped.
+// The table is the runtime picture of the host, so a lease that runs
+// must never fall off it (unlike images, which only cost disk).
 func (l *layout) shownRows() []LeaseRow {
-	rows := l.s.Rows
-	if n := maxLeaseRows(l.w); len(rows) > n {
-		rows = rows[:n]
-	}
-	return rows
+	return l.s.Rows
 }
 
 func (l *layout) leasesH() int {
@@ -1852,10 +1846,6 @@ func (l *layout) leasesH() int {
 	// The legend line sits under the table whenever rows are shown.
 	return 4 + n // title + header + rows + the legend line
 }
-
-// maxLeaseRows bounds the leases panel: at least eight rows even at the
-// minimum width, never more than sixteen.
-func maxLeaseRows(w int) int { return min(16, max(8, (w-8)/6)) }
 
 // ageW is the age column's width: "10h37m" and a separating space.
 const ageW = 7
