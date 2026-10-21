@@ -188,3 +188,32 @@ func TestReportSetsStopTimes(t *testing.T) {
 		t.Fatalf("step 1 has no stop time")
 	}
 }
+
+// updateLogClient captures UpdateLog requests.
+type updateLogClient struct {
+	runnerv1connect.RunnerServiceClient
+	got []*runnerv1.UpdateLogRequest
+}
+
+func (c *updateLogClient) UpdateLog(ctx context.Context, r *connect.Request[runnerv1.UpdateLogRequest]) (*connect.Response[runnerv1.UpdateLogResponse], error) {
+	c.got = append(c.got, r.Msg)
+	return connect.NewResponse(&runnerv1.UpdateLogResponse{}), nil
+}
+
+// Log rows carry a real time: the row's own when set, else the send
+// time, never the zero time.
+func TestLogRowsCarryTimes(t *testing.T) {
+	c := &updateLogClient{}
+	a := &ForgejoAdapter{svc: c}
+	stamped := time.Now().Add(-time.Minute)
+	if err := a.Log(context.Background(), 9, 0, []*LogRow{{Time: stamped, Content: "a"}, {Content: "b"}}, false); err != nil {
+		t.Fatalf("log: %v", err)
+	}
+	rows := c.got[0].GetRows()
+	if !rows[0].GetTime().AsTime().Equal(stamped) {
+		t.Fatalf("row 0 time = %v, want %v", rows[0].GetTime().AsTime(), stamped)
+	}
+	if time.Since(rows[1].GetTime().AsTime()) > time.Minute {
+		t.Fatalf("unstamped row time = %v, want now", rows[1].GetTime().AsTime())
+	}
+}

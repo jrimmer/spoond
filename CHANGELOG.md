@@ -35,6 +35,18 @@ summarised from README "Status".
   exec secret using one is a `400`. Both path forms work: the token
   reaches the same two routes under `/api/sandboxes` too. Schema 32 → 33
   (two `ADD COLUMN`s on `leases`).
+  A self-token lease can reach the API to present its token: under any
+  network policy but `none` it gets one extra egress allowance, the
+  host's guest-facing address (`HOST_GUEST_SERVICE_ADDR`) on the port of
+  `SELF_TOKEN_API_URL`, and nothing else on the host. Leases without the
+  token are unchanged. The URL's host name must resolve, from the guest,
+  to that address.
+
+### Fixed
+
+- **CI job log lines carry their own times.** The runner sent log rows
+  without a time, so Forgejo's job-log view showed one fixed time on
+  every line. Rows are now stamped when the runner writes them.
 
 ## [3.11.1] - 2026-10-20
 
