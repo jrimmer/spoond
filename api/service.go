@@ -1323,7 +1323,9 @@ func (s *Service) egressForLocked(l *Lease) substrate.Egress {
 	// The fork's host-address guard admits a destination on the host only
 	// when an allowance names both the IP and the port; the LAN ranges'
 	// any-port allowances do not count. So lan and internet name the lease
-	// API explicitly (restricted and none never reach it).
+	// API explicitly (restricted and none never reach it, except that a
+	// self-token lease reaches its API port under any policy but none:
+	// selfTokenAllowance, #156).
 	var hostAPI []substrate.PrivateAllowance
 	if s.cfg.HostAPIPort > 0 {
 		hostAPI = []substrate.PrivateAllowance{{
@@ -1341,17 +1343,17 @@ func (s *Service) egressForLocked(l *Lease) substrate.Egress {
 	case PolicyInternet:
 		// Public destinations stay allowed; listing the LAN ranges as
 		// private allowances keeps private/LAN addresses reachable.
-		return substrate.Egress{Private: append(append(append(lanPrivate(l, hostSvc), dns...), hostAPI...), s.peerAllowances(l)...), GuestDNS: guestDNS}
+		return substrate.Egress{Private: append(withAllowances(append(append(lanPrivate(l, hostSvc), dns...), hostAPI...), s.selfTokenAllowance(l)), s.peerAllowances(l)...), GuestDNS: guestDNS}
 	case PolicyLAN:
 		return substrate.Egress{
 			DeniedCIDRs: []string{"0.0.0.0/0"},
-			Private:     append(append(append(lanPrivate(l, hostSvc), dns...), hostAPI...), s.peerAllowances(l)...),
+			Private:     append(withAllowances(append(append(lanPrivate(l, hostSvc), dns...), hostAPI...), s.selfTokenAllowance(l)), s.peerAllowances(l)...),
 			GuestDNS:    guestDNS,
 		}
 	default: // restricted: the default when empty
 		eg := substrate.Egress{
 			DeniedCIDRs: []string{"0.0.0.0/0"},
-			Private:     append([]substrate.PrivateAllowance{hostSvc}, dns...),
+			Private:     append(append([]substrate.PrivateAllowance{hostSvc}, dns...), s.selfTokenAllowance(l)...),
 			GuestDNS:    guestDNS,
 		}
 		for _, entry := range l.NetAllow {

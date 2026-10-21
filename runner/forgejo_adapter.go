@@ -261,10 +261,17 @@ func (a *ForgejoAdapter) Keepalive(ctx context.Context, jobID int64) error {
 // Log implements JobSink. It streams log rows to Forgejo.
 func (a *ForgejoAdapter) Log(ctx context.Context, jobID, index int64, rows []*LogRow, noMore bool) error {
 	ctx = withAuth(ctx, a.authHeaders())
+	// A row the executor did not stamp is stamped when it is sent: a zero
+	// time gives every line in Forgejo's log view the same bogus time.
+	now := time.Now()
 	protoRows := make([]*runnerv1.LogRow, 0, len(rows))
 	for _, r := range rows {
+		t := r.Time
+		if t.IsZero() {
+			t = now
+		}
 		protoRows = append(protoRows, &runnerv1.LogRow{
-			Time:    timestamppb.New(r.Time),
+			Time:    timestamppb.New(t),
 			Content: r.Content,
 		})
 	}

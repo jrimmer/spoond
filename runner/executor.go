@@ -750,7 +750,7 @@ func (e *Executor) log(ctx context.Context, job *Job, index int64, content strin
 	if content == "" {
 		return
 	}
-	if err := e.Sink.Log(ctx, job.ID, index, []*LogRow{{Content: content}}, false); err != nil {
+	if err := e.Sink.Log(ctx, job.ID, index, []*LogRow{{Time: time.Now(), Content: content}}, false); err != nil {
 		log.Printf("executor: job %d log upload failed at row %d: %v", job.ID, index, err)
 	}
 }

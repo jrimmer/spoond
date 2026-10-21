@@ -21,7 +21,12 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"net/url"
+	"slices"
+	"strconv"
 	"strings"
+
+	"github.com/jrimmer/spoond/v3/substrate"
 )
 
 const (
@@ -227,4 +232,70 @@ func selfTokenPathID(r *http.Request) (string, bool) {
 		return id, true
 	}
 	return "", false
+}
+
+// selfTokenAllowance is the one host destination a self-token lease is
+// let through to on top of its network policy (#156): the host's
+// guest-facing address (HOST_GUEST_SERVICE_ADDR) on the port of
+// SELF_TOKEN_API_URL, and nothing else on the host. Without it a
+// restricted guest could hold its token but never present it. A lease
+// without a self token, a "none" lease, or a host without both settings
+// gets nothing. The URL's host name must resolve, from the guest, to
+// that address. The caller holds s.store.mu.
+func (s *Service) selfTokenAllowance(l *Lease) []substrate.PrivateAllowance {
+	if !l.SelfToken || s.cfg.HostGuestAddr == "" {
+		return nil
+	}
+	port := selfTokenAPIPort(s.cfg.SelfTokenAPIURL)
+	if port == 0 {
+		return nil
+	}
+	return []substrate.PrivateAllowance{{
+		CIDR:     s.cfg.HostGuestAddr + "/32",
+		TCPPorts: []uint32{port},
+	}}
+}
+
+// selfTokenAPIPort is the TCP port a self-token API URL names: its
+// explicit port, else 443 for https and 80 for http. 0 for an empty or
+// unparseable URL.
+func selfTokenAPIPort(raw string) uint32 {
+	if raw == "" {
+		return 0
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return 0
+	}
+	if p := u.Port(); p != "" {
+		n, err := strconv.ParseUint(p, 10, 16)
+		if err != nil || n == 0 {
+			return 0
+		}
+		return uint32(n)
+	}
+	switch u.Scheme {
+	case "https":
+		return 443
+	case "http":
+		return 80
+	}
+	return 0
+}
+
+// withAllowances appends each extra allowance not already in list.
+func withAllowances(list []substrate.PrivateAllowance, extra []substrate.PrivateAllowance) []substrate.PrivateAllowance {
+	for _, a := range extra {
+		dup := false
+		for _, b := range list {
+			if b.CIDR == a.CIDR && slices.Equal(b.TCPPorts, a.TCPPorts) {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			list = append(list, a)
+		}
+	}
+	return list
 }

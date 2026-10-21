@@ -31,6 +31,18 @@ summarised from README "Status".
   secret name spaces are separate: `spoond-lease-token`,
   `spoond-lease-id` and `spoond-api-url` are reserved, and a create or
   exec secret using one is a `400`.
+  A self-token lease can reach the API to present its token: under any
+  network policy but `none` it gets one extra egress allowance, the
+  host's guest-facing address (`HOST_GUEST_SERVICE_ADDR`) on the port of
+  `SELF_TOKEN_API_URL`, and nothing else on the host. Leases without the
+  token are unchanged. The URL's host name must resolve, from the guest,
+  to that address.
+
+### Fixed
+
+- **CI job log lines carry their own times.** The runner sent log rows
+  without a time, so Forgejo's job-log view showed one fixed time on
+  every line. Rows are now stamped when the runner writes them.
 
 ### Removed
 
