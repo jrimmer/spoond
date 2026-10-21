@@ -65,7 +65,7 @@ type JobRow struct {
 	StderrDroppedEndsWithNewline bool
 	// Reason records why a record left 'running' outside the guest's own
 	// rc file: "" for a normal exit, "timed_out" when the max runtime
-	// was spent.
+	// was spent, "never_started" for a lost job the guest never ran.
 	Reason string
 }
 
@@ -96,6 +96,11 @@ type JobStore interface {
 // runtime, not the command, ended a job. It is also the label the API
 // and the job_exited event use (spoond-wb5).
 const JobReasonTimedOut = "timed_out"
+
+// JobReasonNeverStarted is the lease_jobs.reason of a job marked lost
+// because its command never started in the guest: the start answered,
+// but no pid file appeared (the start stream broke first).
+const JobReasonNeverStarted = "never_started"
 
 // InsertJob records a newly started background job. state must be
 // "running" and exit_code nil.
@@ -157,10 +162,17 @@ WHERE job_id=? AND state='running'`,
 // MarkJobLost marks a running job lost. changed is false when it was
 // already exited or lost.
 func (db *DB) MarkJobLost(ctx context.Context, jobID string, endedAt time.Time) (bool, error) {
+	return db.MarkJobLostReason(ctx, jobID, endedAt, "")
+}
+
+// MarkJobLostReason is MarkJobLost with the reason the record carries:
+// "" for a guest that did not continue, JobReasonNeverStarted for a
+// command the guest never ran.
+func (db *DB) MarkJobLostReason(ctx context.Context, jobID string, endedAt time.Time, reason string) (bool, error) {
 	res, err := db.w.ExecContext(ctx, `
-UPDATE lease_jobs SET state='lost', ended_at=?
+UPDATE lease_jobs SET state='lost', ended_at=?, reason=?
 WHERE job_id=? AND state='running'`,
-		formatTime(endedAt), jobID)
+		formatTime(endedAt), reason, jobID)
 	if err != nil {
 		return false, fmt.Errorf("store: mark job lost %s: %w", jobID, err)
 	}

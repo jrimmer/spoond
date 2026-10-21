@@ -1443,6 +1443,15 @@ after resume). When the guest's memory does **not** continue — a cold
 restart, a restore or crash recovery, i.e. a generation bump — every
 running job is marked `lost`.
 
+A job whose command never started is marked `lost` with reason
+`never_started`. That happens when the start answered 202 but its stream
+broke (a 502 from the guest proxy, say) before the guest wrapper ran: no
+pid file appears, so no exit status ever will. The reconcile waits a
+minute after the start, and a minute after it first finds the pid file
+missing in a guest that answers, so a slow start or an unreachable guest
+is not mistaken for one. The `job_lost` event says the command never
+started, with the start's error when the backend saw it.
+
 The per-exec `secrets` stay staged under `/run/secrets` for the job's
 whole life; the guest wrapper removes them at exit and the backend also
 removes them on reconcile. Neither `env` nor secret values are ever
