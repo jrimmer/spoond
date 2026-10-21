@@ -10,6 +10,28 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+## [3.12.1] - 2026-10-21
+
+### Fixed
+
+- **A background job whose command never started is marked lost
+  (spoond #158).** A start could answer 202 and then lose its stream (a
+  502 from the guest proxy) before the guest wrapper ran. No pid file
+  and no exit status ever appeared, and the reconcile read the missing
+  exit status as "not done yet", so the job stayed `running` until its
+  max runtime (24 h by default) and kept its lease awake. The reconcile
+  now marks such a job `lost` with reason `never_started` once its pid
+  file has been missing for a minute after the start, in a guest that
+  answers; a lease resumed after a long pause gets the full minute
+  again, and a job whose pid file was seen is never checked again. The
+  `job_lost` event says the command never started, with the start's
+  error when the backend saw it. A client following the job with
+  `GET /jobs/{id}?wait=N` gets the answer at once.
+- **The dashboard lists every live lease.** The leases table stopped at
+  8–16 rows by window width and said nothing about the leases it left
+  out, so a running lease could vanish from view. The table is the
+  host's runtime picture: it now shows every live lease at every width.
+
 ## [3.12.0] - 2026-10-20
 
 ### Added
