@@ -16,6 +16,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -85,9 +86,13 @@ func imagesPhase(ctx context.Context, env *Env) ([]Item, error) {
 		return r.Items(), err
 	}
 
-	// --base-registry is a later slice: say so, build locally.
-	if env.Opt.BaseRegistry != "" {
-		r.Add(Skipped, "--base-registry", "not implemented in this slice; building the images locally")
+	// Base images: pulled from --base-registry, or from the published
+	// prefix for a release binary; an image the prefix lacks is built
+	// locally (spoond images build falls back).
+	if reg, tag := baseImages(env); reg != "" {
+		r.Add(Kept, "base images", "pulled from "+reg+" (tag "+tag+") when published, else built locally")
+	} else {
+		r.Add(Kept, "base images", "built locally: not a release binary (pass --base-registry to pull)")
 	}
 
 	// Build the missing ones, one at a time: a failure stops the
@@ -229,9 +234,37 @@ func imagesBuild(ctx context.Context, env *Env, name string) error {
 		"images",
 		"-manifest", filepath.Join(imagesContextPath, "manifest.yaml"),
 		"-context", imagesContextPath,
-		"build", name,
+		"build",
 	)
+	if reg, tag := baseImages(env); reg != "" {
+		args = append(args, "-base-registry", reg, "-base-tag", tag)
+	}
+	args = append(args, name)
 	return env.exec(ctx, "env", args...)
+}
+
+// publishedBaseImages is where a release's base images are published
+// (spoond images publish --prefix, tagged with the release version).
+const publishedBaseImages = "ghcr.io/jrimmer/spoond-images"
+
+// releaseTag matches a release version (v4.0.0, v4.0.0-rc.1), not a
+// development pseudo-version.
+var releaseTag = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$`)
+
+// baseImages is the prefix and tag base images are pulled from:
+// --base-registry (the release's tag on a release binary, else latest),
+// else the published prefix for a release binary, else none (build).
+func baseImages(env *Env) (string, string) {
+	release := releaseTag.MatchString(env.Version)
+	switch {
+	case env.Opt.BaseRegistry != "" && release:
+		return env.Opt.BaseRegistry, env.Version
+	case env.Opt.BaseRegistry != "":
+		return env.Opt.BaseRegistry, "latest"
+	case release:
+		return publishedBaseImages, env.Version
+	}
+	return "", ""
 }
 
 // imagesParseEnvFile reads KEY=VALUE lines — comments (#) and blanks

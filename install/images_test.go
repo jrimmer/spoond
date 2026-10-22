@@ -380,20 +380,41 @@ func TestImagesPhaseDryRun(t *testing.T) {
 	}
 }
 
-// TestImagesPhaseBaseRegistrySkipped pins the slice boundary:
-// --base-registry says it is not implemented here and the build runs
-// locally anyway.
-func TestImagesPhaseBaseRegistrySkipped(t *testing.T) {
-	env, out, runner := imagesTestEnv(t)
-	env.Opt.Images = ImagesMinimal
-	env.Opt.BaseRegistry = "ghcr.io/jrimmer/spoond-images"
-	runImagesPhase(t, env)
-
-	if len(runner.buildNames()) != 1 {
-		t.Errorf("base-registry run did not build locally; calls: %v", runner.calls)
-	}
-	if !strings.Contains(out.String(), "not implemented in this slice") {
-		t.Errorf("report, want the base-registry skipped row:\n%s", out.String())
+// TestImagesPhaseBaseRegistry: --base-registry goes to each build
+// (spoond images build pulls, falling back to a local build); a release
+// binary pulls its own version's tag from the published prefix by
+// default; a development binary builds locally.
+func TestImagesPhaseBaseRegistry(t *testing.T) {
+	for _, tc := range []struct {
+		name, version, flag, want string
+	}{
+		{"flag on a dev build", "", "registry.example.com/base", "-base-registry registry.example.com/base -base-tag latest"},
+		{"flag on a release", "v4.0.0", "registry.example.com/base", "-base-registry registry.example.com/base -base-tag v4.0.0"},
+		{"release default", "v4.0.0", "", "-base-registry " + publishedBaseImages + " -base-tag v4.0.0"},
+		{"pseudo-version builds", "v3.9.2-0.20261022085442-1f71d1d9bda0", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env, _, runner := imagesTestEnv(t)
+			env.Opt.Images = ImagesMinimal
+			env.Opt.BaseRegistry = tc.flag
+			env.Version = tc.version
+			runImagesPhase(t, env)
+			var build string
+			for _, call := range runner.calls {
+				if strings.Contains(call, " build ") {
+					build = call
+				}
+			}
+			if build == "" {
+				t.Fatalf("no build ran; calls: %v", runner.calls)
+			}
+			if tc.want == "" && strings.Contains(build, "-base-registry") {
+				t.Errorf("build = %q, want a local build", build)
+			}
+			if tc.want != "" && !strings.Contains(build, tc.want) {
+				t.Errorf("build = %q, want %q", build, tc.want)
+			}
+		})
 	}
 }
 
