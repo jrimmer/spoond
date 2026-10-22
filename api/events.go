@@ -85,6 +85,11 @@ const (
 	// the shared recovery runs. It is not a `lost` event — the recovery
 	// may still recover the lease or leave it retrying (spoond-dxq).
 	LeaseRootfsDead LeaseEventType = "rootfs_dead"
+	// LeaseGuestUnreachable marks a lease whose guest answered the rootfs
+	// probe only with timeouts or "unavailable" past GUEST_UNREACHABLE_SECS
+	// while other leases answered (#159). Like rootfs_dead it comes before
+	// the shared recovery's own events.
+	LeaseGuestUnreachable LeaseEventType = "guest_unreachable"
 	// LeaseJobStarted, LeaseJobExited and LeaseJobLost mark a background
 	// exec job's life (2.6, #135): started carries the command (cut to
 	// 120 chars), exited the exit code and a short stderr tail, lost a

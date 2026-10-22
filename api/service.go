@@ -731,6 +731,10 @@ type Service struct {
 	// rootfsProbeFails is the consecutive rootfs-probe failure count per
 	// lease, tracked against the sandbox it was counted on.
 	rootfsProbeFails map[string]*rootfsProbeFailure
+	// guestUnreachable is when each lease's guest stopped answering the
+	// probe (#159); guestUnreachableSecs is the cutoff, 0 disables it.
+	guestUnreachable     map[string]*guestUnreachable
+	guestUnreachableSecs atomic.Int64
 	// rootfsProbeAllFailedLogged suppresses the "every probe failed"
 	// line to once per outage rather than once per pass.
 	rootfsProbeAllFailedLogged bool
@@ -1162,6 +1166,7 @@ func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string,
 		probeTimeout:              20 * time.Second,
 		rootfsProbeOK:             map[string]time.Time{},
 		rootfsProbeFails:          map[string]*rootfsProbeFailure{},
+		guestUnreachable:          map[string]*guestUnreachable{},
 		recoveryRetries:           map[string]*retryBudget{},
 		lostSandboxDeleteAttempts: defaultLostSandboxDeleteAttempts,
 		lostSandboxDeleteBackoff:  defaultLostSandboxDeleteBackoff,
@@ -1196,6 +1201,7 @@ func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string,
 		memSampleClient:           &http.Client{Timeout: memSampleHTTPTimeout},
 	}
 	svc.rootfsProbeInterval.Store(int64(time.Duration(DefaultRootfsProbeSecs) * time.Second))
+	svc.guestUnreachableSecs.Store(DefaultGuestUnreachableSecs)
 	svc.cfg.SizePresets, svc.cfg.MaxLeaseVCPU, svc.cfg.MaxLeaseMemoryMB = sizeLimitsOrDefault(cfg)
 	if url := os.Getenv("OTEL_PROM_URL"); url != "" {
 		svc.memSamplerFetch = memSampleHTTPGetter(url, svc.memSampleClient)
@@ -1259,6 +1265,21 @@ func (s *Service) SetRootfsProbe(secs int) {
 	if secs >= 0 {
 		s.rootfsProbeInterval.Store(int64(time.Duration(secs) * time.Second))
 	}
+}
+
+// SetGuestUnreachable sets how long a guest may answer the rootfs probe
+// only with timeouts or "unavailable", while other leases answer, before
+// it is recovered like a crash (#159). 0 disables it; a negative value
+// leaves the default in place.
+func (s *Service) SetGuestUnreachable(secs int) {
+	if secs >= 0 {
+		s.guestUnreachableSecs.Store(int64(secs))
+	}
+}
+
+// guestUnreachableAfter returns the unreachable-guest cutoff.
+func (s *Service) guestUnreachableAfter() time.Duration {
+	return time.Duration(s.guestUnreachableSecs.Load()) * time.Second
 }
 
 // rootfsProbeEvery returns how often the rootfs liveness probe runs. It

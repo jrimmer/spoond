@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -20,6 +21,11 @@ import (
 // consecutive failures the sandbox is treated as crashed and goes
 // through the same per-lease recovery as the crash reconcile (from the
 // last checkpoint, or lost).
+//
+// Timeouts and "unavailable" answers never count toward that threshold,
+// but a guest that gives nothing else for GUEST_UNREACHABLE_SECS while
+// other leases answer is hung, not slow, and gets the same recovery
+// (#159).
 
 const (
 	// DefaultRootfsProbeSecs is how often the probe runs against running
@@ -32,6 +38,12 @@ const (
 	// rootfsProbeFailuresThreshold is how many consecutive failures turn
 	// a sandbox into a crashed one.
 	rootfsProbeFailuresThreshold = 3
+	// DefaultGuestUnreachableSecs is how long a guest may answer only
+	// timeouts or "unavailable" before it is recovered like a crash, when
+	// GUEST_UNREACHABLE_SECS is unset. 0 disables it. A guest came back
+	// after 55 minutes of 502s on 2026-10-21, so the default sits above
+	// that (#159).
+	DefaultGuestUnreachableSecs = 3600
 )
 
 // rootfsProbe is the probe script. It reads one 4096-byte block of the
@@ -95,6 +107,14 @@ type rootfsProbeFailure struct {
 	count     int
 }
 
+// guestUnreachable is when a lease's guest stopped answering the probe.
+// Like rootfsProbeFailure it is keyed to the sandbox, so a recovered
+// lease starts a fresh clock.
+type guestUnreachable struct {
+	sandboxID string
+	since     time.Time
+}
+
 // runRootfsProbeLoop runs the rootfs liveness probe every
 // probe interval. It returns immediately when the probe is disabled.
 func (s *Service) runRootfsProbeLoop(ctx context.Context) {
@@ -139,6 +159,10 @@ func (s *Service) probeRootfsLeases(ctx context.Context) {
 
 	s.store.mu.Lock()
 	var targets []*Lease
+	// answering counts the leases that proved their guest alive: a recent
+	// successful exec here, a probe that read the disk below. A guest
+	// silent while others answer is hung rather than the host being slow.
+	answering := 0
 	for _, l := range s.store.leases {
 		if l.released || !l.live() || l.busy {
 			continue
@@ -149,6 +173,7 @@ func (s *Service) probeRootfsLeases(ctx context.Context) {
 		if ok, seen := aliveAt[l.ID]; seen && now.Sub(ok) < every {
 			// A recent successful exec already proved the guest is
 			// alive; probing anyway only burns an exec.
+			answering++
 			continue
 		}
 		targets = append(targets, l)
@@ -197,6 +222,11 @@ func (s *Service) probeRootfsLeases(ctx context.Context) {
 		return
 	}
 	s.clearRootfsAllFailed()
+	for _, o := range outcomes {
+		if o == rootfsProbeOK {
+			answering++
+		}
+	}
 
 	for i, l := range targets {
 		if s.draining.Load() {
@@ -219,6 +249,7 @@ func (s *Service) probeRootfsLeases(ctx context.Context) {
 			if s.metrics != nil {
 				s.metrics.RootfsProbeFailuresTotal.Inc()
 			}
+			s.checkGuestUnreachable(ctx, l, now, answering)
 		case rootfsProbeUnavailable:
 			// The orchestrator List failed while confirming the sandbox:
 			// the guest may be perfectly healthy. Never count it toward
@@ -228,7 +259,11 @@ func (s *Service) probeRootfsLeases(ctx context.Context) {
 			if s.metrics != nil {
 				s.metrics.RootfsProbeFailuresTotal.Inc()
 			}
-		case rootfsProbeEIO, rootfsProbeTransport:
+			s.checkGuestUnreachable(ctx, l, now, answering)
+		case rootfsProbeTransport:
+			s.guestUnreachableFor(l, now)
+			s.countRootfsFailure(ctx, l)
+		case rootfsProbeEIO:
 			s.countRootfsFailure(ctx, l)
 		}
 	}
@@ -331,6 +366,34 @@ func (s *Service) countRootfsFailure(ctx context.Context, l *Lease) {
 	s.recoverDeadRootfs(ctx, l)
 }
 
+// guestUnreachableFor starts the lease's unreachable clock if it is not
+// running and returns how long the guest has been silent.
+func (s *Service) guestUnreachableFor(l *Lease, now time.Time) time.Duration {
+	s.rootfsProbeMu.Lock()
+	defer s.rootfsProbeMu.Unlock()
+	u := s.guestUnreachable[l.ID]
+	if u == nil || u.sandboxID != l.SandboxID {
+		u = &guestUnreachable{sandboxID: l.SandboxID, since: now}
+		s.guestUnreachable[l.ID] = u
+	}
+	return now.Sub(u.since)
+}
+
+// checkGuestUnreachable runs the clock for a probe that timed out or
+// could not reach the guest, and recovers the lease like a crash once the
+// guest has been silent past the cutoff while answering other leases
+// prove the host and the orchestrator work (#159). With no other lease
+// answering, a slow host or an outage looks the same, so nothing is done.
+func (s *Service) checkGuestUnreachable(ctx context.Context, l *Lease, now time.Time, answering int) {
+	silent := s.guestUnreachableFor(l, now)
+	after := s.guestUnreachableAfter()
+	if after <= 0 || silent < after || answering == 0 {
+		return
+	}
+	cause := fmt.Sprintf("guest unreachable for %d min", int(silent/time.Minute))
+	s.recoverProbedLease(ctx, l, LeaseGuestUnreachable, cause)
+}
+
 // recoverDeadRootfs treats a lease whose root disk answered I/O errors
 // as a crashed sandbox: it emits the lost event that names the cause,
 // deletes the dead sandbox through the substrate first, then runs the
@@ -338,6 +401,12 @@ func (s *Service) countRootfsFailure(ctx context.Context, l *Lease) {
 // takes the lease's busy flag so no other lifecycle operation races it,
 // and skips a lease that is no longer running or already busy.
 func (s *Service) recoverDeadRootfs(parent context.Context, l *Lease) {
+	s.recoverProbedLease(parent, l, LeaseRootfsDead, "root disk unreadable (I/O errors)")
+}
+
+// recoverProbedLease is the probe's crash recovery: ev and cause name why
+// (a dead root disk, or a guest unreachable past the cutoff).
+func (s *Service) recoverProbedLease(parent context.Context, l *Lease, ev LeaseEventType, cause string) {
 	// The admin drain and this recovery are mutually exclusive. Holding
 	// the read side across the whole recovery means a drain either
 	// completes before the recovery starts or waits for it, and the
@@ -373,9 +442,13 @@ func (s *Service) recoverDeadRootfs(parent context.Context, l *Lease) {
 	defer s.drainGate.RUnlock()
 	defer s.endBusy(l)
 
-	s.log.Printf("rootfs probe: lease %s root disk unreadable (I/O errors); recovering from the last checkpoint", l.ID)
+	s.log.Printf("rootfs probe: lease %s %s; recovering from the last checkpoint", l.ID, cause)
 	if s.metrics != nil {
-		s.metrics.RootfsDeadTotal.Inc()
+		if ev == LeaseGuestUnreachable {
+			s.metrics.GuestUnreachableTotal.Inc()
+		} else {
+			s.metrics.RootfsDeadTotal.Inc()
+		}
 	}
 	// Detached from the pass's context: a cancelled loop must not cut a
 	// recovery short and turn a recoverable lease into a lost one.
@@ -389,10 +462,10 @@ func (s *Service) recoverDeadRootfs(parent context.Context, l *Lease) {
 	// transient failure leaves the lease recovering, and a lost event here
 	// would announce a loss that has not happened (spoond-dxq).
 	s.store.mu.Lock()
-	setLostReason(l, "root disk unreadable (I/O errors)")
+	setLostReason(l, cause)
 	s.saveLeaseLocked(l)
 	s.store.mu.Unlock()
-	s.emitLeaseEvent(l.ID, l.Owner, LeaseRootfsDead, "root disk unreadable (I/O errors)")
+	s.emitLeaseEvent(l.ID, l.Owner, ev, cause)
 
 	if err := s.sub.Delete(ctx, l.SandboxID); err != nil {
 		s.log.Printf("rootfs probe: lease %s delete sandbox %s: %v", l.ID, l.SandboxID, err)
@@ -413,6 +486,7 @@ func (s *Service) recordRootfsAlive(leaseID string) {
 	}
 	s.rootfsProbeMu.Lock()
 	s.rootfsProbeOK[leaseID] = s.now()
+	delete(s.guestUnreachable, leaseID)
 	s.rootfsProbeMu.Unlock()
 }
 
@@ -442,6 +516,7 @@ func (s *Service) forgetRootfs(leaseID string) {
 	s.rootfsProbeMu.Lock()
 	delete(s.rootfsProbeFails, leaseID)
 	delete(s.rootfsProbeOK, leaseID)
+	delete(s.guestUnreachable, leaseID)
 	s.rootfsProbeMu.Unlock()
 }
 

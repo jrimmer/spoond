@@ -116,6 +116,7 @@ var Known = []string{
 	"GIVE_BACK",
 	"GIVE_BACK_MARGIN_MIB",
 	"GUEST_DIAL_MAX",
+	"GUEST_UNREACHABLE_SECS",
 	"HOST_API_PORT",
 	"HOST_GUEST_SERVICE_ADDR",
 	"HOST_GUEST_SERVICE_PORT",
@@ -454,6 +455,9 @@ var Specs = []Spec{
 	// value is the host default every identity without an override
 	// counts against.
 	{"GUEST_DIAL_MAX", TypeInt, Backend, false},
+	// Seconds a guest may answer the rootfs probe only with timeouts
+	// while other leases answer before it is recovered; 0 disables.
+	{"GUEST_UNREACHABLE_SECS", TypeInt, Backend, false},
 	{"HOST_API_PORT", TypeInt, Backend, false},
 	{"HOST_GUEST_SERVICE_ADDR", TypeString, Backend, false}, // a bare host or IP: the code builds <addr>/32 CIDRs from it
 	{"HOST_GUEST_SERVICE_PORT", TypeInt, Backend, false},

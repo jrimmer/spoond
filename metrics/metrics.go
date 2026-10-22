@@ -170,6 +170,7 @@ type BackendMetrics struct {
 	// disk and is recovered like a crash.
 	RootfsProbeFailuresTotal prometheus.Counter // probe failures (transport, timeout or EIO)
 	RootfsDeadTotal          prometheus.Counter // leases declared dead after consecutive probe failures
+	GuestUnreachableTotal    prometheus.Counter // leases recovered after their guest was unreachable past the cutoff
 
 	// Substrate (U11)
 	LeasesByState     *prometheus.GaugeVec     // {state}: leases per state
@@ -545,6 +546,10 @@ func NewBackendMetrics() *BackendMetrics {
 		Namespace: "spoond", Name: "rootfs_dead_total",
 		Help: "Leases declared dead because their root disk was unreadable.",
 	})
+	m.GuestUnreachableTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "spoond", Name: "guest_unreachable_total",
+		Help: "Leases recovered because their guest stopped answering while other leases answered.",
+	})
 
 	// Substrate (U11)
 	m.LeasesByState = prometheus.NewGaugeVec(prometheus.GaugeOpts{
@@ -608,7 +613,7 @@ func NewBackendMetrics() *BackendMetrics {
 		m.IdleSuspendsTotal,
 		m.GuestDialsActive, m.GuestDialsTotal,
 		m.JobsRunning, m.JobsExitedTotal,
-		m.RootfsProbeFailuresTotal, m.RootfsDeadTotal,
+		m.RootfsProbeFailuresTotal, m.RootfsDeadTotal, m.GuestUnreachableTotal,
 		m.LeasesByState, m.LeasesByImage, m.NodeRunning, m.NodeHugepagesFree, m.NodeWork,
 		m.CreateDur, m.CapacityRej,
 	)

@@ -967,6 +967,23 @@ affected leases. The counters are `spoond_rootfs_probe_failures_total`
 (failures, by probe) and `spoond_rootfs_dead_total` (leases declared
 dead). `ROOTFS_PROBE_SECS=0` disables the probe entirely.
 
+A probe that times out or answers "unavailable" never counts toward the
+three failures: a slow disk or a host under load is not a dead guest.
+But a guest that gives the probe nothing else for
+`GUEST_UNREACHABLE_SECS` (default `3600`, one hour; `0` disables) is
+hung, and spoond recovers it the same way, from the last checkpoint or
+`lost` (#159). Its background jobs end `lost` with it, so callers
+following them stop waiting. The clock starts at the first probe that
+does not reach the guest and stops at any answer: a probe that reads the
+disk, or a successful exec through the API. spoond acts only when at
+least one other running lease answered in the same pass, so a host where
+every guest is slow, an orchestrator outage or a host with a single
+running lease never triggers it. A backend restart starts the clock
+again. The lease gets a `guest_unreachable` event (detail
+`guest unreachable for N min`) before the recovery's own events, and the
+same text as its `lost_reason` if it is lost;
+`spoond_guest_unreachable_total` counts these recoveries.
+
 ## Restarting the backend
 
 A backend restart loses nothing: leases, shares, the pool and the catalog

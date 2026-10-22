@@ -416,7 +416,7 @@ The settings you are most likely to change:
 | Snapshots | `MAX_KEPT_PER_LEASE` (4), `MAX_NAMED_SNAPSHOTS`, `SNAPSHOT_KEEP_VERSIONS`, `SNAPSHOT_WRITE_CONCURRENCY` |
 | Jobs and exec | `MAX_RUNNING_JOBS_PER_LEASE`, `JOB_RETENTION_SECS` (7 days, the record and guest files an exited job keeps — a job's own `retention_secs` may shorten it), `JOB_OUTPUT_MAX_BYTES` (0 = unlimited; a job's stdout/stderr guest file growing past it has its front punched out between polls, keeping the tail), `JOB_MAX_RUNTIME`, `MAX_EXEC_BODY_BYTES`, `EXEC_CONCURRENCY_MAX` (8; per-owner concurrent exec/stream ops — an agent client holding one stream per working thread runs that many at once), `GUEST_DIAL_MAX` (16; per-owner concurrent open guest-port dials). Both are per-identity overridable: an identity's `exec_concurrency` / `guest_dial` (set by an admin via `POST /api/users/{id}/quota`, stored with the user) replaces the host default for that identity alone; unset keeps the host default |
 | CI runner | `RUNNER_ADMIT_WAIT_SECS`, `RUNNER_JOB_TIMEOUT` (6h) |
-| Drain and recovery | `DRAIN_SNAPSHOT_CONCURRENCY`, `UNDRAIN_*`, `RECOVERY_RETRY_*`, `ROOTFS_PROBE_SECS`, `SWEEP_TIMEOUT`, `E2B_CREATE_TIMEOUT` and the other per-call E2B limits |
+| Drain and recovery | `DRAIN_SNAPSHOT_CONCURRENCY`, `UNDRAIN_*`, `RECOVERY_RETRY_*`, `ROOTFS_PROBE_SECS`, `GUEST_UNREACHABLE_SECS`, `SWEEP_TIMEOUT`, `E2B_CREATE_TIMEOUT` and the other per-call E2B limits |
 | Housekeeping and testing | `ORPHAN_REAP` (`dryrun`), `CRASH_TEST` |
 
 More detail:
