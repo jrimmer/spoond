@@ -331,7 +331,7 @@ the result.
 | [Security](docs/security.md) | threat model, hardening notes, adversarial-review fixes |
 | [Conformance suite](conformance/README.md) | the lease-API contract tests, run against production |
 | [E2B upgrade runbook](docs/runbooks/e2b-upgrade.md) | moving the fork to a newer upstream |
-| [Install](docs/install.md), [Setup](docs/setup.md) | bringing up an E2B host and spoond, first users and services |
+| [Install](docs/install.md) | `spoond install` and the Docker install, first users, and the configuration reference |
 | [Operations](docs/operations.md) | day-2: doctor, drain and reboots, the network watchdog, GC, backups, the dashboard |
 | [Changelog](CHANGELOG.md) | what changed in each release |
 

@@ -102,7 +102,7 @@ standalone `spoondctl`.
 
 (The pre-2.0 `FORKD_CTL_*` names still work and log a one-line
 deprecation warning — see the "Renamed in 2.0" table in
-[setup.md](setup.md).)
+[install.md](install.md#renamed-in-20).)
 
 ```bash
 spoondctl new go          # create

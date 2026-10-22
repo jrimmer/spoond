@@ -1,7 +1,12 @@
 # spoond deployment
 
-Four systemd units run on the host (10.0.0.11), counting the E2B substrate unit
-they depend on:
+A new host is installed with `spoond install`, or with Docker Compose from
+[docker/](docker/compose.yaml); both are in
+[docs/install.md](../docs/install.md). This file is the reference for the
+shipped units and for updating an installed host by hand.
+
+Four systemd units run on the host, counting the E2B substrate unit they
+depend on:
 
 0. **e2b-orchestrator** — the sandbox substrate (Firecracker microVM
    lifecycle, snapshots, sandbox proxy). Deployed from the
@@ -11,7 +16,7 @@ they depend on:
 2. **spoond-sshd-gateway** — the SSH gateway (`:2222`) + ctl plane
 3. **spoond-runner** — the Forgejo Actions runner (adaptive pool)
 
-> Full user docs: [docs/setup.md](../docs/setup.md),
+> Full user docs: [docs/install.md](../docs/install.md),
 > [docs/api.md](../docs/api.md), [docs/ctl.md](../docs/ctl.md),
 > [docs/usage.md](../docs/usage.md),
 > [docs/operations.md](../docs/operations.md). This file is the
@@ -22,11 +27,11 @@ they depend on:
 
 ## 0. e2b-orchestrator (substrate)
 
-Brought up by `deploy/e2b/host-setup.sh` plus the remaining steps of
-[U04](../docs/plans/2026-09-30-e2b-substrate/U04-host-bringup.md):
-the `e2b-orchestrator.service` unit with `deploy/e2b/orchestrator.env`,
-the token seed (`/etc/spoond/e2b-token-seed`), the `flags.json` override,
-the `e2b-guard` host firewall and the OpenTelemetry collector.
+Installed by `spoond install runtime`: the `e2b-orchestrator.service`
+unit with `deploy/e2b/orchestrator.env`, the token seed
+(`/etc/spoond/e2b-token-seed`), the `flags.json` override and the
+`e2b-guard` host firewall. The OpenTelemetry collector
+(`deploy/e2b/otelcol-config.yaml`) is optional and installed by hand.
 
 ```bash
 install -m 644 deploy/e2b/e2b-orchestrator.service /etc/systemd/system/
@@ -49,8 +54,7 @@ install -m 644 deploy/spoond-backend.service /etc/systemd/system/
 ```
 
 On host, create `/etc/spoond/backend.env` (mode 0600). The full variable
-reference is in [docs/setup.md](../docs/setup.md) and
-[docs/install.md](../docs/install.md). Example files for every unit live
+reference is in [docs/install.md](../docs/install.md#spoond-backend-lease-api). Example files for every unit live
 beside the units: `deploy/spoond-backend.env.example`,
 `deploy/spoond-gateway.env.example`, `deploy/spoond-runner.env.example`
 and `deploy/e2b/spoond-netwatch.env.example` — their headers name the
@@ -167,7 +171,7 @@ chmod 600 /etc/spoond/runner.env
 
 Pool tuning (`RUNNER_FLOOR`, `RUNNER_MAX`, `RUNNER_SCALE_STEP`,
 `SCALE_UP_DELAY`, `SCALE_DOWN_DELAY`, `JOB_RECORD_DIR`) is documented in
-[docs/setup.md](../docs/setup.md) and
+[docs/install.md](../docs/install.md#spoond-runner-forgejo-actions-optional) and
 [docs/ci-jobs.md](../docs/ci-jobs.md).
 
 Then:

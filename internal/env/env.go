@@ -1,7 +1,7 @@
 // Package env resolves configuration variables that were renamed in 2.0.
 //
 // spoond 2.0 renamed its FORKD_-prefixed configuration variables to
-// SPOOND_ (docs/setup.md, "Renamed in 2.0"). Configuration reads go
+// SPOOND_ (docs/install.md, "Renamed in 2.0"). Configuration reads go
 // through Get, which prefers the SPOOND_ name and falls back to the
 // deprecated FORKD_ name, logging a one-line deprecation warning the
 // first time a deprecated name supplies a value in this process.

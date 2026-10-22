@@ -283,7 +283,7 @@ SSH key (`ssh ctl@… "ssh-key add …"` cannot create one: it always
 posts a `person` with no token) — then set `SPOOND_AGENT_TOKEN` to that
 token. The pre-2.0 `FORKD_*` names still work and log a one-line
 deprecation warning (see the "Renamed in 2.0" table in
-[setup.md](setup.md)).
+[install.md](install.md#renamed-in-20)).
 
 (The `SPOOND_*` names above are the live, supported variable names.)
 
@@ -322,7 +322,7 @@ Operational flow for an admin:
 # 1. Bootstrap the first (admin) user with your SSH public key
 ssh ctl@sandbox.example.com "ssh-key add ssh-ed25519 AAAA… you@laptop you"
 # (first user is admin; with BOOTSTRAP_TOKEN set, do this via direct
-#  API call — see docs/setup.md "First-user bootstrap")
+#  API call — see docs/install.md "First-user bootstrap")
 
 # 2. Add teammates (admin; each becomes a `person` identity)
 ssh ctl@sandbox.example.com "ssh-key add ssh-ed25519 AAAA… alice@mbp alice"

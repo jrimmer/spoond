@@ -1,353 +1,457 @@
 # Installing spoond
 
 spoond is the control plane; the sandboxes themselves are run by E2B's
-orchestrator (see [substrate.md](substrate.md)). Installing the platform
-means bringing up one host with both:
+orchestrator (see [substrate.md](substrate.md)). An install brings up one
+host with both: the E2B orchestrator and its pinned Firecracker, guest
+kernel and busybox, and spoond's backend, SSH gateway and dashboard, with
+the local container registry and the image catalog.
 
-1. **The E2B host** — kernel modules, sysctls and hugepages, storage, the
-   pinned Firecracker/kernel/busybox artifacts, our orchestrator and envd
-   binaries, the host firewall, the local container registry and the
-   OpenTelemetry collector.
-2. **spoond** — one Go binary (`spoond backend`, `spoond gateway`, the
-   runner, the dashboard), the SQLite database, the identity store and
-   the image catalog.
+There are two ways to install, both from the same release:
 
-There is no single installer yet; the steps below are the procedure the
-production host was installed with, and every script referenced lives in
-`deploy/e2b/` in this repo.
+- **Native**: `spoond install` on a Debian 13 host. It sets up the host,
+  installs every service as a systemd unit and builds the image catalog.
+- **Docker**: `deploy/docker/compose.yaml` runs the same services as
+  containers, after one `prepare` run writes the host's kernel settings.
 
-## Prerequisites
+Both are idempotent: a rerun compares before it writes, reports each item
+as `created`, `changed` or `kept`, and never overwrites a secret or env
+file that exists.
 
-- A Linux host with KVM, kernel 6.x, cgroup v2, and a reflink-capable
-  filesystem (ZFS 2.2+ block cloning, XFS or btrfs) for the build store.
-- Go 1.27.1+ (the module requires `go 1.27.1`).
-- docker (for the local registry and the image builds), nftables,
-  iproute2, util-linux, e2fsprogs, rsync, curl, iptables.
-- The E2B fork built or cloned, for the orchestrator and envd binaries.
+## Requirements
 
-```bash
-apt-get install -y --no-install-recommends \
-  iptables rsync e2fsprogs iproute2 util-linux curl nftables
-git clone https://git.example.com/example/spoond.git && cd spoond
-```
+- An x86-64 host with KVM (`/dev/kvm`) and at least 16 GiB of memory.
+  Debian 13 is the tested distribution; others work with a warning
+  (kernel 6.1 or newer). A virtual machine works when nested
+  virtualisation is on.
+- A snapshot store with at least 100 GiB free: an existing directory
+  (XFS with reflink is recommended; `--store-dir`, default
+  `/forkdcache/e2b`) or a spare disk the installer turns into a ZFS pool
+  (`--store-disk /dev/<disk>`, native only).
+- Free ports 8890 (lease API), 8891 (proxy), 2222 (SSH gateway), 8893
+  (dashboard), 5000 (registry), 5007 and 5008 (orchestrator).
+- Internet access during the install: apt packages, the release's
+  runtime tarball, the pinned Firecracker, kernel and busybox, and the
+  base images.
 
-## 1. Host setup
+Sandbox memory is hugepage-backed. `--hugepages auto` (the default) keeps
+`max(6 GiB, 17 %)` of memory for the host and reserves the rest in 2 MiB
+pages, both now and on the kernel command line; a 128 GiB host reserves
+about 106 GiB, a 16 GiB host 10 GiB. Pass a page count to choose.
 
-Run `deploy/e2b/host-setup.sh` as root. It is idempotent and covers the
-host steps of the spec's U04: packages and the `nbd`/`tun`/`kvm` modules
-(`nbds_max=256`), the sysctl file (`vm.nr_hugepages`, `vm.max_map_count`,
-`net.ipv4.ip_forward`), the MSS-clamp rule, the ZFS dataset and
-directories, the pinned Firecracker/kernel/busybox artifacts (fetched by
-SHA-256) plus the orchestrator and envd binaries from
-`/root/src/e2b-runtime` (our fork; see below), the `e2b_guard` nftables
-table and its oneshot unit, and the local registry container on
-`127.0.0.1:5000`. The steps it leaves to the operator are the
-configuration files, the systemd unit and the coexistence checks —
-sections 2–4 below.
+## Native install
 
-Two things to review before you trust it:
-
-- **Hugepages sizing.** The script writes `vm.nr_hugepages = 12288`
-  (24 GiB), the bring-up value used beside the previous substrate. Size
-  it for your workload instead: sandbox memory is hugepage-backed, so the
-  sum of every running sandbox's `memory_mb` must fit. The production
-  host runs 24576 (48 GiB). Apply changes with `sysctl -p` on that one
-  file, never `sysctl --system`.
-- **The fork location.** The orchestrator and envd binaries are copied
-  from `/root/src/e2b-runtime`; clone our E2B fork there (or edit the
-  two `install` lines) before running the script:
-
-  ```bash
-  install -D -m 0755 /root/src/e2b-runtime/packages/envd/bin/envd /fc-envd/envd
-  install -D -m 0755 /root/src/e2b-runtime/packages/orchestrator/bin/orchestrator \
-    /usr/local/lib/e2b/orchestrator
-  ```
-
-## 2. Orchestrator configuration
-
-Install `/etc/e2b/orchestrator.env` from `deploy/e2b/orchestrator.env`
-and `/etc/e2b/flags.json` from `deploy/e2b/flags.json`, then edit the
-addresses: `SANDBOXES_HOST_NETWORK_CIDR` and `SANDBOXES_VRT_NETWORK_CIDR`
-must not collide with anything on the host (production uses
-`10.11.0.0/16` and `10.12.0.0/16`), and `ORCHESTRATOR_BASE_PATH`,
-`TEMPLATE_STORAGE_URL`, `BUILD_CACHE_STORAGE_URL` and `TMPDIR` point at
-the dataset created in step 1. Redis, ClickHouse, LaunchDarkly and log
-shipping stay **unset** — that is what keeps the orchestrator
-standalone.
-
-Then:
+Download the release binary and run the installer as root:
 
 ```bash
-chmod 600 /etc/e2b/orchestrator.env /etc/e2b/flags.json
-install -d -m 700 /etc/spoond
-test -s /etc/spoond/e2b-token-seed || openssl rand -hex 32 > /etc/spoond/e2b-token-seed
-chmod 600 /etc/spoond/e2b-token-seed
-# Install the orchestrator unit without its drain hooks for now: they
-# need /etc/e2b/drain.env and /opt/spoond/spoond, which step 4 creates.
-# Step 4 then installs the shipped unit as it is.
-grep -v drain deploy/e2b/e2b-orchestrator.service \
-    > /etc/systemd/system/e2b-orchestrator.service
-systemctl daemon-reload && systemctl enable --now e2b-guard e2b-orchestrator
-curl -fsS http://127.0.0.1:5008/health     # {"status":"healthy",...}
+curl -fsSLO https://github.com/jrimmer/spoond/releases/download/v4.0.0/spoond_4.0.0_linux_amd64.tar.gz
+tar xzf spoond_4.0.0_linux_amd64.tar.gz
+sudo ./spoond install --host-name sandbox.example.com --admin-key ~/.ssh/id_ed25519.pub
 ```
 
-`/etc/spoond/e2b-token-seed` is the HMAC seed for every envd/traffic
-token; losing it invalidates all of them, so back it up with the rest of
-`/etc/spoond`.
+(`go install github.com/jrimmer/spoond/v4/cmd/spoond@v4.0.0` builds the
+same binary.) It runs six phases in order and stops at the first failure
+with what to do next. `spoond install <phase>` runs one, and `--dry-run`
+prints the plan and changes nothing.
 
-## 3. Metrics plumbing (optional but recommended)
+| Phase | Does |
+|---|---|
+| `check` | root, x86-64, `/dev/kvm`, memory, distribution and kernel, the free ports, the store's free space |
+| `host` | apt packages (Docker among them); the `nbd` (`nbds_max=256`), `tun` and `kvm` modules and the nbd udev rule; sysctls and hugepages (also on the kernel command line, through `update-grub`); the legacy iptables backend; the snapshot store and its directories; Docker's store drop-in and the local registry (`registry:2.8.3` on `127.0.0.1:5000`); the AppArmor Unix-socket check |
+| `runtime` | the release's `spoond-runtime` tarball (the orchestrator and envd) for this binary's version, checked against `SHA256SUMS`, or `--runtime <tarball>`; the pinned Firecracker, kernel and busybox, each checked by SHA-256; `/etc/e2b/orchestrator.env` and `flags.json`; the envd token seed; the `e2b-guard` firewall and the orchestrator unit; waits for the orchestrator's `/health` |
+| `spoond` | the binary as `/opt/spoond/spoond`; every secret, `backend.env`, the drain hook's files, the gateway and dashboard env; TLS from `--tls-cert`/`--tls-key`, else a self-signed pair for `--host-name`; the backend, gateway, dashboard and drain units, started; waits for `/healthz`; the first admin user from `--admin-key` |
+| `images` | the image catalog: `--images minimal` (default: `py-base` and `go-base`), `all` or `none`. A release binary pulls each base Docker image from `ghcr.io/jrimmer/spoond-images` when it is published for the version (`--base-registry` names another prefix) and builds it locally otherwise |
+| `doctor` | `spoond doctor` over the result; the install fails if doctor does |
 
-Install the OpenTelemetry collector with `deploy/e2b/otelcol-config.yaml`
-as `/etc/otelcol-contrib/config.yaml` **before** installing the package
-(the package starts the service on install, and its default config would
-bind an already-used port). The collector takes OTLP on
-`127.0.0.1:14317` and exposes Prometheus on `127.0.0.1:19464`; point
-`OTEL_PROM_URL` at the latter to have spoond's `/metrics` include the
-orchestrator's own metrics.
+`--host-name` defaults to `hostname -f`; it names the TLS certificate and
+what the gateway advertises. Without `--admin-key` no user is created
+(see [First-user bootstrap](#first-user-bootstrap)).
 
-## 4. Build and install spoond
+When the kernel cannot reserve the hugepages on the running host, the
+host phase finishes its other steps and asks for a reboot; run
+`spoond install` again after it. A Forgejo Actions runner is not installed
+(see [spoond-runner](#spoond-runner-forgejo-actions-optional)).
+
+### What it writes
+
+| Path | Contents |
+|---|---|
+| `/etc/spoond/backend.env` | the backend's configuration and tokens (0600); the [backend reference](#spoond-backend-lease-api) lists every setting |
+| `/etc/spoond/tls/` | the TLS pair the backend and dashboard serve |
+| `/etc/spoond/admin-token` | the admin token the drain hooks read |
+| `/etc/spoond/e2b-token-seed` | the HMAC seed for every envd and traffic token: losing it invalidates them all |
+| `/etc/spoond/dash-password`, `dash.env` | the dashboard's generated password (user `admin`) and its configuration |
+| `/etc/spoond-gateway.env`, `/etc/spoond-gateway/` | the gateway's token and host name; its keys (made at first start) |
+| `/etc/e2b/orchestrator.env`, `flags.json`, `drain.env` | the orchestrator's configuration and drain hooks |
+| `/var/lib/spoond/` | the SQLite database, the identity store (`users.json`), backups and the image build context |
+| `/etc/systemd/system/` | `e2b-guard`, `e2b-orchestrator`, `spoond-backend`, `spoond-sshd-gateway`, `spoond-dash`, `spoond-drain` |
+
+Back up `/etc/spoond` and `/var/lib/spoond` together. Edit `backend.env`
+by hand to change a setting (no inline comments: systemd keeps a
+trailing `#` as part of the value), then `systemctl restart
+spoond-backend`.
+
+## Docker install
+
+The containers run privileged with host networking: this packages
+spoond, it does not isolate it. The host needs Docker with Compose and
+the kernel settings the `prepare` service writes. From a checkout of the
+release tag:
 
 ```bash
-export PATH=/usr/local/go/bin:$PATH
-go build -o /opt/spoond/spoond ./cmd/spoond
-/opt/spoond/spoond help
-install -D -m 644 deploy/spoond-backend.service deploy/spoond-sshd-gateway.service \
-  deploy/spoond-runner.service /etc/systemd/system/
+cd deploy/docker
+export SPOOND_HOST_NAME=sandbox.example.com   # or put it in .env
+docker compose run --rm prepare     # modules, sysctls, hugepages, kernel command line
+# if it says so: sudo update-grub && sudo reboot
+docker compose run --rm init        # config and secrets into ./config
+docker compose up -d
+cp ~/.ssh/id_ed25519.pub config/admin.pub
+docker compose run --rm init install spoond --container --root=/config \
+  --host-name="$SPOOND_HOST_NAME" --admin-key=/config/admin.pub
+docker compose exec spoond spoond-container install images
+docker compose exec spoond spoond-container doctor
 ```
 
-The shipped backend unit is usable as installed: `deploy/spoond-backend.service`
-reads its environment from `EnvironmentFile=-/etc/spoond/llm.env` then
-`EnvironmentFile=-/etc/spoond/backend.env` (the leading `-` lets the unit
-start even when a file is absent; a later file wins, so `backend.env`
-overrides anything `llm.env` sets) and orders after
-`e2b-orchestrator.service` (`After=`/`Wants=`) so the backend comes up
-with the orchestrator it depends on. Keep the leading `-` so a missing
-file cannot block unit startup; the backend itself refuses to serve
-without `CONSUMER_TOKENS`, which is the failure you want — omit
-`llm.env` entirely and the unit still starts. The installed
-`[Unit]`/`[Service]` heads look like:
+The image is `ghcr.io/jrimmer/spoond:<version>` (`SPOOND_IMAGE`);
+`docker compose build` builds it from the checkout instead, with the
+release's runtime tarball in `deploy/docker/artifacts/` or downloaded for
+the build's `VERSION`. The snapshot store is `SPOOND_STORE_DIR` on the
+host (default `/forkdcache/e2b`; it must exist), and `./config`
+(`SPOOND_CONFIG`) holds the configuration, the secrets and the database,
+laid out as on a native host under `etc/` and `var/`: back it up.
 
-```ini
-After=network-online.target e2b-orchestrator.service
-Wants=network-online.target e2b-orchestrator.service
+| Service | Does |
+|---|---|
+| `prepare` (run once) | `spoond install host --container` against the host's `/`: the modules, sysctls, hugepages and kernel command line. Packages, iptables, Docker and the AppArmor check are the host's own |
+| `init` (run once) | the runtime and spoond phases' config and secrets under `./config`, starting nothing; rerun without `--config-only` once the stack is up to create the first admin user |
+| `registry` | `registry:2.8.3` on `127.0.0.1:5000`, its data in the store |
+| `orchestrator` | loads the `e2b-guard` rules and runs the orchestrator; on stop it drains first (`stop_grace_period` 6 min), and undrains once the orchestrator and backend are healthy |
+| `spoond` | the backend, with the Docker socket for image builds |
+| `gateway`, `dash` | the SSH gateway and the dashboard |
 
-[Service]
-Type=simple
-ExecStart=/opt/spoond/spoond backend
-Environment=BIND_ADDR=127.0.0.1:8890
-EnvironmentFile=-/etc/spoond/llm.env
-EnvironmentFile=-/etc/spoond/backend.env
-```
+`docker compose exec spoond spoond-container <command>` runs any `spoond`
+command with the backend's environment loaded (`doctor`, `images list`,
+`ctl`, ...).
 
-`BIND_ADDR` stays `127.0.0.1:8890` unless the gateway or runner needs
-the backend on another address (an env file can override it — entries
-in an `EnvironmentFile` win over `Environment=`).
+## Verify
 
-Optional `llm.env`: on hosts that keep the per-lease LLM gateway's key
-pair apart from the lease API's tokens, write that pair
-(`LLM_UPSTREAM_URL`, `LLM_UPSTREAM_KEY`, `LLM_DEFAULT_MODEL`) to
-`/etc/spoond/llm.env` (0600) instead of `backend.env`; nothing here
-requires the file, and a key set in both files takes `backend.env`'s
-value (later files win). The backend sources `/etc/spoond/backend.env`
-(0600) — the main operator file. Generate the
-secrets and the TLS pair **first** — an `EnvironmentFile` is parsed
-literally by systemd, so a `$(openssl rand …)` written into it stays an
-unexpanded string and never matches anything:
+`spoond doctor` checks the result: the configuration, the orchestrator's
+health and free hugepages, the registry, the token seed, the database and
+its migrations, the image catalog, the pinned artifacts by SHA-256,
+storage headroom, the lease API, the gateway port, the LLM upstream and
+TLS. The install runs it last; to run it again on a native host:
 
 ```bash
-install -d -m 700 /etc/spoond /etc/spoond/tls
-umask 077
-CONSUMER_TOKEN=$(openssl rand -hex 24)
-BOOTSTRAP_TOKEN=$(openssl rand -hex 24)
-GATEWAY_TOKEN=$(openssl rand -hex 32)
-ADMIN_TOKEN=$(openssl rand -hex 32)
-METRICS_TOKEN=$(openssl rand -hex 32)
-EVENTS_TOKEN=$(openssl rand -hex 32)
-
-# self-signed cert with the host's name as a DNS SAN: the backend serves
-# HTTPS on :8890 only when TLS_CERT and TLS_KEY are both set
-FQDN=$(hostname -f)
-openssl req -x509 -newkey rsa:3072 -nodes -days 3650 \
-  -keyout /etc/spoond/tls/privkey.pem -out /etc/spoond/tls/cert.pem \
-  -subj "/CN=$FQDN" -addext "subjectAltName=DNS:$FQDN"
-
-# the drain hook reads its token from a file
-printf '%s' "$ADMIN_TOKEN" > /etc/spoond/admin-token
+sudo spoond install doctor
 ```
 
-Minimum contents for a new deployment — the heredoc below is
-**unquoted** so the values above land in the file, not the variable
-names (see [setup.md](setup.md) for the full variable reference):
+Then end to end:
 
 ```bash
-cat > /etc/spoond/backend.env <<EOF
-CONSUMER_TOKENS=$CONSUMER_TOKEN=forgejo
-SPOOND_DB_PATH=/var/lib/spoond/spoond.db
-E2B_GRPC_ADDR=127.0.0.1:5008
-E2B_PROXY_URL=http://127.0.0.1:5007
-E2B_TOKEN_SEED_FILE=/etc/spoond/e2b-token-seed
-IMAGE_REGISTRY=localhost:5000
-HOST_GUEST_SERVICE_ADDR=<host primary IP>
-HOST_GUEST_SERVICE_PORT=8891
-SPOOND_GUEST_DNS_ADDR=<guest resolver IP>
-SPOOND_PROXY_HOST_SUFFIX=.sandbox.example.com
-E2B_TEMPLATE_STORAGE_PATH=/forkdcache/e2b/storage/templates
-SPOOND_BACKUP_DIR=/var/lib/spoond/backups
-USERS_FILE=/var/lib/spoond/users.json
-BOOTSTRAP_TOKEN=$BOOTSTRAP_TOKEN
-GATEWAY_TOKEN=$GATEWAY_TOKEN
-ADMIN_TOKEN=$ADMIN_TOKEN
-METRICS_TOKEN=$METRICS_TOKEN
-EVENTS_TOKEN=$EVENTS_TOKEN
-TLS_CERT=/etc/spoond/tls/cert.pem
-TLS_KEY=/etc/spoond/tls/privkey.pem
-BIND_ADDR=0.0.0.0:8890
-PROXY_ADDR=0.0.0.0:8891
-EOF
-chmod 600 /etc/spoond/backend.env
+ssh new@sandbox.example.com -p 2222     # creates a dev sandbox and drops you in tmux
 ```
 
-Two lines to edit by hand: `HOST_GUEST_SERVICE_ADDR` (the host's primary
-IP — required, what guests use to reach host services; the backend exits
-without it) and the consumer name in `CONSUMER_TOKENS` (required; the
-backend exits without it too). `SPOOND_GUEST_DNS_ADDR` is the guest's DNS
-resolver(s) (comma-separated; granted on port 53 and baked into the guest
-image as one `nameserver` line each; empty leaves no resolver
-allowance), and `SPOOND_PROXY_HOST_SUFFIX` is the
-wildcard hostname suffix the HTTP proxy routes (default
-`.sandbox.example.com`). `USERS_FILE` is the identity store that
-turns on multi-user tenancy; `BOOTSTRAP_TOKEN` gates the first (admin)
-user, `GATEWAY_TOKEN` is the SSH gateway's service token, `ADMIN_TOKEN`
-drives `/api/admin/*` (drain, undrain, reconcile), `METRICS_TOKEN` is
-the scrape-only `/metrics` token and `EVENTS_TOKEN` is the events-only
-token the dashboard's lease events panel subscribes with (set the same
-value as its `DASH_EVENTS_TOKEN`; see [operations.md](operations.md)).
-`TLS_CERT`/`TLS_KEY` must both be set
-or neither — without the pair the backend serves plain HTTP. No inline
-comments in the file: systemd's `EnvironmentFile` parser keeps a
-trailing `#` as part of the value.
+See [api.md](api.md) for the HTTP API, [ctl.md](ctl.md) for the control
+plane and [operations.md](operations.md) for day-2 work. The manual
+procedure the installer replaces is in the 3.x tree's
+`docs/install.md` and in the substrate plan's U04.
 
-Write the gateway environment to `/etc/spoond-gateway.env` (0600) with
-`SPOOND_GATEWAY_TOKEN=<the GATEWAY_TOKEN value>`; the gateway unit reads
-it so the token never appears in `ExecStart`.
+## Configuration reference
 
-Point the orchestrator's drain hooks at the backend
-(`/etc/e2b/drain.env`, 0600) — this is what makes orchestrator restarts
-lossless:
+### Architecture
 
-```ini
-SPOOND_DRAIN_URL=https://127.0.0.1:8890
-SPOOND_ADMIN_TOKEN_FILE=/etc/spoond/admin-token
-SPOOND_DRAIN_INSECURE=1
+```
+                 ┌────────────────────── spoond ──────────────────────┐
+  SSH :2222 ───▶ │ spoond-sshd-gateway        (dev sandboxes + ctl)   │
+  HTTP :8891 ──▶ │   (proxy front, LLM gateway)                       │
+                 │                                                    │
+  HTTPS :8890 ─▶ │ spoond-backend ──gRPC──▶ e2b-orchestrator :5008    │
+                 │   lease API, warm pool, TTL/idle sweeps            │
+                 │                                                    │
+  Forgejo ─────▶ │ spoond-runner (optional Forgejo Actions worker)    │
+                 └────────────────────────────────────────────────────┘
 ```
 
-`SPOOND_ADMIN_TOKEN_FILE` points at the `/etc/spoond/admin-token` file
-written above (the hook reads tokens from files, never the environment);
-`SPOOND_DRAIN_INSECURE=1` is needed because the call goes to `127.0.0.1`
-while the certificate is issued for the host's name.
+The backend runs the control plane (leases, quotas, sharing, the catalog,
+SQLite state) and talks to the E2B node orchestrator on loopback to
+create, list, pause and checkpoint sandboxes. What the substrate is and
+how that split works: [substrate.md](substrate.md).
 
-Now that the binary and the env file both exist, install the shipped
-orchestrator unit as it is, with its drain hooks (step 2 left them out):
+> **Naming note.** Since 2.0 the service environment variables carry the
+> `SPOOND_` prefix (`SPOOND_BACKEND_URL`, `SPOOND_AGENT_TOKEN`, …). The
+> pre-2.0 `FORKD_` names still work everywhere but log a one-line
+> deprecation warning; see the "Renamed in 2.0" table below.
+
+### spoond-backend (lease API)
+
+#### Environment
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `E2B_GRPC_ADDR` | `127.0.0.1:5008` | orchestrator gRPC address |
+| `E2B_PROXY_URL` | `http://127.0.0.1:5007` | orchestrator sandbox proxy base URL |
+| `E2B_TEAM_ID` | `5b0f4e3a-8c1d-4f2e-9a6b-7d3c2e1f0a95` | fixed team UUID sent with every gRPC request |
+| `E2B_TOKEN_SEED_FILE` | `/etc/spoond/e2b-token-seed` | envd/traffic HMAC seed file (0600, ≥ 32 bytes; the backend exits without it) |
+| `E2B_CREATE_TIMEOUT` | `5m` | per-call bound for orchestrator create/resume; a Go duration or seconds (spoond-j3a) |
+| `E2B_PAUSE_TIMEOUT` | `5m` | per-call bound for orchestrator pause |
+| `E2B_CHECKPOINT_TIMEOUT` | `5m` | per-call bound for orchestrator checkpoint |
+| `E2B_DELETE_TIMEOUT` | `2m` | per-call bound for orchestrator delete |
+| `E2B_NODEINFO_TIMEOUT` | `15s` | per-call bound for `NodeInfo` |
+| `E2B_CONTROL_TIMEOUT` | `30s` | per-call bound for every other orchestrator call (list, update, drain override, template builds) |
+| `SWEEP_TIMEOUT` | `15m` | bound for one background sweep stage (TTL release, the one paused-release clock, pool refill, job prune), so a hung substrate RPC frees the loop and the lease's busy flag |
+| `E2B_TEMPLATE_STORAGE_PATH` | `/forkdcache/e2b/storage/templates` | build store — where GC and disk accounting look |
+| `SPOOND_BUILD_TIMEOUT` | `1h` | how long a template build may run before the GC fails a still-`building` row as stale (twice this); a Go duration or seconds. The backend reads it from its own environment; `spoond images build` reads it separately, so set it for both (spoond-4yl, spoond-rzz) |
+| `IMAGE_REGISTRY` | `localhost:5000` | registry `spoond images build` pushes to |
+| `CONSUMER_TOKENS` | *(required)* | comma-separated `token=consumer` pairs, e.g. `abc=forgejo,def=pi` — consumers authenticate with bearer tokens |
+| `USERS_FILE` | *(empty)* | identity store path (JSON, chmod 600). Set for multi-user tenancy: per-user keys, tokens, quotas, sharing |
+| `BOOTSTRAP_TOKEN` | *(empty)* | gates the first-user bootstrap when the store is empty; unset = legacy open first-create |
+| `GATEWAY_TOKEN` | *(empty)* | SSH gateway's service token; lets the gateway call the backend as the authenticated SSH user (trusted impersonation) |
+| `ADMIN_TOKEN` | *(empty)* | bearer token for `/api/admin/*` (drain, undrain, reconcile); unset = those routes answer `404` |
+| `METRICS_TOKEN` | *(empty)* | scrape-only token for `/metrics`; refused on every other route |
+| `EVENTS_TOKEN` | *(empty)* | events-only token for the lease event streams (every owner's events); refused on every other route — spoond dash's `DASH_EVENTS_TOKEN` |
+| `BIND_ADDR` | `127.0.0.1:8890` | lease API listen address (`0.0.0.0:8890` behind a proxy) |
+| `POOL_SIZE` | `0` | warm-pool size **per image with a current build**; pre-created sandboxes served without a cold restore. `0` disables |
+| `SANDBOX_PROBE` | `1` | check each sandbox runs a healthy toolchain before pooling or leasing it; `0` disables (see [ci-jobs.md](ci-jobs.md)) |
+| `SANDBOX_PROBE_TIMEOUT_SECS` | `20` | exec timeout for each integrity probe |
+| `CHECKPOINT_INTERVAL_MINS` | `0` | default per-lease background checkpoint interval in minutes for leases without their own `checkpoint_interval` (`0` = never; a lease's own interval overrides) |
+| `MAX_KEPT_PER_LEASE` | `4` | kept-checkpoint cap per lease (`0` = no cap): a keep on a lease at the cap answers `409` and takes nothing (#126) |
+| `MAX_NAMED_SNAPSHOTS` | `64` | distinct named-snapshot names per owner (`0` = no cap): a save that would add one past the cap answers `409 snapshot_limit` (#83) |
+| `SNAPSHOT_KEEP_VERSIONS` | `3` | default versions a named snapshot keeps (`1`–`20`); the first save may override it per name and `PUT /api/named-snapshots/{name}` changes it later (#83) |
+| `MAX_RUNNING_JOBS_PER_LEASE` | `16` | running background exec jobs per lease; past it a start answers `429` (#135) |
+| `JOB_RETENTION_SECS` | `604800` | exited background-job records older than this (seconds) are pruned by the sweeper; running and lost records are kept; a job's own `retention_secs` shortens it (#135, spoond-hwto) |
+| `JOB_OUTPUT_MAX_BYTES` | `0` | a running background job's stdout/stderr guest file grown past this (bytes) has its front punched out (`fallocate --punch-hole`) between reconcile passes, keeping the tail; 0 = unlimited; a job's own `output_max_bytes` shortens it, never lengthens it (spoond-hwto) |
+| `JOB_MAX_RUNTIME` | `86400` (24 h) | how long a background job may run before the reconcile pass kills it and marks it exited with reason `timed_out`; takes a Go duration (`24h`) or seconds, a job may ask for a shorter `max_runtime_secs` but never a longer one, and a negative value disables the cap (the cap is held as whole seconds: a positive fractional duration rounds up, and a negative value under one second is rejected at startup) (spoond-wb5) |
+| `KEPT_DISK_WARN_PCT` | `40` | kept-checkpoint share of the snapshot disk past which the notifier's `disk.kept` check warns and the dashboard's Notifications panel shows a message (`0` = off; #126) |
+| `DISK_RESERVE_PCT` | `5` | snapshot disk share kept free: the take-back policy reserves it as the floor and the notifier's `capacity.disk_low` check alerts when free falls below it (clamped to 0–50; #145 FS3) |
+| `GC_DELETE` | `0` | `1` = the snapshot catalog GC actually deletes; default dry-run only logs candidates (see [operations.md](operations.md)) |
+| `ORPHAN_REAP` | `dryrun` | what the GC does with orphan build directories: `off` (hard stop, change nothing), `dryrun` (log only), or `quarantine` (move aside, delete after `ORPHAN_QUARANTINE_SECS`; see [operations.md](operations.md)) |
+| `ORPHAN_MIN_AGE_SECS` | `3600` | don't reap a build directory modified more recently than this (it may still be written; see [operations.md](operations.md)) |
+| `ORPHAN_QUARANTINE_SECS` | `86400` | how long a `quarantine`-mode orphan waits before it may be deleted (see [operations.md](operations.md)) |
+| `PROXY_ADDR` | *(empty)* | `0.0.0.0:8891` to serve the HTTP proxy/LLM gateway listener (Caddy wildcard fronts it) |
+| `PROXY_AUTH_MODE` | `off` | `off` = capability model (lease id is the credential); `forward-auth` = require `X-Proxy-Auth` secret + `Remote-User` identity |
+| `PROXY_AUTH_SECRET` | *(empty)* | shared secret for `forward-auth` mode (set by Caddy/IdP; never forwarded to guests) |
+| `PROXY_AUTH_TRUSTED_PEERS` | *(empty)* | comma-separated CIDRs allowed to set `Remote-User` |
+| `HOST_GUEST_SERVICE_ADDR` | *(empty)* | host address guests use to reach host services (the proxy/LLM gateway) |
+| `HOST_GUEST_SERVICE_PORT` | `8891` | host TCP port granted to guests with the above |
+| `SPOOND_GUEST_DNS_ADDR` | *(empty)* | guest DNS resolver(s): each is granted to every lease's egress policy on port 53 and baked into the guest image. Comma-separated (`10.1.0.2,10.1.0.3`) for several; empty = no resolver allowance |
+| `SPOOND_PROXY_HOST_SUFFIX` | `.sandbox.example.com` | wildcard hostname suffix the HTTP proxy routes (`<id>.<suffix>`, `<id>-<port>.<suffix>`) |
+| `SPOOND_SSH_CONNECTION_ADDR` | `HOST_GUEST_SERVICE_ADDR` | gateway: server address reported in `SSH_CONNECTION` (single-host deploys need not set it) |
+| `HOST_API_PORT` | `BIND_ADDR`'s port | lease API port `lan`/`internet` guests may reach on `HOST_GUEST_SERVICE_ADDR` (`0` = none) |
+| `TLS_CERT` / `TLS_KEY` | *(empty)* | serve HTTPS on :8890 when both set. Comma-separated lists of equal length serve several certificates, chosen by the client's SNI and paired by position; the first is the default (no SNI, a connection by IP, or a name none covers). The files are re-read every minute, so a renewal needs no restart; a pair caught half-written keeps serving the old certificate until it is complete |
+| `DEFAULT_TTL_SECS` | `300` | default lease TTL for non-persistent sandboxes |
+| `MAX_TTL_SECS` | `3600` | maximum TTL a consumer may request |
+| `IDLE_SUSPEND_DEFAULT_SECS` | `0` | default per-lease idle reclamation threshold for leases without their own `idle_suspend` (`0` = never; a lease's own `idle_suspend` overrides; #129 part 2) |
+| `PAUSED_RELEASE_DAYS` | `30` | every paused lease is released this many days after its pause date (the one clock, v3.0 FS5) |
+| `PINNED_IDLE_NOTICE_DAYS` | `7` | a pinned lease whose last API activity is older than this is flagged `pinned_idle_since` (visibility only; v3.0 FS5) |
+| `MAX_ADMIT_WAIT_SECS` | `600` | how long a create may wait for admission when it sends `wait` (`0` disables waiting; #129 part 1) |
+| `SNAPSHOT_WRITE_CONCURRENCY` | `1` | how many memory-snapshot writes (substrate `Pause`/`Checkpoint`) may run at once process-wide; every pause and checkpoint goes through this limiter (`0` = unlimited, the pre-fix behaviour; spoond-t1s) |
+| `DRAIN_SNAPSHOT_CONCURRENCY` | `2` | how many of those writes the admin drain may run at once, so a planned orchestrator restart can pause a batch of leases inside the unit's `TimeoutStopSec` (`0` = unlimited; see [operations.md](operations.md#restarting-the-orchestrator-planned)) |
+| `UNDRAIN_CONCURRENCY` | `2` | how many drained leases the admin undrain may resume at once, so restoring a batch of large memory snapshots does not stack the node's I/O and memory (`0` = unlimited; spoond-urm) |
+| `UNDRAIN_RESUME_RETRIES` | `2` | how many extra attempts a resume the admin undrain failed with a retryable envd/start error gets before the lease is left suspended with reason `resume_failed` (with a short backoff; `0` disables retries; spoond-urm, spoond-638d) |
+| `UNDRAIN_READY_TIMEOUT` | `180s` | how long the admin undrain waits for a restarted orchestrator to answer `NodeInfo` and a `List` before the first resume, so a resume never runs before the node accepts sandbox creates (a Go duration or seconds; spoond-638d) |
+| `UNDRAIN_RESUME_WINDOW` | `5m` | how long a resume that fails with an indeterminate orchestrator error (`Unavailable`, a connection reset) is retried with backoff; such an error never loses the lease (a Go duration or seconds; spoond-638d) |
+| `DRAIN_MAX_SECS` | `900` | how long a drain may stay in effect while the node is healthy before spoond undrains itself and resumes the drained leases (`0` means the default; a negative value disables the automatic undrain; spoond-52c) |
+| `DRAIN_RESUME_MAX_AGE` | `24h` | how long the drain self-heal loop keeps retrying a lease whose resume stays deferred before it stops and leaves the lease suspended (its snapshot intact) for the owner (`0` means the default; a negative value disables the bound; a Go duration or a plain integer of seconds; spoond-52c) |
+| `RECOVERY_RETRY_ATTEMPTS` | `3` | how many failed crash-recovery attempts a lease gets before it is marked `lost`, so a transient busy-node failure does not lose a recoverable lease (`0` means the default; spoond-dxq) |
+| `RECOVERY_RETRY_WINDOW` | `30m` | how long a lease may stay in recovery since its first failed attempt, whatever the failure kind, including a substrate capacity refusal waiting for room (a Go duration or seconds; spoond-dxq) |
+| `MAX_EXEC_TIMEOUT_SECS` | `300` | ceiling on one exec/stream call's `timeout` (raise it for compile-heavy CI steps) |
+| `MAX_EXEC_BODY_BYTES` | `8388608` (8 MiB) | cap on the JSON body of a POST exec and on every message of a `/stream` WebSocket; a bigger body is `413` (and a bigger stream frame closes with code `1009`). The guest's own argv limit is ~128 KiB per string |
+| `EXEC_CONCURRENCY_MAX` | `8` | per-owner cap on concurrent exec/stream operations; the 9th and later waiters get `429`. A per-identity override (`exec_concurrency` on `POST /api/users/{id}/quota`, stored with the identity) replaces it for that user alone; `0` there means this default |
+| `GUEST_DIAL_MAX` | `16` | per-owner cap on concurrent open guest-port dials (`GET /api/leases/{id}/ports/{port}/dial`); past it a dial gets `429`. A per-identity override (`guest_dial` on `POST /api/users/{id}/quota`) replaces it for that user alone; `0` there means this default |
+| `ASSETS_DIR` | *(empty)* | serve static assets (the shelley binary) to guests at `/assets/<file>` on the proxy listener |
+| `LLM_UPSTREAM_URL` | *(empty)* | OpenAI-compatible LLM API base for the per-lease LLM gateway |
+| `LLM_UPSTREAM_KEY` | *(empty)* | server-side key for that upstream (never sent into sandboxes) |
+| `LLM_DEFAULT_MODEL` | *(empty)* | default model id for LLM gateway requests |
+| `LLM_MODEL_MAP` | *(empty)* | optional `pattern=model` comma-separated map |
+| `LLM_MAX_CONCURRENT_PER_USER` | `0` | in-flight `/llm/` requests per user before `429` (`0` = unlimited) |
+| `OTEL_PROM_URL` | *(empty)* | fetch the orchestrator's Prometheus output here and append it to `/metrics` |
+| `SPOOND_DB_PATH` | `/var/lib/spoond/spoond.db` | SQLite state: leases, shares, pool, image catalog |
+| `SPOOND_BACKUP_DIR` | `/var/lib/spoond/backups` | daily `VACUUM INTO` backups, keep 7 |
+
+#### Run
 
 ```bash
-install -m 644 deploy/e2b/e2b-orchestrator.service /etc/systemd/system/
-systemctl daemon-reload
+export CONSUMER_TOKENS='abc=forgejo,def=pi'
+export TLS_CERT=/etc/spoond/tls/fullchain.pem TLS_KEY=/etc/spoond/tls/privkey.pem
+./spoond backend
 ```
 
-A restart is not needed for the hooks to apply: systemd picks up the
-new `ExecStop`/`ExecStartPost` on the next stop/start.
+#### systemd unit
 
-Keep the unit's `TimeoutStartSec=420` and `TimeoutStopSec=330`: with
-systemd's default 90 s, a slow undrain would fail the start and
-`Restart=always` would loop drain and restart.
+See `deploy/spoond-backend.service`. The shipped unit reads
+`EnvironmentFile=-/etc/spoond/llm.env` then
+`EnvironmentFile=-/etc/spoond/backend.env` (`chmod 600`; a later file
+wins, so the LLM pair may live in its own `llm.env` and `backend.env`
+is the file the backend sources and the operator snippets in
+this page and [operations.md](operations.md) read).
 
-## 5. Build the image catalog
+`SPOOND_BUILD_TIMEOUT` is read by two processes from two environments:
+the backend (for the GC's stale-row sweep) and `spoond images build`
+(for the `BuildTemplate` bound). Setting it only in the backend's env
+file leaves the image pipeline on the default, and vice versa; set the
+same value in both (the backend logs the effective value and its stale
+threshold at start, and `spoond images build` prints its bound). See
+[operations.md](operations.md#snapshot-catalog-gc) for the sweep.
 
-Every image the platform may grant must exist as an E2B template build
-recorded in the catalog before the backend can grant it. The image build
-must be given the same guest DNS resolver(s) as the backend: the backend
-grants each a port-53 egress allowance and
-`images/guest/spoond-guest-init` writes one `nameserver` line per address
-to `/etc/resolv.conf`, so if `SPOOND_GUEST_DNS_ADDR` is set in
-`/etc/spoond/backend.env` it must also be exported for the build (or set
-per entry in `images/manifest.yaml`). The value is comma-separated; two
-resolvers (`10.0.0.2,10.0.0.3`) let a guest survive one slow answer:
+### spoond-sshd-gateway (SSH + ctl plane)
+
+#### Flags
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--listen` | `:2222` | SSH listen address |
+| `--host-key` | `/etc/spoond-gateway/ssh_host_ed25519_key` | SSH host key (generated if missing) |
+| `--backend` | `https://127.0.0.1:8890` | spoond-backend base URL |
+| `--backend-token` | *(required)*; env `SPOOND_GATEWAY_TOKEN` | spoond-backend service token (`GATEWAY_TOKEN`) — admin-equivalent, so it is read from the env file, never `ExecStart` |
+| `--client-keys` | *(empty)* | comma-separated paths to authorized client public keys, **or a directory scanned for `*.pub` files** (legacy mode only) |
+| `--gateway-key` | `/etc/spoond-gateway/gateway_ed25519` | gateway identity key (kept for unit compatibility; the gateway no longer connects into sandboxes with it) |
+| `--gateway-host` | `sandbox.example.com` (env `SPOOND_GATEWAY_HOST`) | public hostname advertised in MOTDs |
+| `--shelly-binary-url` | env `SHELLY_BINARY_URL` (`http://HOST_GUEST_SERVICE_ADDR:HOST_GUEST_SERVICE_PORT/assets/shelley`) | URL the sandbox fetches the shelley agent binary from |
+| `--llm-gateway-url` | env `LLM_GATEWAY_URL` (`http://HOST_GUEST_SERVICE_ADDR:HOST_GUEST_SERVICE_PORT/llm/`) | base URL of the per-lease LLM gateway the shelley agent is pointed at |
+| `--shelly-model` | `gpt-oss-20b-fireworks` | default model id written into shelley.json |
+| `--ssh-images` | env `GATEWAY_SSH_IMAGES` = `dev-base` | images that may serve interactive `ssh <id>@` sessions |
+| `--metrics-listen` | env `GATEWAY_METRICS_LISTEN` *(empty = off)* | address for the gateway's own `/metrics` |
+| `--image-aliases` | env `GATEWAY_IMAGE_ALIASES` *(empty)* | extra `short=full` image aliases for `ssh new-<short>@` |
+| `--bootstrap-token` | *(ignored)* | **deprecated**: accepted for unit compatibility; bootstrap via direct backend call only |
+
+#### Key model
+
+- **Identity store (recommended):** when the backend has `USERS_FILE`
+  set, the store is the **single source of truth** for SSH keys. The
+  gateway probes `GET /api/identity-status` at startup; in store mode
+  every connecting key must resolve to a user (the local `--client-keys`
+  allowlist is ignored), and deleting the user (`DELETE /api/users/{id}`)
+  revokes access immediately. Create users via the `ssh-key` ctl verb or
+  `POST /api/users` — see [api.md](api.md#users--identity).
+- **Legacy mode (no identity store):** `--client-keys` lists the keys
+  allowed to connect (as `ctl`, `new-*`, or `<lease-id>` usernames).
+  Each user key must also be present in the sandbox images'
+  `authorized_keys` if you want the gateway to connect into sandboxes on
+  your behalf.
+- `--gateway-key` is the gateway's own identity; its public half is in
+  the image's `authorized_keys` via the image Dockerfile.
+
+SSH sessions are relayed through the backend's `/stream` endpoint
+(WebSocket) into the sandbox's PTY, so the gateway needs no network path
+into any sandbox — see [substrate.md](substrate.md).
+
+#### First-user bootstrap
+
+On a fresh `USERS_FILE`, the first `POST /api/users` (via `ssh-key add`
+or curl) creates the **admin** user. If `BOOTSTRAP_TOKEN` is set, that
+create must present `X-Bootstrap-Token: <token>` — bootstrap is an
+operator action done directly against the backend (the gateway
+deliberately does not forward the token):
 
 ```bash
-cd /root/src/spoond
-SPOOND_GUEST_DNS_ADDR=<guest resolver IP>[,<second IP>] \
-/opt/spoond/spoond images build --all \
-  --manifest images/manifest.yaml --context images
-/opt/spoond/spoond images list
+curl -s -X POST https://127.0.0.1:8890/api/users \
+  -H "Authorization: Bearer <consumer-token>" \
+  -H "X-Bootstrap-Token: <BOOTSTRAP_TOKEN>" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"jason","kind":"person","fingerprints":["SHA256:…"]}'
 ```
 
-When `SPOOND_GUEST_DNS_ADDR` is unset the images keep their own
-`resolv.conf` (the backend grants no resolver allowance); the two must
-agree.
-
-This runs on the host as root, uses docker, pushes to
-`$IMAGE_REGISTRY` (default `localhost:5000`) and drives a template build
-per manifest entry with `baked: true`. Details and per-image behaviour:
-[ci-jobs.md](ci-jobs.md).
-
-## 6. First user and services
+#### Run
 
 ```bash
-systemctl daemon-reload
-systemctl enable --now spoond-backend spoond-sshd-gateway
-# drain before a host shutdown, resume after boot (ordered after both units)
-install -m 644 deploy/e2b/spoond-drain.service /etc/systemd/system/
-systemctl daemon-reload && systemctl enable --now spoond-drain
-FQDN=$(hostname -f)      # the certificate's DNS SAN; 127.0.0.1 will not validate
-curl -fsS --cacert /etc/spoond/tls/cert.pem https://$FQDN:8890/healthz
-# {"status":"ok","orchestrator":"healthy"}
-
-# bootstrap the first (admin) user with your SSH public key
-FP=$(ssh-keygen -lf ~/.ssh/id_ed25519.pub | awk '{print $2}')
-set -a; . /etc/spoond/backend.env; set +a
-curl -s -X POST https://$FQDN:8890/api/users --cacert /etc/spoond/tls/cert.pem \
-  -H "Authorization: Bearer ${CONSUMER_TOKENS%%=*}" \
-  -H "X-Bootstrap-Token: $BOOTSTRAP_TOKEN" -H 'Content-Type: application/json' \
-  -d "{\"name\":\"you\",\"kind\":\"person\",\"fingerprints\":[\"$FP\"]}"
+./spoond gateway --backend https://127.0.0.1:8890 \
+  --backend-token abc
 ```
 
-Then the runner and the dashboard, if you want them:
+### spoond-runner (Forgejo Actions, optional)
+
+Environment-driven; registers as a Forgejo Actions runner and leases
+sandboxes as CI workers. Key variables (see `cmd/spoond-runner/main.go`
+for the full reference):
+
+| Variable | Purpose |
+|---|---|
+| `FORGEJO_URL`, `RUNNER_TOKEN` | Forgejo instance and registration token (required) |
+| `LEASE_URL` / `LEASE_TOKEN` | backend base URL and the bearer token the runner authenticates with |
+| `IMAGE_MAP` / `DEFAULT_IMAGE` | `runs-on` label → image mapping ([ci-jobs.md](ci-jobs.md)) |
+| `LEASE_TTL` | sandbox lease TTL seconds (default 600) |
+| `EXEC_TIMEOUT_SECS` | per-step exec timeout override (0 = the backend's `MAX_EXEC_TIMEOUT_SECS`, default 300) |
+| `RUNNER_ADMIT_WAIT_SECS` | seconds a create waits for admission on a full node (`wait`, #129; default 900, 0 = no wait). A create refused for capacity is retried per `Retry-After` until `RUNNER_JOB_TIMEOUT`, so a momentarily full node no longer fails a job |
+| `RUNNER_JOB_TIMEOUT` | whole-job timeout as a Go duration or seconds (default 6h). A job's own `timeout-minutes` is the tighter bound, and a job that runs past it is reported cancelled. Bounds the create's capacity retry, so a node answering 503 forever cannot pin a worker |
+| `LEASE_NETPOL` | egress policy the runner's leases get (`none` \| `lan` \| `internet` \| `restricted`; default `internet`) |
+| `LEASE_NET_ALLOW` | comma-separated allowlist entries added on top of the policy |
+| `RUNNER_FLOOR` / `RUNNER_MAX` / `RUNNER_SCALE_STEP` / `SCALE_UP_DELAY` / `SCALE_DOWN_DELAY` | registered-runner pool: floor, cap, step and scale delays |
+| `RUNNER_STATE_FILE` | persists runner UUIDs across restarts (default `/var/lib/spoond/runner-state.json`) |
+| `REPO_BASE_URL` | git host base URL for `actions/checkout` clones (no default; checkout fails without it) |
+| `JOB_RECORD_DIR` | failed-job JSON records (default `/var/lib/spoond/jobs`) |
+
+### Reverse proxy (TLS)
+
+The gateway and proxy speak HTTP on loopback; put a TLS-terminating
+reverse proxy in front with a wildcard cert so sandbox URLs work:
+
+- `sandbox.example.com` → gateway :2222 (SSH, keep port 2222 or use a
+  non-22 port per the MOTD hints)
+- `*.sandbox.example.com` → proxy :8891 (each lease gets
+  `<lease-id>.sandbox.example.com` and `<id>-<port>.sandbox.example.com`)
+
+See `deploy/caddy-sandbox-forwardauth.conf` for the staged Caddy snippet
+that also fronts the proxy with a forward-auth (Authelia) block — the
+reference for the `PROXY_AUTH_MODE=forward-auth` setup in
+[security.md](security.md).
+
+### Building from source
+
+One binary, all services; exclude any module with Go build tags:
 
 ```bash
-systemctl enable --now spoond-runner        # needs /etc/spoond/runner.env
-/opt/spoond/spoond dash hash '<password>'    # bcrypt hash for DASH_PASSWORD_HASH
-# /etc/spoond/dash.env: DASH_USER, DASH_PASSWORD_HASH, METRICS_TOKEN,
-#                      DASH_EVENTS_TOKEN (the EVENTS_TOKEN above),
-#                      DASH_TLS_CERT, DASH_TLS_KEY — see operations.md
-systemctl enable --now spoond-dash   # your unit wrapping `spoond dash`
+go build -o spoond ./cmd/spoond                       # all modules
+go build -tags 'nobackend,nomcp,norunner' -o spoond ./cmd/spoond  # subset
 ```
 
-## 7. Verify
+Subcommands: `backend`, `gateway`, `mcp`, `runner`, `ctl`,
+`images`, `drain`, `doctor`, `dash`, `notify`.
+Exclusion tags (one per gated file — `cmd/spoond/main.go` prints this
+list at `spoond help`): `nobackend`, `nogateway`, `nomcp`,
+`norunner`, `noctl`, `noimages`, `nodoctor`, `nodrain`, `nodash`,
+`nonotify`.
 
-`spoond doctor` is the single command that checks the result. It reads
-the deployed backend environment, so run it the same way:
+### Agent endpoint (`mcp`)
 
-```bash
-set -a; . /etc/spoond/backend.env; set +a
-/opt/spoond/spoond doctor            # PASS/FAIL/WARN table, exit 0 = nothing failing
-/opt/spoond/spoond doctor --json     # machine-readable
-```
+`spoond mcp` authenticates to the backend as a **per-agent user**:
+leases it creates are owned by that agent's identity.
 
-It checks the configuration, the orchestrator's `/health` and node info
-(status, running sandboxes, free hugepages), the registry, the token
-seed, the SQLite database and its migration version, the image catalog
-(every `baked` image has a ready current build), the pinned artifacts by
-SHA-256 (plus the Firecracker and kernel versions builds still use),
-storage headroom, the lease API listener and `/healthz`, the SSH gateway
-port, the LLM upstream and TLS. The full list is in
-[operations.md](operations.md).
+| Variable | Default | Purpose |
+|---|---|---|
+| `SPOOND_AGENT_TOKEN` | *(empty)* | per-agent bearer token for this endpoint, provisioned from the users store; **required** |
+| `SPOOND_BACKEND_URL` | `https://127.0.0.1:8890` | lease API base URL |
+| `SPOOND_IMAGE` | `dev-base` | default image for the leases it creates |
 
-Finally, end to end:
+Create an agent user first (`POST /api/users` with `kind=agent` — it
+needs a `token`, not an SSH key), then set `SPOOND_AGENT_TOKEN` to
+that user's token. If it is not set, the endpoint fails fast
+with provisioning instructions. The pre-2.0 `FORKD_*` names still work
+(see "Renamed in 2.0" above).
 
-```bash
-ssh new@<this-host> -p 2222     # creates a dev sandbox and drops you in tmux
-```
+### Renamed in 2.0
 
-See also: [setup.md](setup.md) for the complete env/flag reference,
-[api.md](api.md) for the HTTP API, [ctl.md](ctl.md) for the control
-plane, [operations.md](operations.md) for day-2 work.
+The pre-2.0 `FORKD_`-prefixed configuration variables were renamed to
+`SPOOND_`. Each pair works as follows: the `SPOOND_` name is the
+primary name; the old `FORKD_` name is still read as a fallback and
+logs a one-line deprecation warning (once per variable per process).
+When both are set, `SPOOND_` wins.
+
+| 2.0 name | Pre-2.0 name (deprecated) | Used by |
+|---|---|---|
+| `SPOOND_BACKEND_URL` | `FORKD_BACKEND_URL` | `spoond mcp` — lease API base URL |
+| `SPOOND_AGENT_TOKEN` | `FORKD_AGENT_TOKEN` | `spoond mcp` — per-agent bearer token |
+| `SPOOND_IMAGE` | `FORKD_IMAGE` | `spoond mcp` — default image for new leases |
+| `SPOOND_CTL_HOST` | `FORKD_CTL_HOST` | `spoondctl` — gateway host |
+| `SPOOND_CTL_PORT` | `FORKD_CTL_PORT` | `spoondctl` — gateway SSH port |
+| `SPOOND_CTL_KEY` | `FORKD_CTL_KEY` | `spoondctl` — SSH private key |
+| `SPOOND_GATEWAY_HOST` | `FORKD_GATEWAY_HOST` | `spoond gateway` `--gateway-host` default |
+| `SPOOND_NO_TMUX` | `FORKD_NO_TMUX` | guest image: skip the tmux auto-attach on SSH login |
+
+Not renamed: the gateway's `forkd-*` SSH permission keys and the
+`forkd_id` field on `GET /api/leases/{id}/endpoint` are stored/protocol
+data, not configuration — renaming them would break clients.
+
+One special case: `SPOOND_NO_TMUX` is read by the guest image's login
+shell (`/etc/profile.d/spoond-tmux.sh`), not by a long-lived spoond
+process. There the deprecation warning is emitted once per user (a
+canary file in the home directory dedupes across logins) rather than
+once per process.
