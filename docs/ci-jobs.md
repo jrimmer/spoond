@@ -63,8 +63,9 @@ There are no bake scripts in the pipeline, no rootfs assembly and no
 snapshot tags to re-bake: images are built from Dockerfiles by
 `spoond images build`. An image is:
 
-1. a Dockerfile in `images/` (`images/<name>.dockerfile`);
-2. an entry in `images/manifest.yaml` with `baked: true`, the sizing
+1. a Dockerfile of the operator's that carries spoond's guest lines
+   ([images/README.md](../images/README.md));
+2. an entry in the operator's manifest (`--manifest`) with `baked: true`, the sizing
    (`vcpu`, `memory_mb`, `disk_mb`) and the env every sandbox gets;
 3. a build: `spoond images build <name>` (or `--all`), which builds it
    with docker, pushes it to the local registry (`IMAGE_REGISTRY`,
@@ -92,9 +93,9 @@ build in place, so grants keep working — fix the Dockerfile and rebuild.
 Two constraints inherited from the substrate:
 
 - **Base images must be Debian/Ubuntu, Fedora-family, Arch, Alpine or
-  NixOS.** E2B's provisioning rejects RHEL-family images (that is why
-  `scylla` is built from Debian 12 with ScyllaDB's apt repository rather
-  than the upstream RHEL UBI image).
+  NixOS.** E2B's provisioning rejects RHEL-family images, so software
+  shipped only as a RHEL UBI image has to be installed on one of these
+  bases instead.
 - **`memory_mb` is the image's default size.** A job always runs at it
   (jobs take no size); a lease may ask for another size on create
   (3.1, #151), which cold-boots unless the image has a warm build at
@@ -109,38 +110,21 @@ resolver alone when that is empty), empties dpkg's statoverride (so
 tools that unpack a base image over the live root, such as kaniko, do
 not abort apt), drops
 `/.dockerenv` so container-aware tools behave, runs the
-`/etc/spoond/init.d/*` hooks (the scylla service, for instance) and then
+`/etc/spoond/init.d/*` hooks (a database service, for instance) and then
 waits on a ready file. The snapshot is taken after the ready command
 succeeds.
 
-## The rust-gpui image
+## An image for a new label
 
-`rust-gpui-base` (`runs-on: rust-gpui`) is `rust-qt-base` with what an
-app on gpui 0.2.2 (Zed's GUI crate) needs to build and test on Linux:
-libxcb, libxkbcommon and libxkbcommon-x11 (linked), wayland and
-wayland-protocols, the Vulkan loader and headers, and Mesa's lavapipe
-(`vulkan-swrast`) as a software Vulkan driver. gpui renders only through
-Vulkan, so a test that opens a real window runs under `xvfb-run` on
-lavapipe; tests on gpui's `TestPlatform` need no display. It is a
-`from: rust-qt-base` layer, so it keeps that image's Arch snapshot,
-Rust 1.99.0 and env. It is sized at 4 vCPU, 8 GiB and 24 GiB of disk,
-because a cold gpui release build needs about 5 GB of target dir.
-
-Deploying it on the host:
-
-1. Check that `rust-qt-base` has a current build (`spoond images list`),
-   then build the layer from a checkout that has it:
-
-   ```bash
-   spoond images build rust-gpui-base --manifest images/manifest.yaml --context images
-   ```
-
+1. Build the image (`spoond images build <name>`; see
+   [images/README.md](../images/README.md)) and check it has a current
+   build (`spoond images list`).
 2. Add the label and the mapping in `/etc/spoond/runner.env` (append to
    the existing lists; labels take no spaces):
 
    ```
-   RUNNER_LABELS=<existing labels>,rust-gpui
-   IMAGE_MAP=<existing pairs>,rust-gpui=rust-gpui-base
+   RUNNER_LABELS=<existing labels>,<label>
+   IMAGE_MAP=<existing pairs>,<label>=<name>
    ```
 
 3. Make the runners register again, as in [Adding a label](#adding-a-label).
@@ -191,8 +175,8 @@ What is worth knowing:
 - **Disk is the image's `disk_mb` of free space in its own rootfs.**
   Filling it fails that job only.
 - **Every start is a snapshot restore**, so a job's first command runs
-  with the services the template already had running (the scylla image's
-  database, for example) — no `sleep`-until-ready in the workflow.
+  with the services the template already had running (a database an image's
+  init hook started, for example) — no `sleep`-until-ready in the workflow.
 
 Already handled by the runner, so jobs need not:
 

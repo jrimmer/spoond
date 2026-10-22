@@ -10,6 +10,55 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+spoond installs as a bare service: it ships no sandbox images and names
+none as a default, so which images a host runs is the operator's choice.
+Upgrading from 4.0:
+
+- Build your images from your own Dockerfiles and manifest; each
+  Dockerfile copies spoond's guest init in (`images/README.md`).
+  `spoond install --images <manifest>` builds a manifest's baked images.
+- Set the image settings that used to default to an image name:
+  `DEFAULT_IMAGE` (runner), `GATEWAY_SSH_IMAGES` and the new
+  `GATEWAY_DEFAULT_IMAGE` (gateway), and `SPOOND_IMAGE` (`spoond mcp`).
+  The gateway's built-in short names (`dev`, `py`, ...) are gone; set
+  `GATEWAY_IMAGE_ALIASES` to keep them.
+- After the upgrade (schema 34), run `spoond images describe --all
+  --manifest <manifest>` once so existing images show their capability
+  and description in `/api/capabilities`.
+- Build the Docker image with `docker compose build`; none is published.
+
+### Added
+
+- **`spoond images describe <name> | --all`** writes a manifest's
+  `capability` and `description` into existing catalog rows without a
+  build.
+- **`GATEWAY_DEFAULT_IMAGE`** (`--default-image`): the image a bare
+  `new` creates.
+
+### Changed
+
+- **The install builds no images.** The `images` phase writes spoond's
+  guest pieces to `/var/lib/spoond/guest` and, with `--images
+  <manifest>`, builds that manifest's baked images (`--base-registry`
+  pulls them from a registry of the operator's). `--images minimal` and
+  `all` are refused, and nothing is pulled from ghcr.
+- **No image catalog in the repo or the binary.** `images/` keeps only
+  `guest/` (`spoond-guest-init`, `spoond-tmux.sh`) and a guide to
+  writing a Dockerfile spoond can run.
+- **No image-name defaults.** The runner fails a job whose labels map to
+  no image (naming `IMAGE_MAP` and `DEFAULT_IMAGE`); the gateway refuses
+  `new` until `GATEWAY_SSH_IMAGES` is set, and a bare `new` without
+  `GATEWAY_DEFAULT_IMAGE`; `spoond mcp` and the command adapter need an
+  image configured or, for the adapter, sent with the request.
+- **Image capability and description live in the catalog** (schema 34),
+  written by `spoond images build` from the manifest, instead of a table
+  in the API.
+- **`spoond doctor` checks the catalog itself:** every image needs a
+  ready current build, an empty catalog warns, and `-manifest` is
+  optional.
+- **The Docker install builds its image** (`spoond:local`, never
+  pulled; `SPOOND_VERSION` picks the runtime tarball).
+
 ## [4.0.0] - 2026-10-22
 
 spoond 4.0 installs on a host that is not ours: `spoond install` sets up a

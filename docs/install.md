@@ -312,9 +312,10 @@ threshold at start, and `spoond images build` prints its bound). See
 | `--shelly-binary-url` | env `SHELLY_BINARY_URL` (`http://HOST_GUEST_SERVICE_ADDR:HOST_GUEST_SERVICE_PORT/assets/shelley`) | URL the sandbox fetches the shelley agent binary from |
 | `--llm-gateway-url` | env `LLM_GATEWAY_URL` (`http://HOST_GUEST_SERVICE_ADDR:HOST_GUEST_SERVICE_PORT/llm/`) | base URL of the per-lease LLM gateway the shelley agent is pointed at |
 | `--shelly-model` | `gpt-oss-20b-fireworks` | default model id written into shelley.json |
-| `--ssh-images` | env `GATEWAY_SSH_IMAGES` = `dev-base` | images that may serve interactive `ssh <id>@` sessions |
+| `--ssh-images` | env `GATEWAY_SSH_IMAGES` *(empty)* | images that may serve interactive sessions (they need sshd and tmux); empty refuses every `new` |
+| `--default-image` | env `GATEWAY_DEFAULT_IMAGE` *(empty)* | the image a bare `new` creates; empty means `new` must name one |
 | `--metrics-listen` | env `GATEWAY_METRICS_LISTEN` *(empty = off)* | address for the gateway's own `/metrics` |
-| `--image-aliases` | env `GATEWAY_IMAGE_ALIASES` *(empty)* | extra `short=full` image aliases for `ssh new-<short>@` |
+| `--image-aliases` | env `GATEWAY_IMAGE_ALIASES` *(empty)* | `short=full` image aliases for `ssh new-<short>@`; there are no built-in ones |
 | `--bootstrap-token` | *(ignored)* | **deprecated**: accepted for unit compatibility; bootstrap via direct backend call only |
 
 #### Key model
@@ -371,7 +372,7 @@ for the full reference):
 |---|---|
 | `FORGEJO_URL`, `RUNNER_TOKEN` | Forgejo instance and registration token (required) |
 | `LEASE_URL` / `LEASE_TOKEN` | backend base URL and the bearer token the runner authenticates with |
-| `IMAGE_MAP` / `DEFAULT_IMAGE` | `runs-on` label → image mapping ([ci-jobs.md](ci-jobs.md)) |
+| `IMAGE_MAP` / `DEFAULT_IMAGE` | `runs-on` label → image mapping, and the image for unmapped labels; no default, so a job whose labels map to no image fails ([ci-jobs.md](ci-jobs.md)) |
 | `LEASE_TTL` | sandbox lease TTL seconds (default 600) |
 | `EXEC_TIMEOUT_SECS` | per-step exec timeout override (0 = the backend's `MAX_EXEC_TIMEOUT_SECS`, default 300) |
 | `RUNNER_ADMIT_WAIT_SECS` | seconds a create waits for admission on a full node (`wait`, #129; default 900, 0 = no wait). A create refused for capacity is retried per `Retry-After` until `RUNNER_JOB_TIMEOUT`, so a momentarily full node no longer fails a job |
@@ -423,7 +424,7 @@ leases it creates are owned by that agent's identity.
 |---|---|---|
 | `SPOOND_AGENT_TOKEN` | *(empty)* | per-agent bearer token for this endpoint, provisioned from the users store; **required** |
 | `SPOOND_BACKEND_URL` | `https://127.0.0.1:8890` | lease API base URL |
-| `SPOOND_IMAGE` | `dev-base` | default image for the leases it creates |
+| `SPOOND_IMAGE` | *(none; required)* | the image for the leases it creates |
 
 Create an agent user first (`POST /api/users` with `kind=agent` — it
 needs a `token`, not an SSH key), then set `SPOOND_AGENT_TOKEN` to
@@ -443,7 +444,7 @@ When both are set, `SPOOND_` wins.
 |---|---|---|
 | `SPOOND_BACKEND_URL` | `FORKD_BACKEND_URL` | `spoond mcp` — lease API base URL |
 | `SPOOND_AGENT_TOKEN` | `FORKD_AGENT_TOKEN` | `spoond mcp` — per-agent bearer token |
-| `SPOOND_IMAGE` | `FORKD_IMAGE` | `spoond mcp` — default image for new leases |
+| `SPOOND_IMAGE` | `FORKD_IMAGE` | `spoond mcp` — the image for new leases (required) |
 | `SPOOND_CTL_HOST` | `FORKD_CTL_HOST` | `spoondctl` — gateway host |
 | `SPOOND_CTL_PORT` | `FORKD_CTL_PORT` | `spoondctl` — gateway SSH port |
 | `SPOOND_CTL_KEY` | `FORKD_CTL_KEY` | `spoondctl` — SSH private key |
