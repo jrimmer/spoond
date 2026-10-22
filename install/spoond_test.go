@@ -1418,3 +1418,33 @@ func TestSpoondBinaryCopied(t *testing.T) {
 		t.Errorf("the kept row should say the bytes match:\n%s", out.String())
 	}
 }
+
+// TestGuestResolverContainerFallback: under --container with no
+// resolv.conf below Root (the init service's ./config), the resolver
+// comes from the container's own file; a Root file still wins.
+func TestGuestResolverContainerFallback(t *testing.T) {
+	env, _, _ := testEnv(t)
+	env.Opt.Container = true
+	own := filepath.Join(t.TempDir(), "resolv.conf")
+	if err := os.WriteFile(own, []byte("nameserver 127.0.0.53\nnameserver 192.0.2.53\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := containerResolvConf
+	containerResolvConf = own
+	t.Cleanup(func() { containerResolvConf = old })
+
+	if got, note := guestResolver(env); got != "192.0.2.53" {
+		t.Errorf("container fallback = %q (%s), want 192.0.2.53", got, note)
+	}
+	writeResolvConf(t, env, "nameserver 198.51.100.1\n")
+	if got, _ := guestResolver(env); got != "198.51.100.1" {
+		t.Errorf("with a Root resolv.conf = %q, want 198.51.100.1", got)
+	}
+	env.Opt.Container = false
+	if err := os.Remove(env.Resolve(resolvConfPath)); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := guestResolver(env); got != "" {
+		t.Errorf("native with no Root resolv.conf = %q, want none", got)
+	}
+}

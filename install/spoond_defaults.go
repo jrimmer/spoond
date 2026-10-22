@@ -114,6 +114,12 @@ func noRouteFailure(r *Reporter) error {
 // allowance, the note says so.
 func guestResolver(env *Env) (string, string) {
 	full := env.Resolve(resolvConfPath)
+	if _, err := os.Stat(full); err != nil && env.Opt.Container {
+		// The init service writes under --root ./config, which has
+		// no resolv.conf: the container's own file is the host's
+		// under host networking.
+		full = containerResolvConf
+	}
 	fh, err := os.Open(full)
 	if err != nil {
 		return "", "resolver file unreadable; guests get no DNS resolver allowance"
@@ -134,6 +140,10 @@ func guestResolver(env *Env) (string, string) {
 	}
 	return "", noStoreNote
 }
+
+// containerResolvConf is the resolver file read under --container when
+// Root has none (a test points it at a fixture).
+var containerResolvConf = "/etc/resolv.conf"
 
 // isLoopbackResolver reports whether addr is this resolver's own
 // loopback (127.* or ::1): forwarding them into a guest would send the
