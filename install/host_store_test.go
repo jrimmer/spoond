@@ -991,3 +991,39 @@ func TestDockerRegistryStoppedIsStarted(t *testing.T) {
 		t.Errorf("re-created a stopped registry: %v", runner.calls)
 	}
 }
+
+// TestDockerRestartsAfterIptablesSwitch: a daemon apt started before the
+// iptables step moved to the legacy backend restarts before the
+// registry runs (its chains live in the old backend until then); with
+// the backend unchanged it is left alone.
+func TestDockerRestartsAfterIptablesSwitch(t *testing.T) {
+	env, runner := storeEnv(t)
+	runner.reply = dockerReplies(false)
+	runner.reply["systemctl restart docker"] = fakeReply{}
+	r := &Reporter{Phase: PhaseHost}
+	if err := dockerStep(context.Background(), env, r, &hostState{IptablesChanged: true}); err != nil {
+		t.Fatalf("docker step: %v", err)
+	}
+	restart, registry := -1, -1
+	for i, call := range runner.calls {
+		switch {
+		case call == "systemctl restart docker":
+			restart = i
+		case strings.HasPrefix(call, "docker run -d --name spoond-registry"):
+			registry = i
+		}
+	}
+	if restart < 0 || registry < 0 || restart > registry {
+		t.Errorf("want the restart before the registry run: %v", runner.calls)
+	}
+
+	runner.calls = nil
+	if _, err := runDocker(t, env); err != nil {
+		t.Fatalf("unchanged backend: %v", err)
+	}
+	for _, call := range runner.calls {
+		if call == "systemctl restart docker" {
+			t.Errorf("restarted docker with the iptables backend unchanged")
+		}
+	}
+}

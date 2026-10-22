@@ -476,6 +476,8 @@ func hostIptables(ctx context.Context, env *Env, r *Reporter, st *hostState) err
 		note := fmt.Sprintf("was %s", cur)
 		if env.DryRun {
 			note = "dry-run: nothing changed"
+		} else {
+			st.IptablesChanged = true
 		}
 		r.Add(Changed, name, note)
 	}

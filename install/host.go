@@ -42,6 +42,10 @@ type hostState struct {
 	// on the running host; the phase finishes the other steps, then
 	// returns ErrRebootNeeded.
 	RebootNeeded bool
+	// IptablesChanged is set when the iptables step moved iptables to
+	// the legacy backend in this run: a Docker daemon already running
+	// keeps its chains in the old backend until it restarts.
+	IptablesChanged bool
 }
 
 // ErrRebootNeeded ends a host phase that has done everything it can

@@ -295,6 +295,17 @@ func dockerStep(ctx context.Context, env *Env, r *Reporter, st *hostState) error
 	}
 	if enabled {
 		r.Add(Kept, "docker service", "enabled and running (systemctl enable --now docker)")
+		// A daemon apt started before this run moved iptables to the
+		// legacy backend keeps its chains in the old one, and the
+		// registry's port mapping fails until it restarts.
+		if st.IptablesChanged {
+			if err := env.exec(ctx, "systemctl", "restart", "docker"); err != nil {
+				note := fmt.Sprintf("systemctl restart docker failed — check `systemctl status docker`: %v", err)
+				r.Add(Failed, "docker service", note)
+				return errors.New(note)
+			}
+			r.Add(Changed, "docker service", "restarted: its iptables chains move to the legacy backend")
+		}
 	} else {
 		r.Add(Created, "docker service", "dry-run: nothing run — the real run does systemctl enable --now docker")
 	}
