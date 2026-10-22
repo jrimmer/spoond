@@ -301,10 +301,12 @@ func hostHugepages(ctx context.Context, env *Env, r *Reporter, st *hostState) er
 	}
 	if changed && !env.DryRun {
 		if env.Opt.Container {
-			// grub.cfg regenerates on the host, and the new command
-			// line only applies at a boot: the row carries both.
-			st.RebootNeeded = true
-			r.Add(Skipped, "update-grub", "--container: run `update-grub` on the host, then reboot")
+			// grub.cfg regenerates on the host. The pages are
+			// reserved now (checked below) and the sysctl file
+			// reserves them again at boot; the command line makes
+			// a big reservation reliable on a fragmented boot, so
+			// the host runs update-grub, but no reboot is due.
+			r.Add(Skipped, "update-grub", "--container: run `update-grub` on the host so the kernel command line holds the reservation at boot")
 		} else {
 			if err := env.exec(ctx, "update-grub"); err != nil {
 				return fmt.Errorf("%w — update-grub failed; fix the grub output above, then rerun", err)

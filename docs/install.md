@@ -101,7 +101,8 @@ release tag:
 cd deploy/docker
 export SPOOND_HOST_NAME=sandbox.example.com   # or put it in .env
 docker compose run --rm prepare     # modules, sysctls, hugepages, kernel command line
-# if it says so: sudo update-grub && sudo reboot
+sudo update-grub                    # the hugepages on the kernel command line
+# reboot only if prepare says the kernel could not reserve the pages
 docker compose run --rm init        # config and secrets into ./config
 docker compose up -d
 cp ~/.ssh/id_ed25519.pub config/admin.pub

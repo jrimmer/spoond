@@ -686,8 +686,8 @@ func TestHostIptablesContainerSkipsAlternatives(t *testing.T) {
 
 // TestHostHugepagesContainerRunsSysctlResolvedNoUpdateGrub: with
 // --container both files land under Root, sysctl -p gets the resolved
-// path, a grub change asks for the host-side update-grub + reboot
-// instead of running it, and RebootNeeded is set.
+// path, a grub change asks for the host-side update-grub instead of
+// running it, and with the pages reserved no reboot is due.
 func TestHostHugepagesContainerRunsSysctlResolvedNoUpdateGrub(t *testing.T) {
 	env, _, runner := testEnv(t)
 	env.Opt.Container = true
@@ -713,8 +713,8 @@ func TestHostHugepagesContainerRunsSysctlResolvedNoUpdateGrub(t *testing.T) {
 	if !strings.Contains(string(b), `GRUB_CMDLINE_LINUX_DEFAULT="quiet splash hugepages=5120"`) {
 		t.Errorf("grub = %q, want the token appended under Root", b)
 	}
-	if !st.RebootNeeded {
-		t.Error("grub changed under --container: st.RebootNeeded not set")
+	if st.RebootNeeded {
+		t.Error("grub changed under --container with the pages reserved: st.RebootNeeded set")
 	}
 }
 
@@ -744,11 +744,11 @@ func TestHostHugepagesContainerRowsAndSettledKeeps(t *testing.T) {
 	if grubRow == nil {
 		t.Fatalf("rows = %+v, want an update-grub row", r.Items())
 	}
-	if grubRow.Result != Skipped || !strings.Contains(grubRow.Note, "run `update-grub` on the host, then reboot") {
+	if grubRow.Result != Skipped || !strings.Contains(grubRow.Note, "run `update-grub` on the host") {
 		t.Errorf("update-grub row = %+v, want skipped with the host fix", *grubRow)
 	}
 	if !st.RebootNeeded {
-		t.Error("grub changed: st.RebootNeeded not set")
+		t.Error("no pages reserved: st.RebootNeeded not set")
 	}
 
 	// Settled rerun: same grub and a kernel that reserved the pages.

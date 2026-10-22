@@ -78,7 +78,8 @@ func TestHostPhaseMissingStep(t *testing.T) {
 // --container, as the compose prepare service runs it: modules, udev,
 // hugepages and the store dir check do their work under Root, the
 // packages, iptables, docker and apparmor steps are skipped rows, the
-// grub change asks for the host-side update-grub and the reboot, and
+// grub change asks for the host-side update-grub (no reboot: the pages
+// are reserved), and
 // no apt-get, update-alternatives, update-grub, zpool, docker or
 // systemctl command runs.
 func TestHostPhaseContainerRunsThePrepare(t *testing.T) {
@@ -94,13 +95,13 @@ func TestHostPhaseContainerRunsThePrepare(t *testing.T) {
 	if err := os.MkdirAll(env.Resolve(DefaultStoreDir), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writeRootFile(t, env, meminfoPath, meminfo(16<<30, 0))
+	writeRootFile(t, env, meminfoPath, meminfo(16<<30, 5120)) // the host kernel reserved them
 	writeRootFile(t, env, grubPath, grubBody)
 	env.Run = &kernelSim{t: t, env: env, inner: runner}
 
 	items, err := hostPhase(context.Background(), env)
-	if !errors.Is(err, ErrRebootNeeded) {
-		t.Fatalf("err %v, want ErrRebootNeeded (the grub change defers to the host)", err)
+	if err != nil {
+		t.Fatalf("err %v, want none (the pages are reserved; update-grub is the host's)", err)
 	}
 
 	// Only the shared-kernel modprobes, the sysctl through the
