@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"regexp"
@@ -61,6 +62,10 @@ type Executor struct {
 	// task alive. Defaults to 60s. Non-positive disables the ping (used
 	// by tests).
 	CreateKeepaliveInterval time.Duration
+	// StepKeepaliveInterval is how often a running step pings the job
+	// sink, which also tells the executor when the server has cancelled
+	// the task. Defaults to 60s.
+	StepKeepaliveInterval time.Duration
 	// CreateLogInterval is how often a waiting create writes a
 	// "waiting for capacity" log row (H1): one at the start of the wait
 	// and one every interval. Defaults to 3m.
@@ -123,6 +128,11 @@ func (e *Executor) Run(ctx context.Context, job *Job) error {
 		ctx, cancel = context.WithTimeout(ctx, e.JobTimeout)
 		defer cancel()
 	}
+	// A keepalive that hears the server cancelled the task ends the job
+	// through this context: the step's exec stops, the job reports
+	// cancelled and its lease is released (#160).
+	ctx, cancelJob := context.WithCancel(ctx)
+	defer cancelJob()
 
 	image := e.imageFor(wfJob)
 	// A create can wait a long time: the admission queue (#129) holds it
@@ -134,7 +144,7 @@ func (e *Executor) Run(ctx context.Context, job *Job) error {
 	// that is admitted at once never logs or pings.
 	created := make(chan struct{})
 	waitDone := make(chan int64, 1)
-	go func() { waitDone <- e.keepaliveWhileWaiting(ctx, job, created) }()
+	go func() { waitDone <- e.keepaliveWhileWaiting(ctx, job, created, cancelJob) }()
 	e.setCreateWait(true)
 	sandboxID, err := e.Sandbox.Create(ctx, image, e.TTL)
 	e.setCreateWait(false)
@@ -352,8 +362,12 @@ func (e *Executor) Run(ctx context.Context, job *Job) error {
 		// Keepalive rows use the step's starting index; the goroutine
 		// must not touch logIndex (owned by this loop).
 		kaDone := make(chan struct{})
+		kaEvery := e.StepKeepaliveInterval
+		if kaEvery <= 0 {
+			kaEvery = 60 * time.Second
+		}
 		go func() {
-			t := time.NewTicker(60 * time.Second)
+			t := time.NewTicker(kaEvery)
 			defer t.Stop()
 			for {
 				select {
@@ -363,7 +377,7 @@ func (e *Executor) Run(ctx context.Context, job *Job) error {
 					return
 				case <-t.C:
 				}
-				_ = e.Sink.Keepalive(ctx, job.ID)
+				e.keepalive(ctx, job.ID, cancelJob)
 			}
 		}()
 		res, err := e.Sandbox.Exec(ctx, sandboxID, cmd, cwd, env, stepTimeout)
@@ -457,7 +471,7 @@ func (e *Executor) setCreateWait(waiting bool) {
 // sends nothing. The context is the job's own: when it dies (graceful
 // stop or job timeout) the ping stops too. It returns the number of log
 // rows it wrote, so the executor can index later rows after them.
-func (e *Executor) keepaliveWhileWaiting(ctx context.Context, job *Job, done <-chan struct{}) int64 {
+func (e *Executor) keepaliveWhileWaiting(ctx context.Context, job *Job, done <-chan struct{}, cancelJob context.CancelFunc) int64 {
 	kaEvery := e.CreateKeepaliveInterval
 	if kaEvery <= 0 {
 		kaEvery = 60 * time.Second
@@ -490,8 +504,18 @@ func (e *Executor) keepaliveWhileWaiting(ctx context.Context, job *Job, done <-c
 			rows++
 			logTimer.Reset(logEvery)
 		case <-kaT.C:
-			_ = e.Sink.Keepalive(ctx, job.ID)
+			e.keepalive(ctx, job.ID, cancelJob)
 		}
+	}
+}
+
+// keepalive pings the job sink and ends the job when the server answers
+// that it cancelled the task (#160). Any other error is ignored: a missed
+// keepalive is retried on the next tick.
+func (e *Executor) keepalive(ctx context.Context, jobID int64, cancelJob context.CancelFunc) {
+	if err := e.Sink.Keepalive(ctx, jobID); errors.Is(err, ErrTaskCancelled) && ctx.Err() == nil {
+		log.Printf("executor: job %d was cancelled on the server; stopping it", jobID)
+		cancelJob()
 	}
 }
 

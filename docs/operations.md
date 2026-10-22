@@ -1298,6 +1298,15 @@ disappears is released with reason `client_gone` instead of leaking
 until its TTL. The lease client's own HTTP timeout grows to cover the
 admission wait, so a queued create is not cut by the client.
 
+**Cancelled tasks.** Forgejo cancels a task when a newer push to the
+same branch supersedes its run, or when someone presses Cancel, and
+revokes the task's token. The keepalive the runner sends every minute,
+while a create waits and while a step runs, answers with the task's
+state. When that answer says the task is cancelled, the runner stops the
+job: the step's exec ends, the job reports cancelled and its lease is
+released (#160). Before 3.13.2 such a job ran to its end, and its last
+API calls got `401`.
+
 **Orphan sweep at start.** When the runner starts it lists its token's
 leases and deletes every one whose comment starts with `forgejo job ` —
 at start the process runs nothing, so all of them are orphans of a
