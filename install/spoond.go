@@ -107,8 +107,10 @@ var spoondUnits = []struct {
 // advertises; the phase writes the unit with --host-name instead.
 const shippedGatewayHost = "sandbox.example.com"
 
-// spoondDirs is item 2: the directories the phase needs, all 0700.
-var spoondDirs = []string{"/etc/spoond", "/etc/spoond/tls", "/var/lib/spoond", "/var/lib/spoond/backups"}
+// spoondDirs is item 2: the directories the phase needs, all 0700 (the
+// gateway makes its keys inside /etc/spoond-gateway but exits without
+// the keys directory).
+var spoondDirs = []string{"/etc/spoond", "/etc/spoond/tls", "/var/lib/spoond", "/var/lib/spoond/backups", "/etc/spoond-gateway", "/etc/spoond-gateway/keys"}
 
 // spoondPhase implements the spoond row of the phase table.
 func init() { Phases[PhaseSpoond] = spoondPhase }
