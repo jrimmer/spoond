@@ -115,19 +115,12 @@ func noRouteFailure(r *Reporter) error {
 // missing file yields ("", note): no resolver allowance, the note says
 // so.
 func guestResolver(env *Env) (string, string) {
-	full := env.Resolve(resolvConfPath)
-	if _, err := os.Stat(full); err != nil && env.Opt.Container {
-		// The init service writes under --root ./config, which has
-		// no resolv.conf: the container's own file is the host's
-		// under host networking.
-		full = containerResolvConf
-	}
-	addr, err := firstResolver(full)
+	addr, err := firstResolver(underRootOr(env, resolvConfPath, containerResolvConf))
 	if err != nil {
 		return "", "resolver file unreadable; guests get no DNS resolver allowance"
 	}
 	if addr == "" {
-		addr, _ = firstResolver(env.Resolve(resolvedUpstreamPath))
+		addr, _ = firstResolver(underRootOr(env, resolvedUpstreamPath, containerResolvedUpstream))
 	}
 	if addr == "" {
 		return "", noStoreNote
@@ -163,9 +156,25 @@ func firstResolver(path string) (string, error) {
 	return "", sc.Err()
 }
 
-// containerResolvConf is the resolver file read under --container when
-// Root has none (a test points it at a fixture).
-var containerResolvConf = "/etc/resolv.conf"
+// underRootOr is path under Root, or under --container the container's
+// own file when Root has none: the init service writes under --root
+// ./config, while host networking gives the container the host's
+// resolv.conf, and compose mounts the host's /run/systemd read-only.
+func underRootOr(env *Env, path, container string) string {
+	full := env.Resolve(path)
+	if _, err := os.Stat(full); err != nil && env.Opt.Container {
+		return container
+	}
+	return full
+}
+
+// containerResolvConf and containerResolvedUpstream are the resolver
+// files read under --container when Root has none (a test points them
+// at fixtures).
+var (
+	containerResolvConf       = "/etc/resolv.conf"
+	containerResolvedUpstream = resolvedUpstreamPath
+)
 
 // isLoopbackResolver reports whether addr is this resolver's own
 // loopback (127.* or ::1): forwarding them into a guest would send the

@@ -1483,3 +1483,25 @@ func TestGuestResolverSystemdResolvedStub(t *testing.T) {
 		t.Errorf("stub with resolved upstream = %q (%s), want 10.0.2.3", got, note)
 	}
 }
+
+// TestGuestResolverContainerResolvedStub: under --container a stub-only
+// resolv.conf falls back to the host's systemd-resolved list the init
+// service mounts.
+func TestGuestResolverContainerResolvedStub(t *testing.T) {
+	env, _, _ := testEnv(t)
+	env.Opt.Container = true
+	dir := t.TempDir()
+	stub, upstream := filepath.Join(dir, "resolv.conf"), filepath.Join(dir, "upstream.conf")
+	if err := os.WriteFile(stub, []byte("nameserver 127.0.0.53\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(upstream, []byte("nameserver 192.0.2.10\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldConf, oldUp := containerResolvConf, containerResolvedUpstream
+	containerResolvConf, containerResolvedUpstream = stub, upstream
+	t.Cleanup(func() { containerResolvConf, containerResolvedUpstream = oldConf, oldUp })
+	if got, note := guestResolver(env); got != "192.0.2.10" {
+		t.Errorf("container stub = %q (%s), want 192.0.2.10", got, note)
+	}
+}
