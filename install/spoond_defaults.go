@@ -109,9 +109,11 @@ func noRouteFailure(r *Reporter) error {
 
 // guestResolver scans resolv.conf for the first nameserver address that
 // is not 127.* or ::1: the guests' resolver address, granted on port 53
-// and baked into the guest image (docs/install.md section 4). A
-// loopback-only or missing file yields ("", note): no resolver
-// allowance, the note says so.
+// and baked into the guest image (docs/install.md). When it lists only
+// a loopback stub (systemd-resolved's 127.0.0.53, Debian 13's default),
+// resolved's own upstream list is read instead. A loopback-only or
+// missing file yields ("", note): no resolver allowance, the note says
+// so.
 func guestResolver(env *Env) (string, string) {
 	full := env.Resolve(resolvConfPath)
 	if _, err := os.Stat(full); err != nil && env.Opt.Container {
@@ -120,9 +122,29 @@ func guestResolver(env *Env) (string, string) {
 		// under host networking.
 		full = containerResolvConf
 	}
-	fh, err := os.Open(full)
+	addr, err := firstResolver(full)
 	if err != nil {
 		return "", "resolver file unreadable; guests get no DNS resolver allowance"
+	}
+	if addr == "" {
+		addr, _ = firstResolver(env.Resolve(resolvedUpstreamPath))
+	}
+	if addr == "" {
+		return "", noStoreNote
+	}
+	return addr, ""
+}
+
+// resolvedUpstreamPath is systemd-resolved's list of the upstream
+// servers its 127.0.0.53 stub forwards to.
+const resolvedUpstreamPath = "/run/systemd/resolve/resolv.conf"
+
+// firstResolver returns the first non-loopback nameserver in a
+// resolv.conf-format file, "" when it lists none.
+func firstResolver(path string) (string, error) {
+	fh, err := os.Open(path)
+	if err != nil {
+		return "", err
 	}
 	defer fh.Close()
 	sc := bufio.NewScanner(fh)
@@ -136,9 +158,9 @@ func guestResolver(env *Env) (string, string) {
 		if addr == "" || isLoopbackResolver(addr) {
 			continue
 		}
-		return addr, ""
+		return addr, nil
 	}
-	return "", noStoreNote
+	return "", sc.Err()
 }
 
 // containerResolvConf is the resolver file read under --container when

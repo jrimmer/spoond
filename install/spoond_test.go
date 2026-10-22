@@ -1462,3 +1462,24 @@ func TestGuestResolverContainerFallback(t *testing.T) {
 		t.Errorf("native with no Root resolv.conf = %q, want none", got)
 	}
 }
+
+// TestGuestResolverSystemdResolvedStub: a resolv.conf with only the
+// systemd-resolved stub takes the first upstream from resolved's own
+// list.
+func TestGuestResolverSystemdResolvedStub(t *testing.T) {
+	env, _, _ := testEnv(t)
+	writeResolvConf(t, env, "nameserver 127.0.0.53\noptions edns0 trust-ad\n")
+	if got, _ := guestResolver(env); got != "" {
+		t.Errorf("stub only, no resolved list = %q, want none", got)
+	}
+	full := env.Resolve(resolvedUpstreamPath)
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(full, []byte("nameserver 10.0.2.3\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, note := guestResolver(env); got != "10.0.2.3" {
+		t.Errorf("stub with resolved upstream = %q (%s), want 10.0.2.3", got, note)
+	}
+}
