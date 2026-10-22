@@ -299,41 +299,27 @@ refuses), the lease event stream through the events-only `EVENTS_TOKEN`,
 the SQLite catalog opened read-only, user names from the identity store,
 `/proc` and systemd.
 
-Setting it up is manual today; generating the credentials as part of
-installation is planned:
-
-```bash
-spoond dash hash 'the-password'   # bcrypt hash for DASH_PASSWORD_HASH
-# /etc/spoond/backend.env: METRICS_TOKEN=<random>, then restart the backend
-# /etc/spoond/dash.env:    DASH_USER, DASH_PASSWORD_HASH, METRICS_TOKEN,
-#                          DASH_TLS_CERT, DASH_TLS_KEY; every setting is
-#                          listed in cmd/spoond-dash/dash.go
-```
+`spoond install` sets it up: user `admin`, the generated password in
+`/etc/spoond/dash-password`, and the tokens in `/etc/spoond/dash.env`
+(every setting is listed in `cmd/spoond-dash/dash.go`). To change the
+password, `spoond dash hash 'the-password'` prints the bcrypt hash for
+`DASH_PASSWORD_HASH`.
 
 ## Install
 
 spoond needs an x86-64 Linux host with KVM (bare metal, or a VM with
 nested virtualisation), Debian 13, at least 16 GB of memory and a disk
-or partition for the snapshot store. [docs/install.md](docs/install.md)
-takes you through it in order: the host, the E2B orchestrator, spoond's
-services, the image catalog and the first user. `spoond doctor` checks
-the result.
+or directory for the snapshot store. On main (4.0, unreleased) one
+command installs it:
 
-## Docs
+```bash
+sudo ./spoond install --host-name sandbox.example.com --admin-key ~/.ssh/id_ed25519.pub
+```
 
-| Doc | Contents |
-|---|---|
-| [E2B substrate spec](docs/plans/2026-09-30-e2b-substrate/00-README.md) | the current platform: architecture, decisions, per-unit specs, ops appendices |
-| [API reference](docs/api.md) | every endpoint: auth, request/response, errors; `GET /api/capabilities` self-describes the deployment |
-| [Upgrading to 3.0](docs/upgrading-3.0.md) | what API clients change moving from 2.9 to 3.0 |
-| [ctl reference](docs/ctl.md) | control-plane verbs, output contract, examples |
-| [Usage guide](docs/usage.md) | SSH, exec, persistent/suspend, clones, proxy, LLM, agents, policies, multi-user |
-| [Security](docs/security.md) | threat model, hardening notes, adversarial-review fixes |
-| [Conformance suite](conformance/README.md) | the lease-API contract tests, run against production |
-| [E2B upgrade runbook](docs/runbooks/e2b-upgrade.md) | moving the fork to a newer upstream |
-| [Install](docs/install.md) | `spoond install` and the Docker install, first users, and the configuration reference |
-| [Operations](docs/operations.md) | day-2: doctor, drain and reboots, the network watchdog, GC, backups, the dashboard |
-| [Changelog](CHANGELOG.md) | what changed in each release |
+It sets up the host, the E2B orchestrator, spoond's services and the
+image catalog, creates the first admin user and ends with `spoond
+doctor`; Docker Compose (`deploy/docker/`) runs the same stack in
+containers. [docs/install.md](docs/install.md) has both.
 
 ## Status
 
