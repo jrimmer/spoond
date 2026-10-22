@@ -6,8 +6,14 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"time"
 )
+
+// ErrTaskCancelled is what Keepalive returns when the server has
+// cancelled the task (a newer push superseded it, or someone pressed
+// Cancel): the job should stop, not run on with a revoked token (#160).
+var ErrTaskCancelled = errors.New("the task was cancelled on the server")
 
 // Result is the outcome of a job or step.
 type Result int
@@ -107,7 +113,8 @@ type JobSink interface {
 	Log(ctx context.Context, jobID, index int64, rows []*LogRow, noMore bool) error
 	// Keepalive reports that the job is still running without appending
 	// log output. Forgejo reaps tasks that stop hearing from the runner,
-	// so long silent steps must send this periodically.
+	// so long silent steps must send this periodically. It returns
+	// ErrTaskCancelled when the server answers that it cancelled the task.
 	Keepalive(ctx context.Context, jobID int64) error
 }
 

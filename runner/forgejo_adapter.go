@@ -250,10 +250,17 @@ func (a *ForgejoAdapter) Keepalive(ctx context.Context, jobID int64) error {
 		Id:     jobID,
 		Result: runnerv1.Result_RESULT_UNSPECIFIED, // zero value = still running; refreshes the stale-task clock
 	}
-	if _, err := a.svc.UpdateTask(ctx, connect.NewRequest(&runnerv1.UpdateTaskRequest{
+	resp, err := a.svc.UpdateTask(ctx, connect.NewRequest(&runnerv1.UpdateTaskRequest{
 		State: ts,
-	})); err != nil {
+	}))
+	if err != nil {
 		return fmt.Errorf("update task (keepalive): %w", err)
+	}
+	// Forgejo answers with the task's state as it sees it: a task it
+	// cancelled (a newer push to the branch, or the Cancel button) has
+	// already lost its token, so the job must stop (#160).
+	if resp.Msg.GetState().GetResult() == runnerv1.Result_RESULT_CANCELLED {
+		return ErrTaskCancelled
 	}
 	return nil
 }
