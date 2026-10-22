@@ -47,6 +47,35 @@ summarised from README "Status".
 - **README: Status names the current release only**; the release history
   lives here and on the releases page.
 
+## [3.13.0] - 2026-10-21
+
+### Added
+
+- **A CI runner label can start its job from a named snapshot.** An
+  `IMAGE_MAP` or `DEFAULT_IMAGE` value of `snapshot:NAME[@VERSION]`
+  starts the job's lease from that saved snapshot instead of an image,
+  so a job can begin with its toolchain and caches already in place. A
+  bare name takes the latest version. `snapshot:OWNER:NAME[@VERSION]`
+  uses a snapshot another owner granted the runner's identity. Plain
+  values are images, as before. See [docs/ci-jobs.md](docs/ci-jobs.md).
+
+### Fixed
+
+- **A guest that stays unreachable is recovered like a crash (spoond
+  #159).** The root-disk probe never counts a timeout or an "unavailable"
+  answer, because a slow disk or a busy host is not a dead guest. So a
+  guest that hung and gave nothing else kept its lease, its memory and
+  its running jobs until the job cap (24 h by default). A guest that
+  answers the probe only that way for `GUEST_UNREACHABLE_SECS` (default
+  `3600`, one hour; `0` disables) is now recovered from its last
+  checkpoint, or marked `lost`, while at least one other running lease
+  answers. Its background jobs end `lost`, so callers following them
+  stop waiting. A host where every guest is slow, an orchestrator
+  outage and a host with a single running lease never trigger it. Any
+  answer from the guest, including a successful exec, starts the clock
+  again. The lease gets a `guest_unreachable` event first, and
+  `spoond_guest_unreachable_total` counts these recoveries.
+
 ## [3.12.1] - 2026-10-21
 
 ### Fixed

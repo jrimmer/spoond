@@ -337,7 +337,7 @@ the result.
 
 ## Status
 
-**v3.12.1** (2026-10-21) is the current release. spoond 3.x shares a host
+**v3.13.0** (2026-10-21) is the current release. spoond 3.x shares a host
 fairly: every active owner gets an equal, floating slice of memory and
 snapshot disk, and when a request does not fit, spoond takes room back
 from the biggest borrower; it pauses a lease on its own before the host
@@ -347,9 +347,10 @@ error codes, a bounded gitignore-aware directory listing, ranged file
 reads, directory watches, and background jobs that can be deleted,
 kept for less time and capped in output. 3.12 lets a guest release its
 own lease when the caller asks for that at create: a lease-scoped token
-that can release or keep alive that one lease and nothing else; 3.12.1
-marks a background job whose command never started as lost instead of
-leaving it running. Clients
+that can release or keep alive that one lease and nothing else. 3.13
+recovers a guest that has stopped answering for an hour, as it would a
+crash, and lets a CI runner label start its job from a named snapshot.
+Clients
 moving from 2.9 read
 [docs/upgrading-3.0.md](docs/upgrading-3.0.md).
 
