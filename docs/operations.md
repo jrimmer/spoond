@@ -308,7 +308,7 @@ set -a; . /etc/spoond/backend.env; set +a
 | `registry: /v2/` | the local registry answers `200` |
 | `token seed: file` | `/etc/spoond/e2b-token-seed` exists, mode 0600, at least 32 bytes |
 | `store: database` | the SQLite file opens read-only and its migration version is ≥ 4 |
-| `catalog: baked images` | every manifest image with `baked: true` has a `current_build_id` in `ready` state (WARN when the manifest has none) |
+| `catalog: baked images` | every manifest image with `baked: true` that is built on this host has a `current_build_id` in `ready` state; a baked image never built here (no catalog row; `spoond install --images minimal` builds two) is a WARN naming it, and a manifest with none is a WARN |
 | `artifacts: sha256` | Firecracker, the guest kernel and busybox match their pins, **and** prints the distinct Firecracker/kernel versions non-deleted builds still use — never delete a `/fc-versions/<v>` or `/fc-kernels/<v>` directory while it appears there |
 | `storage: free space` | WARN below 20 GiB free at `E2B_TEMPLATE_STORAGE_PATH` |
 | `lease API: listener` + `/healthz` | the backend listener is up and healthy. The `/healthz` probe over TLS trusts the backend's own cert chain loaded from `TLS_CERT` and picks the hostname from the cert's DNS SAN (a wildcard bind will not validate) — a separate `lease API: TLS trust` check FAILs when the cert cannot be read, and verification is never skipped. With several pairs it probes with the first. `tls: <file>` checks each pair: loadable, and WARN within 14 days of expiry |
