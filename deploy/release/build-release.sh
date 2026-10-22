@@ -9,11 +9,6 @@
 #   VERSION          the release version without the v (e.g. 4.0.0)
 #   RUNTIME_TARBALL  spoond-runtime_<VERSION>_linux_amd64.tar.gz
 #   OUTDIR           directory the artifacts are written to
-#
-# Then, for the Docker image (VERSION as above):
-#   cp RUNTIME_TARBALL deploy/docker/artifacts/
-#   docker build -f deploy/docker/Dockerfile --build-arg VERSION=$VERSION \
-#     -t ghcr.io/jrimmer/spoond:$VERSION -t ghcr.io/jrimmer/spoond:latest .
 set -euo pipefail
 
 die() {
