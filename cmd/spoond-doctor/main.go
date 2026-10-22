@@ -61,10 +61,24 @@ type checkResult struct {
 // from.
 var doctorArtifacts = install.Pins()
 
+// inContainer reports a Docker install: the image sets
+// SPOOND_CONTAINER=1, and there is no systemd to ask about units.
+func inContainer() bool { return os.Getenv("SPOOND_CONTAINER") == "1" }
+
+// defaultManifest is the image manifest doctor reads: the one spoond
+// install extracts, else a source checkout's.
+func defaultManifest() string {
+	const installed = "/var/lib/spoond/images/manifest.yaml"
+	if _, err := os.Stat(installed); err == nil {
+		return installed
+	}
+	return "/root/src/spoond/images/manifest.yaml"
+}
+
 func Main(args []string) int {
 	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
 	jsonOut := fs.Bool("json", false, "machine-readable JSON output")
-	manifestPath := fs.String("manifest", "/root/src/spoond/images/manifest.yaml", "image manifest path")
+	manifestPath := fs.String("manifest", defaultManifest(), "image manifest path")
 	_ = fs.Parse(args)
 
 	results := runChecks(*manifestPath)
@@ -367,6 +381,9 @@ func checkOrchestrator(cfg e2b.Config, cfgErr error) []checkResult {
 func checkOrchestratorUnit() []checkResult {
 	const name = "orchestrator: unit state"
 	const activatingDetail = "start-post still running (undrain); do not restart or stop it now — the drain would be skipped"
+	if inContainer() {
+		return []checkResult{{name, "PASS", "Docker install: compose runs the orchestrator, and its stop drains first"}}
+	}
 	props, err := systemctlShow(e2bOrchestratorUnit, "ActiveState", "SubState")
 	if err != nil {
 		return []checkResult{{name, "FAIL", fmt.Sprintf("systemctl show %s: %v", e2bOrchestratorUnit, err)}}
@@ -1039,6 +1056,9 @@ var drainEnvPath = "/etc/e2b/drain.env"
 // running lease (2026-10-02).
 func checkDrainUnit() []checkResult {
 	const name = "drain: shutdown unit"
+	if inContainer() {
+		return []checkResult{{name, "PASS", "Docker install: the orchestrator container drains before it stops (stop_grace_period 6m)"}}
+	}
 	props, err := systemctlShow("spoond-drain.service", "UnitFileState", "ActiveState", "After")
 	if err != nil {
 		return []checkResult{{name, "FAIL", fmt.Sprintf("systemctl show spoond-drain.service: %v", err)}}
