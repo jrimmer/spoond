@@ -39,7 +39,7 @@ func TestHostPackagesInstallsMissingInOneAptGet(t *testing.T) {
 	runner.reply = map[string]fakeReply{}
 	installed(runner, "iptables", "nftables")
 	addReply(runner, "apt-get update", "")
-	addReply(runner, "apt-get install -y --no-install-recommends rsync e2fsprogs iproute2 util-linux curl ca-certificates docker.io docker-buildx containerd runc", "")
+	addReply(runner, "apt-get install -y --no-install-recommends rsync e2fsprogs iproute2 util-linux curl ca-certificates docker.io docker-cli docker-buildx containerd runc", "")
 
 	if err := hostPackages(context.Background(), env, &Reporter{Phase: PhaseHost}, &hostState{}); err != nil {
 		t.Fatal(err)
@@ -51,7 +51,7 @@ func TestHostPackagesInstallsMissingInOneAptGet(t *testing.T) {
 	if apt[0] != "apt-get update" {
 		t.Errorf("first apt call %q, want the apt-get update", apt[0])
 	}
-	want := "apt-get install -y --no-install-recommends rsync e2fsprogs iproute2 util-linux curl ca-certificates docker.io docker-buildx containerd runc"
+	want := "apt-get install -y --no-install-recommends rsync e2fsprogs iproute2 util-linux curl ca-certificates docker.io docker-cli docker-buildx containerd runc"
 	if apt[1] != want {
 		t.Errorf("install call:\n %s\nwant:\n %s", apt[1], want)
 	}

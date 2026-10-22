@@ -25,10 +25,11 @@ func init() {
 }
 
 // basePackages are the host packages every install needs: the firewall
-// tools, the snapshot store's filesystem tools, Docker and its runtime.
+// tools, the snapshot store's filesystem tools, Docker and its runtime
+// (Debian 13 ships the docker client apart from docker.io, as docker-cli).
 var basePackages = []string{
 	"iptables", "nftables", "rsync", "e2fsprogs", "iproute2", "util-linux",
-	"curl", "ca-certificates", "docker.io", "docker-buildx", "containerd", "runc",
+	"curl", "ca-certificates", "docker.io", "docker-cli", "docker-buildx", "containerd", "runc",
 }
 
 // zfsPackages turn --store-disk into the forkdcache pool: zfs-dkms
