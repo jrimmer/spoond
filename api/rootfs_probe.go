@@ -403,6 +403,9 @@ func (s *Service) guestUnreachableFor(l *Lease, now time.Time, pressured bool) t
 func (s *Service) checkGuestUnreachable(ctx context.Context, l *Lease, now time.Time, answering int, pressured bool) {
 	silent := s.guestUnreachableFor(l, now, pressured)
 	after := s.guestUnreachableAfter()
+	if pressured && after > 0 {
+		s.log.Printf("rootfs probe: lease %s silent while the host is over its saturation targets; its unreachable clock pauses at %d min", l.ID, int(silent/time.Minute))
+	}
 	if after <= 0 || silent < after || answering == 0 || pressured {
 		return
 	}
