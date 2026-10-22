@@ -249,3 +249,27 @@ func TestCLIRootPassesThrough(t *testing.T) {
 		t.Errorf("phase saw Root=%q, want the --root value %q", seen, root)
 	}
 }
+
+// TestCLIFlagsAfterPhase: flags after the phase name apply too
+// (`spoond install runtime --container`), the compose file's form.
+func TestCLIFlagsAfterPhase(t *testing.T) {
+	var order []string
+	stubTable(t, &order)
+	var dry, container bool
+	withPhase(t, "runtime", func(ctx context.Context, env *install.Env) ([]install.Item, error) {
+		dry, container = env.DryRun, env.Opt.Container
+		order = append(order, "real-runtime")
+		return nil, nil
+	})
+	_ = stdoutPipe(t)
+	code := installMain([]string{"--root", t.TempDir(), "runtime", "--dry-run", "--container"})
+	if code != 0 {
+		t.Fatalf("runtime --dry-run --container: exit %d", code)
+	}
+	if strings.Join(order, ",") != "real-runtime" || !dry || !container {
+		t.Errorf("ran %v with dry-run %v, container %v; want runtime with both", order, dry, container)
+	}
+	if code := installMain([]string{"--root", t.TempDir(), "check", "--dry-run", "host"}); code != 2 {
+		t.Errorf("two phases around a flag: exit %d, want 2", code)
+	}
+}

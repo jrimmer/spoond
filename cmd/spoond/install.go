@@ -26,7 +26,7 @@ func init() {
 
 // installUsage is the argument help; a failure points at it so the fix
 // is always on screen.
-const installUsage = `usage: spoond install [--dry-run] [phase]
+const installUsage = `usage: spoond install [flags] [phase] [flags]
 
   With no phase it runs every phase in order and stops at the first
   failure; with a phase it runs that one:
@@ -96,15 +96,26 @@ func installMain(args []string) int {
 	fs.BoolVar(&opt.Container, "container", false, "run from inside the Docker image")
 	fs.BoolVar(&opt.ConfigOnly, "config-only", false, "with --container: write config, start nothing")
 	fs.BoolVar(&opt.ArtifactsOnly, "artifacts-only", false, "runtime phase: install the binaries and pinned artifacts only (the Docker image build)")
-	if err := fs.Parse(args); err != nil {
-		return 2
+	// Flags may come before or after the phase (`spoond install
+	// runtime --container`): the flag package stops at the first
+	// positional argument, so parse again after each one.
+	var positional []string
+	for {
+		if err := fs.Parse(args); err != nil {
+			return 2
+		}
+		if fs.NArg() == 0 {
+			break
+		}
+		positional = append(positional, fs.Arg(0))
+		args = fs.Args()[1:]
 	}
 	if err := opt.Validate(); err != nil {
 		fmt.Fprintf(os.Stderr, "spoond install: %v\n", err)
 		return 2
 	}
-	if fs.NArg() > 1 {
-		fmt.Fprintf(os.Stderr, "spoond install: unexpected arguments %v\n", fs.Args()[1:])
+	if len(positional) > 1 {
+		fmt.Fprintf(os.Stderr, "spoond install: unexpected arguments %v\n", positional[1:])
 		fs.Usage()
 		return 2
 	}
@@ -115,8 +126,8 @@ func installMain(args []string) int {
 	defer stop()
 
 	var names []string
-	if fs.NArg() == 1 {
-		names = []string{fs.Arg(0)}
+	if len(positional) == 1 {
+		names = positional
 	}
 
 	env := &install.Env{
