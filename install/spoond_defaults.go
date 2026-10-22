@@ -71,7 +71,7 @@ func spoondDefaults(ctx context.Context, env *Env, r *Reporter) (hostDefaults, e
 	if resolver == "" {
 		r.Add(Skipped, "guest DNS", note)
 	} else {
-		r.Add(Created, "guest DNS", resolver+" (the first usable nameserver in /etc/resolv.conf)")
+		r.Add(Created, "guest DNS", resolver+" (the first usable nameserver in /etc/resolv.conf, or systemd-resolved's upstream behind its stub)")
 	}
 	return dd, nil
 }
