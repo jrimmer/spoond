@@ -11,7 +11,7 @@ restored from an image snapshot, on the E2B substrate) is
 # One-liner: create + run + delete
 curl -s -X POST https://sandbox.example.com/api/leases \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"image":"dev-base","ttl":600}'
+  -d '{"image":"my-image","ttl":600}'
 # → {"id":"…","address":"10.11.0.7","expires_at":"…",…}
 
 ssh <id>@sandbox.example.com "uname -a"          # run a command
@@ -19,8 +19,10 @@ ssh <id>@sandbox.example.com                      # interactive shell
 ssh ctl@sandbox.example.com "rm <id>"             # release
 ```
 
-Or skip curl entirely: `ssh new@sandbox.example.com` creates a persistent
-dev lease and drops you into tmux.
+Or skip curl entirely: `ssh new-my-image@sandbox.example.com` creates a
+persistent lease of `my-image` and logs you in (see
+[Interactive sessions](#interactive-sessions) for what the gateway needs
+configured first).
 
 ## Three ways to run a command
 
@@ -96,26 +98,29 @@ contract.
 ## Interactive sessions
 
 ```bash
-# Fresh lease (auto-creates a persistent dev-base lease)
+# Fresh lease of the gateway's default image (GATEWAY_DEFAULT_IMAGE)
 ssh new@sandbox.example.com -p 2222
 
 # A specific image
-ssh new-go@sandbox.example.com -p 2222
+ssh new-my-image@sandbox.example.com -p 2222
 
 # Re-attach to an existing lease
 ssh <id>@sandbox.example.com -p 2222
-
-# Detach (tmux) then reconnect later
-#   Ctrl-b d
-ssh <id>@sandbox.example.com -p 2222
 ```
 
-`new` accepts the same short names as `ctl new` (`dev`, `go`, `py`,
-`python`, `elixir`, `llm`, `base`) or a full image tag, but only images
-with sshd qualify for interactive SSH — the gateway's `--ssh-images`
-list (default `dev-base`; CI images like `go-base` have no sshd and are
-rejected with a hint). The MOTD prints the reconnect hint with the exact
-port; the footer shows the lease id. Friendly names work after `ctl tag`:
+`new-<image>` takes an image tag exactly as the catalog names it
+(checked against `/api/images`), or a short name the operator defined
+in the gateway's `--image-aliases` (`GATEWAY_IMAGE_ALIASES`); there are
+no built-in short names. Bare `new` uses the gateway's
+`--default-image` (`GATEWAY_DEFAULT_IMAGE`), which has no default:
+without it, bare `new` is refused and asks you to name an image. Only
+images with sshd qualify for interactive SSH — the gateway's
+`--ssh-images` list (`GATEWAY_SSH_IMAGES`). It has no default either:
+with it empty, every `new` login prints a refusal naming
+`GATEWAY_SSH_IMAGES` and closes, and an image not in the list is
+rejected with a hint. What a login runs (a plain shell, or e.g. a tmux
+attach) is up to the image. The MOTD prints the lease id and the
+reconnect hint with the exact port. Friendly names work after `ctl tag`:
 
 ```bash
 ssh ctl@sandbox.example.com "tag <id> mybox"
@@ -134,7 +139,7 @@ ssh mybox@sandbox.example.com -p 2222
 
 ```bash
 curl -s -X POST …/api/leases -H "Authorization: Bearer $TOKEN" \
-  -d '{"image":"dev-base","persistent":true,"ttl":3600}'
+  -d '{"image":"my-image","persistent":true,"ttl":3600}'
 ssh ctl@sandbox.example.com "keepalive <id>"
 ssh ctl@sandbox.example.com "suspend <id>"   # snapshot + stop
 ssh ctl@sandbox.example.com "resume <id>"    # back to work
@@ -197,12 +202,12 @@ LAN) — a database for a CI job, for instance:
 ```bash
 # the database lease
 curl -s -X POST …/api/leases -H "Authorization: Bearer $TOKEN" \
-  -d '{"image":"scylla","persistent":true,"expose_ports":[9042]}'
+  -d '{"image":"my-db-image","persistent":true,"expose_ports":[9042]}'
 # → "exposed":{"9042":"10.11.0.7:9042"}
 
 # the job's lease must allow that peer by id, name or lease:<id>
 curl -s -X POST …/api/leases -H "Authorization: Bearer $TOKEN" \
-  -d '{"image":"go-base","egress_allowlist":["<db-lease-id>"]}'
+  -d '{"image":"ci-image","egress_allowlist":["<db-lease-id>"]}'
 ```
 
 Guest port 49983 (the in-guest agent) is reserved and can never be
@@ -274,8 +279,12 @@ Tools: `shell`, `read_file`, `write_file`, `edit_file`, `list_files`,
 
 ```bash
 SPOOND_BACKEND_URL=https://sandbox.example.com SPOOND_AGENT_TOKEN=<agent-token> \
-  ./spoond mcp
+  SPOOND_IMAGE=my-image ./spoond mcp
 ```
+
+`SPOOND_IMAGE` is the image every tool call's sandbox is created from.
+It has no default: without it the server starts with a warning and
+every tool call fails with an error naming `SPOOND_IMAGE`.
 
 Create the agent user first with `POST /api/users` and
 `kind=agent` — the agent needs a `token` in the request body, not an
@@ -305,7 +314,7 @@ ports, on any owner, with no allowlist gate.
 
 ```bash
 curl -s -X POST …/api/leases -H "Authorization: Bearer $TOKEN" \
-  -d '{"image":"dev-base","network_policy":"restricted","egress_allowlist":["10.0.0.47","github.com"]}'
+  -d '{"image":"my-image","network_policy":"restricted","egress_allowlist":["10.0.0.47","github.com"]}'
 ```
 
 Allowlist entries may be IPs, CIDRs or domains — or a **lease

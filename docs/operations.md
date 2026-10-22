@@ -1227,10 +1227,10 @@ lease went can be reconstructed from `journalctl` alone — even after the
 dashboard's 50-event ring has rolled over and the lease row is gone:
 
 ```
-lease journal: op=release lease_id=0f3c… owner=ci-runner sandbox=6a91… image=py-base memory_mib=2048 peak_mib=412 reason="ci job 3609 ✓ 11m02s"
-lease journal: op=suspend lease_id=0f3c… owner=ci-runner sandbox=6a91… image=py-base memory_mib=2048 reason=take_back
-lease journal: op=create  lease_id=0f3c… owner=ci-runner sandbox=6a91… image=py-base memory_mib=2048 reason=new
-lease journal: op=lost    lease_id=0f3c… owner=ci-runner sandbox=6a91… image=py-base memory_mib=2048 reason="no checkpoint to recover from"
+lease journal: op=release lease_id=0f3c… owner=ci-runner sandbox=6a91… image=ci-image memory_mib=2048 peak_mib=412 reason="ci job 3609 ✓ 11m02s"
+lease journal: op=suspend lease_id=0f3c… owner=ci-runner sandbox=6a91… image=ci-image memory_mib=2048 reason=take_back
+lease journal: op=create  lease_id=0f3c… owner=ci-runner sandbox=6a91… image=ci-image memory_mib=2048 reason=new
+lease journal: op=lost    lease_id=0f3c… owner=ci-runner sandbox=6a91… image=ci-image memory_mib=2048 reason="no checkpoint to recover from"
 ```
 
 The fields are always present, in that order; an empty value is `""` and

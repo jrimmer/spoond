@@ -30,9 +30,15 @@ type Config struct {
 	MaxTTL int
 	// MaxTimeout caps a requested exec timeout in seconds.
 	MaxTimeout int
-	// DefaultImage is used when no image is specified.
+	// DefaultImage is used when a request names no image. There is no
+	// default: with it empty, a request without an image is refused
+	// (400) with a message saying to name one.
 	DefaultImage string
 }
+
+// errNoImage is the 400 for a request that names no image to an adapter
+// with no DefaultImage configured.
+const errNoImage = `image is required: name one in the request's "image" field (this adapter has no default image configured)`
 
 // runRequest is the POST /v1/run body.
 type runRequest struct {
@@ -73,9 +79,6 @@ func New(cfg Config) *Server {
 	}
 	if cfg.MaxTimeout == 0 {
 		cfg.MaxTimeout = 300
-	}
-	if cfg.DefaultImage == "" {
-		cfg.DefaultImage = "py-base"
 	}
 	return &Server{
 		cfg:      cfg,
@@ -126,6 +129,14 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "command is required")
 		return
 	}
+	image := req.Image
+	if image == "" {
+		image = s.cfg.DefaultImage
+	}
+	if image == "" {
+		writeError(w, http.StatusBadRequest, errNoImage)
+		return
+	}
 	consumer := consumerFrom(r.Context())
 	if !s.acquire(consumer) {
 		writeError(w, http.StatusTooManyRequests, "rate limited: too many concurrent jobs")
@@ -133,10 +144,6 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	}
 	defer s.release(consumer)
 
-	image := req.Image
-	if image == "" {
-		image = s.cfg.DefaultImage
-	}
 	ttl := req.TTL
 	if ttl <= 0 {
 		ttl = s.cfg.DefaultTTL

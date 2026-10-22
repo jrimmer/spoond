@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/jrimmer/spoond/v4/runner"
@@ -68,7 +69,7 @@ func newTestServer(maxConcurrent int) *httptest.Server {
 		DefaultTTL:    300,
 		MaxTTL:        3600,
 		MaxTimeout:    300,
-		DefaultImage:  "py-base",
+		DefaultImage:  "ci-image",
 	})
 	return httptest.NewServer(s.Handler())
 }
@@ -93,7 +94,7 @@ func TestRunHappyPath(t *testing.T) {
 	ts := newTestServer(0)
 	defer ts.Close()
 	code, out := doRun(t, ts.URL, "token-a", map[string]any{
-		"image":   "py-base",
+		"image":   "ci-image",
 		"command": "echo hi",
 	})
 	if code != 200 {
@@ -125,7 +126,7 @@ func TestRunUnauthorized(t *testing.T) {
 func TestRunMissingCommand(t *testing.T) {
 	ts := newTestServer(0)
 	defer ts.Close()
-	code, out := doRun(t, ts.URL, "token-a", map[string]any{"image": "py-base"})
+	code, out := doRun(t, ts.URL, "token-a", map[string]any{"image": "ci-image"})
 	if code != 400 {
 		t.Fatalf("expected 400, got %d", code)
 	}
@@ -148,7 +149,7 @@ func TestRunQuota(t *testing.T) {
 		DefaultTTL:    300,
 		MaxTTL:        3600,
 		MaxTimeout:    300,
-		DefaultImage:  "py-base",
+		DefaultImage:  "ci-image",
 	})
 	ts := httptest.NewServer(s.Handler())
 	defer ts.Close()
@@ -184,7 +185,7 @@ func TestRunReleasesSandbox(t *testing.T) {
 		DefaultTTL:   300,
 		MaxTTL:       3600,
 		MaxTimeout:   300,
-		DefaultImage: "py-base",
+		DefaultImage: "ci-image",
 	})
 	ts := httptest.NewServer(s.Handler())
 	defer ts.Close()
@@ -197,5 +198,36 @@ func TestRunReleasesSandbox(t *testing.T) {
 	}
 	if sb.deleted[0] != sb.created[0] {
 		t.Fatalf("released %s but created %s", sb.deleted[0], sb.created[0])
+	}
+}
+
+// TestRunNoImage: the adapter ships no default image, so a request that
+// names none, to an adapter with no DefaultImage, is refused (400) with
+// a message saying to name one, and no sandbox is created. A request
+// that names its own image still runs.
+func TestRunNoImage(t *testing.T) {
+	sb := newFakeSandbox()
+	s := New(Config{
+		Sandbox: sb,
+		Tokens:  map[string]string{"token-a": "consumer-a"},
+	})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+	code, out := doRun(t, ts.URL, "token-a", map[string]any{"command": "echo hi"})
+	if code != 400 {
+		t.Fatalf("expected 400, got %d: %v", code, out)
+	}
+	if msg, _ := out["error"].(string); !strings.Contains(msg, `"image"`) {
+		t.Fatalf("error %q does not say to name an image", msg)
+	}
+	if len(sb.created) != 0 {
+		t.Fatalf("expected no sandbox created, got %v", sb.created)
+	}
+	code, out = doRun(t, ts.URL, "token-a", map[string]any{"image": "ci-image", "command": "echo hi"})
+	if code != 200 {
+		t.Fatalf("expected 200 with the request's own image, got %d: %v", code, out)
+	}
+	if len(sb.created) != 1 || sb.created[0] != "sb-ci-image" {
+		t.Fatalf("created %v, want [sb-ci-image]", sb.created)
 	}
 }

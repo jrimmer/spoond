@@ -62,7 +62,9 @@ type Server struct {
 type Config struct {
 	// Sandbox is the SandboxProvider (e.g. the lease HTTP API).
 	Sandbox runner.SandboxProvider
-	// Image is the default sandbox image (e.g. dev-base).
+	// Image is the sandbox image every tool call runs in. There is no
+	// default: with it empty, each tool call fails with ErrNoImage
+	// instead of creating a sandbox.
 	Image string
 	// TTL is the sandbox lease TTL in seconds.
 	TTL int
@@ -94,9 +96,6 @@ func New(cfg Config) *Server {
 	}
 	if cfg.Timeout == 0 {
 		cfg.Timeout = 60
-	}
-	if cfg.Image == "" {
-		cfg.Image = "dev-base"
 	}
 	if cfg.Log == nil {
 		cfg.Log = log.Default()
@@ -329,9 +328,17 @@ func (s *Server) handleToolCall(ctx context.Context, id any, params any) map[str
 	return rpcError(&id, -32602, "unknown tool: "+name)
 }
 
+// ErrNoImage is a tool call's error on a server configured with no
+// image: a tool call carries no image of its own, and spoond ships no
+// default image.
+var ErrNoImage = errors.New("no sandbox image configured: set SPOOND_IMAGE to an image the backend serves (GET /api/images lists them)")
+
 // withSandbox creates a sandbox, runs fn with it, and always releases
 // the lease. This is the stateless-per-call v1 lifecycle.
 func (s *Server) withSandbox(ctx context.Context, fn func(id string) (any, error)) (any, error) {
+	if s.image == "" {
+		return nil, ErrNoImage
+	}
 	sandboxID, err := s.sandbox.Create(ctx, s.image, s.ttl)
 	if err != nil {
 		return nil, fmt.Errorf("create sandbox: %w", err)

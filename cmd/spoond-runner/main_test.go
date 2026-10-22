@@ -247,7 +247,7 @@ func waitFor(t *testing.T, what string, pred func() bool) {
 func TestMainSIGTERMGraceThenCancel(t *testing.T) {
 	for _, k := range []string{"FORGEJO_URL", "RUNNER_TOKEN", "RUNNER_NAME", "LEASE_URL", "LEASE_TOKEN",
 		"RUNNER_FLOOR", "RUNNER_MAX", "RUNNER_STATE_FILE", "JOB_RECORD_DIR", "RUNNER_STOP_GRACE",
-		"METRICS_LISTEN", "IMAGE_MAP", "RUNNER_ADMIT_WAIT_SECS", "RUNNER_JOB_TIMEOUT"} {
+		"METRICS_LISTEN", "IMAGE_MAP", "DEFAULT_IMAGE", "RUNNER_ADMIT_WAIT_SECS", "RUNNER_JOB_TIMEOUT"} {
 		os.Unsetenv(k)
 	}
 	forgejo := &fakeForgejo{}
@@ -265,6 +265,8 @@ func TestMainSIGTERMGraceThenCancel(t *testing.T) {
 	t.Setenv("RUNNER_STATE_FILE", t.TempDir()+"/state.json")
 	t.Setenv("JOB_RECORD_DIR", t.TempDir())
 	t.Setenv("RUNNER_STOP_GRACE", "300ms")
+	// spoond has no default image; without one the job fails at once.
+	t.Setenv("DEFAULT_IMAGE", "ci-image")
 	// The seconds form every sibling *_SECS knob uses — this is the
 	// value the hold TTL (timeout + 10 min) must be derived from.
 
@@ -361,6 +363,24 @@ func TestMainSIGTERMGraceThenCancel(t *testing.T) {
 	// fakes' connections drain and their servers can close.
 	lease.release()
 	forgejo.release()
+}
+
+// TestImageConfigWarning: a runner with neither IMAGE_MAP nor
+// DEFAULT_IMAGE warns once at startup, naming both; either one set
+// silences it.
+func TestImageConfigWarning(t *testing.T) {
+	warn := imageConfigWarning(map[string]string{}, "")
+	for _, want := range []string{"IMAGE_MAP", "DEFAULT_IMAGE"} {
+		if !strings.Contains(warn, want) {
+			t.Fatalf("warning %q does not name %s", warn, want)
+		}
+	}
+	if w := imageConfigWarning(map[string]string{"ubuntu-latest": "ci-image"}, ""); w != "" {
+		t.Fatalf("IMAGE_MAP set: warning %q, want none", w)
+	}
+	if w := imageConfigWarning(map[string]string{}, "ci-image"); w != "" {
+		t.Fatalf("DEFAULT_IMAGE set: warning %q, want none", w)
+	}
 }
 
 // TestEnvDurOrBareSeconds: the duration knob accepts the *_SECS form too

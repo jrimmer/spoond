@@ -9,7 +9,7 @@
 //
 // Usage:
 //
-//	spoondctl new [image]            create a lease (dev/go/py/elixir/llm)
+//	spoondctl new [image]            create a lease (no image: the gateway's GATEWAY_DEFAULT_IMAGE)
 //	spoondctl ls                     list leases (JSON)
 //	spoondctl rm <id>                delete a lease
 //	spoondctl keepalive <id>         extend a persistent lease
@@ -261,7 +261,7 @@ func usage() {
 	fmt.Fprint(os.Stderr, `spoondctl — spoond control plane CLI (thin wrapper over ssh ctl@)
 
 usage:
-  spoondctl new [image]            create a lease (dev/go/py/elixir/llm)
+  spoondctl new [image]            create a lease (no image: the gateway's GATEWAY_DEFAULT_IMAGE)
   spoondctl ls                     list leases
   spoondctl rm <id>                delete a lease
   spoondctl keepalive <id>         extend a persistent lease

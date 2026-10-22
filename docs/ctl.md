@@ -27,7 +27,7 @@ only.
 |---|---|---|
 | `help` | `help` | list all verbs |
 | `whoami` | `whoami` | current key identity (user id/name when the identity store is active) |
-| `new` | `new [dev\|go\|py\|python\|elixir\|llm\|base]` or `new <full-image>` | create a lease; `new` alone = dev-base. A full image name works too (checked against `/api/images`); more short names via the gateway's `--image-aliases` |
+| `new` | `new [image]` | create a persistent lease of an interactive image. The image is named exactly as the catalog names it (checked against `/api/images`), or by a short name the operator set in the gateway's `--image-aliases`; there are no built-in short names. `new` alone uses the gateway's `GATEWAY_DEFAULT_IMAGE`; there is no default, and without one `new` alone is refused and asks for `new <image>`. The image must be in the gateway's `GATEWAY_SSH_IMAGES` (no default either; with it empty every `new` is refused, naming the setting) |
 | `ls` | `ls [--json]` | list leases (pretty table default) |
 | `stat` | `stat <id> [--json]` | guest metrics (cpu/mem/disk/net) |
 | `rm` | `rm <id>` | delete a lease |
@@ -67,13 +67,13 @@ row above and [api.md](api.md#post-apileasesidrestart--pause-and-resume-or-a-fre
 # List with a friendly table
 ssh ctl@sandbox.example.com "ls"
 #  ID             IMAGE      STATE      EXPIRES                ADDRESS          NAME
-#  39c5099a82e4…  dev-base   running    2026-08-11 01:56 UTC
+#  39c5099a82e4…  my-image   running    2026-08-11 01:56 UTC
 
 # Raw JSON for scripts
 ssh ctl@sandbox.example.com "ls --json" | jq '.sandboxes[0].id'
 
 # Create + tag + use the name
-ssh ctl@sandbox.example.com "new dev"
+ssh ctl@sandbox.example.com "new my-image"
 ssh ctl@sandbox.example.com "ls --json"
 ssh ctl@sandbox.example.com "tag <id> buildbox"
 ssh buildbox@sandbox.example.com "uname -a"
@@ -123,6 +123,6 @@ only — use `ssh ctl@… "stat <id>"` for those.
 | Username | Behavior |
 |---|---|
 | `ctl` | control plane (this page) |
-| `new`, `new-<image>` | auto-create a lease (persistent dev-base by default) and attach |
+| `new`, `new-<image>` | auto-create a persistent lease and attach. `new` alone uses the gateway's `GATEWAY_DEFAULT_IMAGE` (no default: without it, name the image); the image must be in `GATEWAY_SSH_IMAGES` (no default: with it empty, the login prints the refusal, naming the setting, and closes) |
 | `<lease-id>` | attach to an existing lease |
 | `<name>` | attach by friendly name (after `tag`) |

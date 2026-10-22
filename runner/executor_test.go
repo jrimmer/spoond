@@ -171,6 +171,43 @@ jobs:
 	}
 }
 
+// TestExecutorNoImageFails: spoond ships no default image, so a job
+// whose runs-on labels map to nothing, on an executor with no
+// DefaultImage, fails before any sandbox is created, and the error says
+// how to configure one.
+func TestExecutorNoImageFails(t *testing.T) {
+	payload := `
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+`
+	lease := newFakeLease()
+	sink := &fakeSink{}
+	exec := &Executor{
+		Sandbox: lease,
+		Sink:    sink,
+		Labels:  map[string]string{"other-label": "ci-image"},
+		TTL:     600,
+	}
+	err := exec.Run(context.Background(), testJob(payload))
+	if err == nil {
+		t.Fatal("run with no image succeeded, want an error")
+	}
+	for _, want := range []string{"ubuntu-latest", "IMAGE_MAP", "DEFAULT_IMAGE"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q does not name %s", err, want)
+		}
+	}
+	if len(lease.created) != 0 {
+		t.Fatalf("expected no sandbox created, got %v", lease.created)
+	}
+	if len(sink.reports) != 1 || sink.reports[0].Result != ResultFailure {
+		t.Fatalf("expected one failure report, got %+v", sink.reports)
+	}
+}
+
 func TestParseWorkflow(t *testing.T) {
 	payload := `
 name: CI

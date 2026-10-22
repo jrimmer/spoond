@@ -16,13 +16,15 @@
 //	LEASE_TOKEN        Lease API bearer token (required; or
 //	                   LEASE_TOKEN_FILE, same file rules)
 //	IMAGE_MAP          runs-on label -> image tag, comma-separated
-//	                   (e.g. "ubuntu-latest=py-base"); a value
+//	                   (e.g. "ubuntu-latest=ci-image"); a value
 //	                   "snapshot:NAME[@V]" starts the job from the
 //	                   runner identity's named snapshot instead, and
 //	                   "snapshot:OWNER:NAME[@V]" from another user's
 //	                   through a grant (e.g. "scout-web=snapshot:scout/node24")
 //	DEFAULT_IMAGE      Image tag (or "snapshot:...") when no label maps
-//	                   (default "py-base")
+//	                   (no default; a job whose labels map through
+//	                   neither this nor IMAGE_MAP fails, and a runner
+//	                   with both unset warns at startup)
 //	REPO_BASE_URL      Git host base URL for actions/checkout clones
 //	                   (no default; checkout fails without it)
 //	LEASE_TTL          Sandbox lease TTL seconds (default 600)
@@ -110,6 +112,17 @@ func jobTimeoutFromEnv() time.Duration {
 	return envDurOr("RUNNER_JOB_TIMEOUT", runner.DefaultJobTimeout)
 }
 
+// imageConfigWarning is the startup warning for a runner with no image
+// configured at all: neither IMAGE_MAP nor DEFAULT_IMAGE names one, so
+// every job it takes fails before a sandbox is created. spoond ships no
+// default image. "" when either is set.
+func imageConfigWarning(imageMap map[string]string, defaultImage string) string {
+	if len(imageMap) > 0 || defaultImage != "" {
+		return ""
+	}
+	return "neither IMAGE_MAP nor DEFAULT_IMAGE is set; every job will fail until one names an image (e.g. IMAGE_MAP=ubuntu-latest=ci-image or DEFAULT_IMAGE=ci-image)"
+}
+
 // Main runs the runner until SIGTERM/SIGINT (systemd's stop signal is
 // SIGTERM). Shutdown is graceful (#119): the pool stops fetching new
 // jobs, running jobs get StopGrace (RUNNER_STOP_GRACE) to finish, then
@@ -156,7 +169,7 @@ func Main(args []string) int {
 	name := envOr("RUNNER_NAME", "spoond-runner")
 	labels := strings.Split(envOr("RUNNER_LABELS", "ubuntu-latest"), ",")
 	leaseURL := envOr("LEASE_URL", "http://127.0.0.1:8890")
-	defaultImage := envOr("DEFAULT_IMAGE", "py-base")
+	defaultImage := os.Getenv("DEFAULT_IMAGE")
 	ttl := 600
 	if v := os.Getenv("LEASE_TTL"); v != "" {
 		var n int
@@ -197,6 +210,9 @@ func Main(args []string) int {
 				imageMap[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
 			}
 		}
+	}
+	if warn := imageConfigWarning(imageMap, defaultImage); warn != "" {
+		log.Printf("warning: %s", warn)
 	}
 
 	// Adaptive pool config.
