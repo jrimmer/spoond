@@ -55,6 +55,10 @@ const installUsage = `usage: spoond install [--dry-run] [phase]
       --runner-token-file F  its registration token, read from a file
       --container            run from inside the Docker image (Docker install)
       --config-only          with --container: write config, start nothing
+      --artifacts-only       runtime: binaries and pinned artifacts only
+                             (the Docker image build)
+      --root DIR             write under DIR instead of / (--container:
+                             the host's / or the compose config dir)
 
   A run that fails is safe to rerun: every phase reports each item as
   created, changed or kept, and a secret or env file that exists is

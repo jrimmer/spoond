@@ -1438,65 +1438,6 @@ func TestHTTPHealthAgainstServer(t *testing.T) {
 	}
 }
 
-// TestPinnedTableMatchesHostSetup is the drift guard: every row's URL,
-// path, mode and sha256 matches a fetch line of
-// deploy/e2b/host-setup.sh, and the script fetches exactly these.
-func TestPinnedTableMatchesHostSetup(t *testing.T) {
-	b, err := os.ReadFile(filepath.Join("..", "deploy", "e2b", "host-setup.sh"))
-	if err != nil {
-		t.Skipf("deploy/e2b/host-setup.sh not readable from the test's working directory: %v", err)
-	}
-	script := string(b)
-	// The script names the URLs through its $B variable (its base URL,
-	// defined near the top); resolve it the way the shell does.
-	if !strings.Contains(script, "B="+artifactBucket) {
-		t.Fatalf("host-setup.sh's base is not %s (the table's URLs name it); read the script and align both", artifactBucket)
-	}
-	var fetches int
-	for _, line := range strings.Split(script, "\n") {
-		f := strings.Fields(line)
-		if len(f) != 5 || f[0] != "fetch" {
-			continue
-		}
-		fetches++
-		url, path, modeText, sha := f[1], f[2], f[3], f[4]
-		mode, err := parseOctalMode(modeText)
-		if err != nil {
-			t.Fatalf("host-setup.sh fetch mode %q: %v", modeText, err)
-		}
-		match := false
-		for _, art := range pinned {
-			if art.url == strings.ReplaceAll(url, "$B", artifactBucket) {
-				match = true
-				if art.path != path {
-					t.Errorf("pin for %s: path %q, host-setup.sh installs %q", url, art.path, path)
-				}
-				if art.mode != mode {
-					t.Errorf("pin for %s: mode %#o, host-setup.sh installs %#o", url, art.mode, mode)
-				}
-				if art.sha256 != sha {
-					t.Errorf("pin for %s: sha256 %s, host-setup.sh pins %s", url, art.sha256, sha)
-				}
-			}
-		}
-		if !match {
-			t.Errorf("no pin row for host-setup.sh's fetch of %s (add it to the table in install/runtime.go)", url)
-		}
-	}
-	if fetches != len(pinned) {
-		t.Errorf("host-setup.sh fetches %d artifacts, the table pins %d", fetches, len(pinned))
-	}
-	// The two artifacts the script installs from the fork checkout are
-	// NOT in the pin table (they come from the runtime tarball now).
-	if strings.Contains(script, "/root/src/e2b-runtime") {
-		for _, art := range pinned {
-			if art.path == envdBinPath || art.path == orchestratorBinPath {
-				t.Errorf("the pin table pins %s; binaries come from the runtime tarball", art.path)
-			}
-		}
-	}
-}
-
 // parseOctalMode parses "0755" into a FileMode.
 func parseOctalMode(s string) (os.FileMode, error) {
 	var m os.FileMode

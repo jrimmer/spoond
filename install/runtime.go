@@ -1,7 +1,6 @@
 // The runtime phase: the E2B substrate's binaries, pinned artifacts and
-// orchestrator configuration. It replaces deploy/e2b/host-setup.sh
-// step 5 (the artifacts) and step 7 (the host firewall) and
-// docs/install.md section 2 (the orchestrator configuration) — the
+// orchestrator configuration (it replaced 3.x's host-setup.sh and the
+// manual orchestrator configuration) — the
 // plan's runtime row (docs/plans/2026-10-16-4.0-install.md).
 package install
 
@@ -155,8 +154,7 @@ func (httpHealth) Check(ctx context.Context, url string) error {
 	return nil
 }
 
-// artifactBucket is the base of every pinned URL (the B= variable of
-// deploy/e2b/host-setup.sh).
+// artifactBucket is the base of every pinned URL: E2B's public bucket.
 const artifactBucket = "https://storage.googleapis.com/e2b-artifact-binaries"
 
 // pinnedArtifact is one artifact the orchestrator starts a sandbox
@@ -170,10 +168,10 @@ type pinnedArtifact struct {
 }
 
 // pinned is the pin table: the exact URLs, paths, modes and sha256 of
-// deploy/e2b/host-setup.sh (the pinned Firecracker, guest kernel and
-// busybox). TestPinnedTableMatchesHostSetup reads that script and
-// requires every row to match it, so the table and the operator
-// script cannot drift apart. Order is install order.
+// the pinned Firecracker, guest kernel and busybox, which the native
+// install and the Docker image build both install from. spoond doctor
+// checks the installed files against the same table. Order is install
+// order.
 var pinned = []pinnedArtifact{
 	{
 		url:    artifactBucket + "/firecrackers/v1.14-0.2.0/amd64/firecracker",
@@ -193,6 +191,22 @@ var pinned = []pinnedArtifact{
 		mode:   0o755,
 		sha256: "d7cce939adb09a41a22a5f846d22ba8d576b38dbb2b46a5c77a3a3e27ec52520",
 	},
+}
+
+// Pin is one pinned artifact's installed path and SHA-256.
+type Pin struct {
+	Path   string
+	SHA256 string
+}
+
+// Pins returns the pin table's paths and sums: spoond doctor checks the
+// installed files against them.
+func Pins() []Pin {
+	out := make([]Pin, 0, len(pinned))
+	for _, art := range pinned {
+		out = append(out, Pin{Path: art.path, SHA256: art.sha256})
+	}
+	return out
 }
 
 // runtimeState is the phase: its two network surfaces are pluggable so

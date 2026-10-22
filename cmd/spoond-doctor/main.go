@@ -39,6 +39,8 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/jrimmer/spoond/v3/install"
+
 	"github.com/jrimmer/spoond/v3/internal/tlsfiles"
 	"github.com/jrimmer/spoond/v3/notify"
 	"github.com/jrimmer/spoond/v3/settings"
@@ -54,19 +56,10 @@ type checkResult struct {
 	detail string
 }
 
-// doctorArtifacts are the E2B artifacts U04 installs on the host, with the
-// SHA-256 values they must have.
-var doctorArtifacts = []struct {
-	path string
-	sha  string
-}{
-	{"/fc-versions/v1.14-0.2.0/amd64/firecracker",
-		"ef22aec7cbffcf6cc44a8436a4db79f9e6fe5c52218c81af321dd20f10ad6e5d"},
-	{"/fc-kernels/vmlinux-6.1.177_5008931/amd64/vmlinux.bin",
-		"9191ced12d24e6e381753a7ab12ec850877524d453eae75c20aeb176f3b5ad05"},
-	{"/fc-busybox/1.36.1/amd64/busybox",
-		"d7cce939adb09a41a22a5f846d22ba8d576b38dbb2b46a5c77a3a3e27ec52520"},
-}
+// doctorArtifacts are the pinned E2B artifacts with the SHA-256 values
+// they must have: the table spoond install and the Docker image install
+// from.
+var doctorArtifacts = install.Pins()
 
 func Main(args []string) int {
 	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
@@ -635,13 +628,13 @@ func checkArtifacts() []checkResult {
 	var bad []string
 	ok := 0
 	for _, a := range doctorArtifacts {
-		got, err := sha256File(a.path)
+		got, err := sha256File(a.Path)
 		if err != nil {
-			bad = append(bad, fmt.Sprintf("%s: %v", a.path, err))
+			bad = append(bad, fmt.Sprintf("%s: %v", a.Path, err))
 			continue
 		}
-		if got != a.sha {
-			bad = append(bad, fmt.Sprintf("%s: sha256 %s, want %s", a.path, got, a.sha))
+		if got != a.SHA256 {
+			bad = append(bad, fmt.Sprintf("%s: sha256 %s, want %s", a.Path, got, a.SHA256))
 			continue
 		}
 		ok++

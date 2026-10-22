@@ -1,8 +1,7 @@
 // The host phase's store, Docker and AppArmor steps (hostOrder rows
 // "store", "docker", "apparmor"): the snapshot store on its ZFS pool
 // or an existing directory, Docker ordered after the store mount with
-// the local registry, and the AppArmor Unix-socket check. The manual
-// counterparts are steps 4 and 9 of deploy/e2b/host-setup.sh.
+// the local registry, and the AppArmor Unix-socket check.
 package install
 
 import (

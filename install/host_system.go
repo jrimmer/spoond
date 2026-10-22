@@ -1,6 +1,6 @@
 // The host phase's system steps: packages, kernel modules, the nbd
-// udev rule, hugepages and the legacy iptables backend — the parts of
-// deploy/e2b/host-setup.sh that have no spoond state of their own.
+// udev rule, hugepages and the legacy iptables backend: the host
+// settings that hold no spoond state of their own.
 // Every write is compared before it lands, every command goes through
 // the Env (query runs in a dry run too, exec does not), and a failure
 // carries the fix with no phase prefix.
@@ -208,7 +208,7 @@ func nbdLoaded(env *Env) (int, error) {
 }
 
 // nbdUdevRule gives every nbd device to group disk, mode 0660, so the
-// leases' users can open them; host-setup.sh ships the same rule.
+// leases' users can open them.
 const nbdUdevRule = `KERNEL=="nbd*", GROUP="disk", MODE="0660"
 `
 
