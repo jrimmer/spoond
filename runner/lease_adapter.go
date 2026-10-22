@@ -107,6 +107,27 @@ func (c *HTTPLeaseClient) WithLabel(label string) {
 	c.label = label
 }
 
+// SnapshotSourcePrefix marks an image-map value (IMAGE_MAP,
+// DEFAULT_IMAGE) that names a named snapshot instead of an image (scout
+// #24): "snapshot:NAME[@V]" starts the job from a snapshot the runner's
+// own identity saved, and "snapshot:OWNER:NAME[@V]" from another user's,
+// through a grant that user gave the runner's identity (#141). Snapshot
+// names never contain a colon, so the first one splits off the owner.
+const SnapshotSourcePrefix = "snapshot:"
+
+// leaseSource is the create body's source fields for an image-map
+// value: {"image": v}, or the snapshot (and owner) it names.
+func leaseSource(image string) map[string]any {
+	ref, ok := strings.CutPrefix(image, SnapshotSourcePrefix)
+	if !ok {
+		return map[string]any{"image": image}
+	}
+	if owner, name, ok := strings.Cut(ref, ":"); ok {
+		return map[string]any{"snapshot": name, "snapshot_owner": owner}
+	}
+	return map[string]any{"snapshot": ref}
+}
+
 // Create grants a new sandbox lease.
 //
 // It sends the pending label (WithLabel) as the create body's
@@ -123,13 +144,15 @@ func (c *HTTPLeaseClient) WithLabel(label string) {
 // job's own timeout — a capacity refusal must never fail a job, but a
 // job that has run out of time must stop waiting. A 429 box_full is
 // waited out the same way. Any other refusal (bad request, auth,
-// unknown image, quota) is returned at once.
+// unknown image, quota) is returned at once. image is an image tag, or a
+// named snapshot spelled "snapshot:..." (SnapshotSourcePrefix).
 func (c *HTTPLeaseClient) Create(ctx context.Context, image string, ttl int) (string, error) {
 	c.labelMu.Lock()
 	label := c.label
 	c.label = ""
 	c.labelMu.Unlock()
-	payload := map[string]any{"image": image, "ttl": ttl, "comment": label}
+	payload := leaseSource(image)
+	payload["ttl"], payload["comment"] = ttl, label
 	if c.NetPolicy != "" {
 		payload["network_policy"] = c.NetPolicy
 	}

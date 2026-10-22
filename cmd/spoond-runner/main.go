@@ -16,8 +16,13 @@
 //	LEASE_TOKEN        Lease API bearer token (required; or
 //	                   LEASE_TOKEN_FILE, same file rules)
 //	IMAGE_MAP          runs-on label -> image tag, comma-separated
-//	                   (e.g. "ubuntu-latest=py-base")
-//	DEFAULT_IMAGE      Image tag when no label maps (default "py-base")
+//	                   (e.g. "ubuntu-latest=py-base"); a value
+//	                   "snapshot:NAME[@V]" starts the job from the
+//	                   runner identity's named snapshot instead, and
+//	                   "snapshot:OWNER:NAME[@V]" from another user's
+//	                   through a grant (e.g. "scout-web=snapshot:scout/node24")
+//	DEFAULT_IMAGE      Image tag (or "snapshot:...") when no label maps
+//	                   (default "py-base")
 //	REPO_BASE_URL      Git host base URL for actions/checkout clones
 //	                   (no default; checkout fails without it)
 //	LEASE_TTL          Sandbox lease TTL seconds (default 600)

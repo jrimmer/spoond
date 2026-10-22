@@ -554,3 +554,43 @@ func TestHTTPLeaseClientCreateQuota429NotRetried(t *testing.T) {
 		t.Fatalf("Create err %v after %d attempts; want one failed attempt", err, attempts)
 	}
 }
+
+// TestHTTPLeaseClientCreateFromSnapshot: an image-map value spelled
+// "snapshot:..." creates the lease from that named snapshot (scout #24),
+// with the owner when one is named, and sends no image; a plain value
+// still sends the image and nothing else.
+func TestHTTPLeaseClientCreateFromSnapshot(t *testing.T) {
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body = nil
+		json.NewDecoder(r.Body).Decode(&body)
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte(`{"id":"sb-1"}`))
+	}))
+	defer srv.Close()
+	c := NewHTTPLeaseClient(srv.URL, "tok")
+
+	for _, tc := range []struct {
+		in                     string
+		image, snapshot, owner string
+	}{
+		{in: "py-base", image: "py-base"},
+		{in: "snapshot:scout/node24", snapshot: "scout/node24"},
+		{in: "snapshot:yaml@3", snapshot: "yaml@3"},
+		{in: "snapshot:scout:scout/node24", snapshot: "scout/node24", owner: "scout"},
+	} {
+		if _, err := c.Create(context.Background(), tc.in, 600); err != nil {
+			t.Fatalf("Create(%q): %v", tc.in, err)
+		}
+		str := func(k string) string { s, _ := body[k].(string); return s }
+		if str("image") != tc.image || str("snapshot") != tc.snapshot || str("snapshot_owner") != tc.owner {
+			t.Errorf("Create(%q) body = %v, want image %q snapshot %q owner %q", tc.in, body, tc.image, tc.snapshot, tc.owner)
+		}
+		if _, ok := body["image"]; ok && tc.image == "" {
+			t.Errorf("Create(%q) sent an image: %v", tc.in, body)
+		}
+		if got, _ := body["ttl"].(float64); int(got) != 600 {
+			t.Errorf("Create(%q) ttl = %v", tc.in, body["ttl"])
+		}
+	}
+}
