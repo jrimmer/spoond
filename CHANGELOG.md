@@ -10,8 +10,39 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Added
+
+- **`spoond install` (4.0).** One command installs a Debian 13 host:
+  `check` (root, KVM, memory, distribution and kernel, free ports, the
+  store's free space), `host` (packages, the nbd/tun/kvm modules and
+  udev rule, sysctls, hugepages sized `auto` or by count and set on the
+  kernel command line, the legacy iptables backend, the snapshot store
+  on a directory or a ZFS pool, Docker and the local registry),
+  `runtime` (the orchestrator and envd from the release's
+  `spoond-runtime` tarball checked against `SHA256SUMS`, the pinned
+  Firecracker, kernel and busybox, the orchestrator's configuration,
+  token seed, firewall and unit), `spoond` (the binary, every secret,
+  the env files, TLS from a given pair or self-signed, the units, the
+  first admin user), `images` (the base catalog, pulled from the
+  release's published base images when present) and `doctor`. Every
+  phase is idempotent, never overwrites a secret, and `--dry-run`
+  changes nothing. See `docs/install.md`.
+- **The Docker install (4.0).** `deploy/docker/` has the image (the
+  backend, gateway, dashboard and orchestrator, with the same pinned
+  artifacts as a native install) and a `compose.yaml`: `prepare` writes
+  the host's kernel settings, `init` the configuration and secrets
+  under `./config`, and `registry`, `orchestrator` (drained before it
+  stops), `spoond`, `gateway` and `dash` run the stack.
+- **Release artifacts.** Each release attaches the `spoond` binary
+  tarball, the `spoond-runtime` tarball and `SHA256SUMS`
+  (`deploy/release/build-runtime.sh`, `build-release.sh`;
+  `docs/runbooks/release.md`).
+
 ### Removed
 
+- **`deploy/e2b/host-setup.sh` and `docs/setup.md` (4.0).** `spoond
+  install` replaces the script; `docs/install.md` now holds the
+  configuration reference `setup.md` had.
 - **The `/api/sandboxes` path alias (4.0, spoond-4-0-s10).** Every
   lease route now registers under `/api/leases` and the rewrite that
   served the old registrations under the alias is gone. A request to
