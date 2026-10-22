@@ -453,11 +453,12 @@ func legacyPath(name string) string {
 // hostIptables points the iptables alternatives at the legacy backend
 // (iptables and ip6tables both). The query decides; the set runs only
 // when the value differs, so a rerun is two queries and a kept row.
-// With --container the step is skipped: the orchestrator image uses
-// the legacy backend itself, so the host's choice does not matter.
+// With --container the step is skipped: the host's Docker keeps its
+// backend, and the orchestrator container follows it (its FORWARD
+// rules must sit in the chain whose DROP policy Docker set).
 func hostIptables(ctx context.Context, env *Env, r *Reporter, st *hostState) error {
 	if env.Opt.Container {
-		r.Add(Skipped, "iptables", "--container: the orchestrator image uses the legacy backend itself")
+		r.Add(Skipped, "iptables", "--container: the orchestrator container follows the host Docker's backend")
 		return nil
 	}
 	for _, name := range []string{"iptables", "ip6tables"} {

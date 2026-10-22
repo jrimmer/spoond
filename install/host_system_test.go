@@ -679,7 +679,7 @@ func TestHostIptablesContainerSkipsAlternatives(t *testing.T) {
 	if len(r.Items()) != 1 || r.Items()[0].Result != Skipped {
 		t.Fatalf("rows = %+v, want one skipped row", r.Items())
 	}
-	if !strings.Contains(r.Items()[0].Note, "the orchestrator image uses the legacy backend itself") {
+	if !strings.Contains(r.Items()[0].Note, "the orchestrator container follows the host Docker's backend") {
 		t.Errorf("note %q does not carry the reason", r.Items()[0].Note)
 	}
 }
