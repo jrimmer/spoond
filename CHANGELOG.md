@@ -10,6 +10,18 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+## [3.13.1] - 2026-10-21
+
+### Fixed
+
+- **Host pressure pauses the unreachable-guest clock (spoond #159).**
+  3.13.0 recovered a guest silent for `GUEST_UNREACHABLE_SECS` as long as
+  one other lease answered, but on an overloaded host one guest can stall
+  far longer than its neighbours and still be working. Silence now counts
+  only while the host is under the saturation gate's targets
+  (`SATURATION_IO_FULL_PCT`, `SATURATION_CPU_SOME_PCT`), and nothing is
+  recovered while it is over them. The backend logs each paused clock.
+
 ## [3.13.0] - 2026-10-21
 
 ### Added
