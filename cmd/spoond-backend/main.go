@@ -897,6 +897,10 @@ func Main(args []string) int {
 	// block of each running lease's root device with O_DIRECT, and recover a
 	// guest whose disk answers I/O errors like a crash. 0 disables it.
 	svc.SetRootfsProbe(envIntOr("ROOTFS_PROBE_SECS", api.DefaultRootfsProbeSecs))
+	// A guest that answers that probe only with timeouts or "unavailable"
+	// for GUEST_UNREACHABLE_SECS, while other leases answer, is recovered
+	// the same way (#159). 0 disables it.
+	svc.SetGuestUnreachable(envIntOr("GUEST_UNREACHABLE_SECS", api.DefaultGuestUnreachableSecs))
 
 	// LLM gateway model map: "exe.dev-id=upstream-id,exe.dev-id2=upstream2".
 	// Shelley sends exe.dev catalog ids; the gateway rewrites them to the

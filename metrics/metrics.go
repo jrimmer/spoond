@@ -171,6 +171,7 @@ type BackendMetrics struct {
 	// disk and is recovered like a crash.
 	RootfsProbeFailuresTotal prometheus.Counter // probe failures (transport, timeout or EIO)
 	RootfsDeadTotal          prometheus.Counter // leases declared dead after consecutive probe failures
+	GuestUnreachableTotal    prometheus.Counter // leases recovered after their guest was unreachable past the cutoff
 
 	// Deprecation (4.0 groundwork): requests served through a surface
 	// the 4.0 release removes. kind is `sandboxes_alias` (the
@@ -558,6 +559,10 @@ func NewBackendMetrics() *BackendMetrics {
 		Namespace: "spoond", Name: "rootfs_dead_total",
 		Help: "Leases declared dead because their root disk was unreadable.",
 	})
+	m.GuestUnreachableTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "spoond", Name: "guest_unreachable_total",
+		Help: "Leases recovered because their guest stopped answering while other leases answered.",
+	})
 
 	// Deprecation (4.0 groundwork): one counter, the two removal
 	// candidates as kinds. The backend sets the label; see
@@ -629,7 +634,7 @@ func NewBackendMetrics() *BackendMetrics {
 		m.IdleSuspendsTotal,
 		m.GuestDialsActive, m.GuestDialsTotal,
 		m.JobsRunning, m.JobsExitedTotal,
-		m.RootfsProbeFailuresTotal, m.RootfsDeadTotal,
+		m.RootfsProbeFailuresTotal, m.RootfsDeadTotal, m.GuestUnreachableTotal,
 		m.DeprecatedReqs,
 		m.LeasesByState, m.LeasesByImage, m.NodeRunning, m.NodeHugepagesFree, m.NodeWork,
 		m.CreateDur, m.CapacityRej,
