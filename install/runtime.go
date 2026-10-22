@@ -256,6 +256,14 @@ func (p *runtimeState) run(ctx context.Context, env *Env) ([]Item, error) {
 	if err := mkdirMode(r, env, fcVMPath, 0o755); err != nil {
 		return r.Items(), err
 	}
+	// --artifacts-only: the Docker image build stops here. The
+	// config, the seed and the firewall belong to the running stack
+	// (the init service writes them with --container), and the image
+	// has no systemd.
+	if env.Opt.ArtifactsOnly {
+		r.Add(Skipped, "config, units, orchestrator start", "--artifacts-only: the image holds the binaries and pinned artifacts; `spoond install runtime --container` writes the config")
+		return r.Items(), nil
+	}
 	for _, c := range operatorConfigs() {
 		if err := installOperatorConfig(r, env, c); err != nil {
 			return r.Items(), err

@@ -1753,3 +1753,49 @@ func TestRuntimeContainerDevBuildSucceeds(t *testing.T) {
 		t.Errorf("ran %v, fetched %v", runner.calls, fetcher.urls)
 	}
 }
+
+// TestRuntimeArtifactsOnly: --artifacts-only (the Docker image build)
+// installs the binaries, the pinned artifacts and /fc-vm, then stops:
+// no config, no seed, no firewall, no unit, no command.
+func TestRuntimeArtifactsOnly(t *testing.T) {
+	env, _, runner, _, _ := runtimeEnv(t)
+	satisfyPins(t, env)
+	withTarball(t, env)
+	env.Opt.ArtifactsOnly = true
+
+	items, text, err := runRuntime(t, env)
+	if err != nil {
+		t.Fatalf("artifacts-only run: %v\n%s", err, text)
+	}
+	for _, path := range []string{orchestratorBinPath, envdBinPath, runtimeStampPath, fcVMPath} {
+		if _, err := os.Stat(env.Resolve(path)); err != nil {
+			t.Errorf("artifacts-only did not install %s: %v", path, err)
+		}
+	}
+	for _, art := range pinned {
+		if _, err := os.Stat(env.Resolve(art.path)); err != nil {
+			t.Errorf("artifacts-only did not keep the pinned %s: %v", art.path, err)
+		}
+	}
+	for _, path := range []string{orchestratorEnvPath, flagsJSONPath, tokenSeedPath, guardNftPath, guardUnitPath, orchestratorUnitPath} {
+		mustNotExist(t, env, path)
+	}
+	row, ok := runtimeRows(t, items)["config, units, orchestrator start"]
+	if !ok || row.Result != Skipped {
+		t.Errorf("no skipped row for the config and units:\n%s", text)
+	}
+	if len(runner.calls) != 0 {
+		t.Errorf("artifacts-only ran commands: %v", runner.calls)
+	}
+}
+
+// TestOptionsArtifactsOnlyNotWithContainer: the image build and the
+// running stack are different stages.
+func TestOptionsArtifactsOnlyNotWithContainer(t *testing.T) {
+	if err := (Options{ArtifactsOnly: true, Container: true}).Validate(); err == nil {
+		t.Error("--artifacts-only --container validated")
+	}
+	if err := (Options{ArtifactsOnly: true}).Validate(); err != nil {
+		t.Errorf("--artifacts-only alone: %v", err)
+	}
+}

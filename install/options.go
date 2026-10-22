@@ -56,6 +56,10 @@ type Options struct {
 	// secrets and start nothing (--config-only).
 	Container  bool
 	ConfigOnly bool
+	// ArtifactsOnly makes the runtime phase install the binaries, the
+	// pinned artifacts and /fc-vm and nothing else: no config, no
+	// units, no command (--artifacts-only; the Docker image build).
+	ArtifactsOnly bool
 }
 
 // Defaults.
@@ -113,6 +117,9 @@ func (o Options) Validate() error {
 	}
 	if o.ConfigOnly && !o.Container {
 		return errors.New("--config-only needs --container")
+	}
+	if o.ArtifactsOnly && o.Container {
+		return errors.New("--artifacts-only and --container go to different stages: the image build, then the running stack")
 	}
 	return nil
 }

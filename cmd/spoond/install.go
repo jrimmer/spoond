@@ -91,6 +91,7 @@ func installMain(args []string) int {
 	fs.StringVar(&opt.RunnerTokenFile, "runner-token-file", "", "file holding the runner registration token")
 	fs.BoolVar(&opt.Container, "container", false, "run from inside the Docker image")
 	fs.BoolVar(&opt.ConfigOnly, "config-only", false, "with --container: write config, start nothing")
+	fs.BoolVar(&opt.ArtifactsOnly, "artifacts-only", false, "runtime phase: install the binaries and pinned artifacts only (the Docker image build)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
