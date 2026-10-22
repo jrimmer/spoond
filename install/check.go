@@ -55,6 +55,30 @@ const (
 // local image registry, and the orchestrator's proxy and gRPC ports.
 var requiredPorts = []string{"8890", "8891", "2222", "8893", "5000", "5007", "5008"}
 
+// ownListeners are the processes of a spoond install that hold its
+// ports: a rerun finds them listening and keeps the row.
+var ownListeners = map[string]bool{"spoond": true, "orchestrator": true, "docker-proxy": true}
+
+// ownListener names the spoond process listening on port ("" when the
+// listener is someone else's or cannot be read), from `ss -Hltnp`'s
+// users:(("name",pid=...)) field. docker-proxy counts only on the
+// registry's port.
+func ownListener(ctx context.Context, env *Env, port string) string {
+	out, err := env.query(ctx, "ss", "-Hltnp", "sport = :"+port)
+	if err != nil {
+		return ""
+	}
+	_, rest, ok := strings.Cut(string(out), `users:(("`)
+	if !ok {
+		return ""
+	}
+	name, _, _ := strings.Cut(rest, `"`)
+	if !ownListeners[name] || (name == "docker-proxy" && port != "5000") {
+		return ""
+	}
+	return name
+}
+
 // Prober isolates the port probe. ListenOK reports whether port is
 // free; an error is a probe failure (not a busy port). The production
 // implementation is sysProber; Env.Prober replaces it in tests.
@@ -204,6 +228,9 @@ func checkPhase(ctx context.Context, env *Env) ([]Item, error) {
 		case err != nil:
 			r.Add(Failed, "port :"+port, "check failed: "+err.Error())
 			return r.Items(), err
+		case !free && ownListener(ctx, env, port) != "":
+			// A rerun: spoond's own service holds it.
+			r.Add(Kept, "port :"+port, "in use by spoond's own "+ownListener(ctx, env, port))
 		case !free:
 			note := "in use — stop the service that binds it, or move spoond off it in the unit env (BIND_ADDR, PROXY_ADDR, GATEWAY_ADDR, DASH_ADDR, the registry publish port, E2B_GRPC_ADDR, E2B_PROXY_URL) before installing"
 			r.Add(Failed, "port :"+port, note)

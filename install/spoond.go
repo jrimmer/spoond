@@ -173,9 +173,15 @@ func spoondPhase(ctx context.Context, env *Env) ([]Item, error) {
 	}
 
 	// ---- units (item 10) -------------------------------------------
-	unitsChanged, err := spoondUnitsWrite(env, r, dd.hostName)
-	if err != nil {
-		return r.Items(), err
+	// Under --container compose runs the services: no unit files.
+	unitsChanged := false
+	if env.Opt.Container {
+		r.Add(Skipped, "systemd units", "--container: docker compose runs the services")
+	} else {
+		unitsChanged, err = spoondUnitsWrite(env, r, dd.hostName)
+		if err != nil {
+			return r.Items(), err
+		}
 	}
 	if unitsChanged {
 		if err := env.exec(ctx, "systemctl", "daemon-reload"); err != nil {

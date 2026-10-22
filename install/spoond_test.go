@@ -903,10 +903,16 @@ func TestSpoondContainerSkipsBinary(t *testing.T) {
 	if !ok || row.Result != Skipped {
 		t.Errorf("the binary row = %+v, want skipped", row)
 	}
-	// enable --now is skipped too (docker compose runs the services).
+	// No unit files, no systemctl at all (docker compose runs the
+	// services, and the image has no systemd).
 	for _, call := range run.calls {
-		if strings.Contains(call, "systemctl enable") {
-			t.Errorf("enable --now ran under --container: %s", call)
+		if strings.HasPrefix(call, "systemctl") {
+			t.Errorf("systemctl ran under --container: %s", call)
+		}
+	}
+	for _, u := range spoondUnits {
+		if _, err := os.Stat(env.Resolve(u.path)); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("unit %s written under --container", u.path)
 		}
 	}
 	// ... and so is the restart; health still waited on.

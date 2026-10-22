@@ -661,3 +661,33 @@ func TestCheckStopsAtFirstFailure(t *testing.T) {
 	}
 	firstFailedRow(t, items) // exactly one failed row, the memory one
 }
+
+// TestCheckPortHeldBySpoond: a rerun finds spoond's own services on
+// their ports and keeps the rows; someone else's listener still fails.
+func TestCheckPortHeldBySpoond(t *testing.T) {
+	env, _, runner := testEnv(t)
+	writeCheckTree(t, env, true, 128, "debian", "13", "6.1.0-13-amd64")
+	busy := map[string]bool{}
+	for _, p := range requiredPorts {
+		busy[p] = true
+	}
+	swapProbes(t, env, fakeProber{busy: busy}, fakeSpacer{free: 200 << 30})
+	owner := map[string]string{"8890": "spoond", "8891": "spoond", "2222": "spoond", "8893": "spoond", "5000": "docker-proxy", "5007": "orchestrator", "5008": "orchestrator"}
+	for p, name := range owner {
+		addReply(runner, "ss -Hltnp sport = :"+p, `LISTEN 0 4096 *:`+p+` *:* users:(("`+name+`",pid=6549,fd=14))`+"\n")
+	}
+	items, text, err := runCheck(t, env)
+	if err != nil {
+		t.Fatalf("rerun over spoond's own listeners: %v\n%s", err, text)
+	}
+	for _, it := range items {
+		if strings.HasPrefix(it.Name, "port :") && it.Result != Kept {
+			t.Errorf("row %+v, want kept", it)
+		}
+	}
+
+	addReply(runner, "ss -Hltnp sport = :8893", `LISTEN 0 4096 *:8893 *:* users:(("nginx",pid=1,fd=6))`+"\n")
+	if _, _, err := runCheck(t, env); err == nil {
+		t.Error("someone else's listener on :8893 passed the check")
+	}
+}
