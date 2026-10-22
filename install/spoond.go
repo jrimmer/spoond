@@ -103,6 +103,10 @@ var spoondUnits = []struct {
 	{"e2b/e2b-orchestrator.service", orchestratorUnitPath},
 }
 
+// shippedGatewayHost is the placeholder host the shipped gateway unit
+// advertises; the phase writes the unit with --host-name instead.
+const shippedGatewayHost = "sandbox.example.com"
+
 // spoondDirs is item 2: the directories the phase needs, all 0700.
 var spoondDirs = []string{"/etc/spoond", "/etc/spoond/tls", "/var/lib/spoond", "/var/lib/spoond/backups"}
 
@@ -167,7 +171,7 @@ func spoondPhase(ctx context.Context, env *Env) ([]Item, error) {
 	}
 
 	// ---- units (item 10) -------------------------------------------
-	unitsChanged, err := spoondUnitsWrite(env, r)
+	unitsChanged, err := spoondUnitsWrite(env, r, dd.hostName)
 	if err != nil {
 		return r.Items(), err
 	}
@@ -219,19 +223,22 @@ func spoondPhase(ctx context.Context, env *Env) ([]Item, error) {
 
 // spoondUnitsWrite installs the shipped units through writeFile (plain
 // files: comparable and correctable) with every "/forkdcache/e2b"
-// replaced by the store dir, and answers whether any of them changed (a
+// replaced by the store dir and the gateway's advertised host by
+// hostName, and answers whether any of them changed (a
 // dry run reports the planned changes as changed rows too: writeFile's
 // rows are the verdict). All paths go through env.Resolve (item 10).
-func spoondUnitsWrite(env *Env, r *Reporter) (bool, error) {
+func spoondUnitsWrite(env *Env, r *Reporter, hostName string) (bool, error) {
 	changed := false
 	for _, u := range spoondUnits {
 		raw, err := deploy.Files.ReadFile(u.embed)
 		if err != nil {
 			return false, fmt.Errorf("shipped unit %s: %w", u.embed, err)
 		}
-		if err := env.writeFile(r, u.path,
-			[]byte(strings.ReplaceAll(string(raw), "/forkdcache/e2b", env.Opt.storeDir())),
-			0o644); err != nil {
+		unit := strings.ReplaceAll(string(raw), "/forkdcache/e2b", env.Opt.storeDir())
+		// The gateway unit's --gateway-host flag outranks the
+		// SPOOND_GATEWAY_HOST its env file carries: name this host.
+		unit = strings.ReplaceAll(unit, shippedGatewayHost, hostName)
+		if err := env.writeFile(r, u.path, []byte(unit), 0o644); err != nil {
 			return false, err
 		}
 		// writeFile reported the row; read its verdict back rather

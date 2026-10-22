@@ -1003,6 +1003,20 @@ func TestSpoondStoreDir(t *testing.T) {
 	_ = items
 }
 
+// TestSpoondGatewayHost: the installed gateway unit advertises
+// --host-name, not the shipped placeholder.
+func TestSpoondGatewayHost(t *testing.T) {
+	env, _, _, _ := spoondTestEnv(t)
+	env.Opt.HostName = "spoond.example.net"
+	if _, text, err := runSpoond(t, env); err != nil {
+		t.Fatalf("run: %v\n%s", err, text)
+	}
+	b, _ := read(t, env, "/etc/systemd/system/spoond-sshd-gateway.service")
+	if !strings.Contains(string(b), "--gateway-host spoond.example.net") || strings.Contains(string(b), shippedGatewayHost) {
+		t.Errorf("gateway unit does not advertise --host-name (%d bytes):\n%s", len(b), b)
+	}
+}
+
 // TestSpoondFirstUserPosted: the POST's body and headers exactly match
 // docs/install.md section 6.
 func TestSpoondFirstUserPosted(t *testing.T) {
