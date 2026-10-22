@@ -13,8 +13,8 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/jrimmer/spoond/v3/identity"
-	"github.com/jrimmer/spoond/v3/store"
+	"github.com/jrimmer/spoond/v4/identity"
+	"github.com/jrimmer/spoond/v4/store"
 )
 
 // TestUserDeleteIncompleteAnswers500AndRetryCompletes: when a cleanup

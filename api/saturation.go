@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jrimmer/spoond/v3/substrate"
+	"github.com/jrimmer/spoond/v4/substrate"
 )
 
 // The saturation gate (#136 stage 2). spoond admits by memory, but a box

@@ -7,8 +7,8 @@ import (
 
 	"connectrpc.com/connect"
 
-	"github.com/jrimmer/spoond/v3/substrate"
-	"github.com/jrimmer/spoond/v3/substrate/e2b/gen/envd/filesystem"
+	"github.com/jrimmer/spoond/v4/substrate"
+	"github.com/jrimmer/spoond/v4/substrate/e2b/gen/envd/filesystem"
 )
 
 func TestListDirRequestShape(t *testing.T) {

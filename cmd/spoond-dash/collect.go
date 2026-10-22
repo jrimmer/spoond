@@ -21,7 +21,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jrimmer/spoond/v3/runner"
+	"github.com/jrimmer/spoond/v4/runner"
 
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"

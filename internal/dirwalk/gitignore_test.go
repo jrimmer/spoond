@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jrimmer/spoond/v3/internal/gitignore"
+	"github.com/jrimmer/spoond/v4/internal/gitignore"
 )
 
 // compileOne compiles one pattern line for the match cases.

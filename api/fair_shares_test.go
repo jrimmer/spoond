@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrimmer/spoond/v3/identity"
-	"github.com/jrimmer/spoond/v3/store"
-	"github.com/jrimmer/spoond/v3/substrate"
+	"github.com/jrimmer/spoond/v4/identity"
+	"github.com/jrimmer/spoond/v4/store"
+	"github.com/jrimmer/spoond/v4/substrate"
 )
 
 // newFairShareService builds a Service with a known box: a 1024 MiB

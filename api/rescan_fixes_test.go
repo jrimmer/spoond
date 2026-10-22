@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jrimmer/spoond/v3/identity"
+	"github.com/jrimmer/spoond/v4/identity"
 )
 
 // secServer2 builds a server with an admin + jason (non-admin) and

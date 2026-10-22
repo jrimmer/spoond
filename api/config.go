@@ -5,7 +5,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/jrimmer/spoond/v3/settings"
+	"github.com/jrimmer/spoond/v4/settings"
 )
 
 // GET /api/admin/config (#137): what each setting is in this backend

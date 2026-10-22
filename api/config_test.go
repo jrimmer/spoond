@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrimmer/spoond/v3/settings"
+	"github.com/jrimmer/spoond/v4/settings"
 )
 
 // getAdminConfig is one GET /api/admin/config request with a bearer

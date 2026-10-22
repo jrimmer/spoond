@@ -5,7 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/jrimmer/spoond/v3/identity"
+	"github.com/jrimmer/spoond/v4/identity"
 )
 
 // newProxyAuthServer builds a Server with forward-auth enabled and two

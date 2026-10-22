@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jrimmer/spoond/v3/substrate"
+	"github.com/jrimmer/spoond/v4/substrate"
 )
 
 // nodeInfoCacheTTL bounds how long freeHugepageMiBLocked trusts its cached

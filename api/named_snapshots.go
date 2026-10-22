@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jrimmer/spoond/v3/store"
-	"github.com/jrimmer/spoond/v3/substrate"
+	"github.com/jrimmer/spoond/v4/store"
+	"github.com/jrimmer/spoond/v4/substrate"
 )
 
 // Named snapshots (2.7, #83): a checkpoint build with a stable name and a

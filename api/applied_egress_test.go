@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrimmer/spoond/v3/substrate"
+	"github.com/jrimmer/spoond/v4/substrate"
 )
 
 // appliedEgressHas reports whether a lease id has a memo entry.

@@ -15,7 +15,7 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/jrimmer/spoond/v3/settings"
+	"github.com/jrimmer/spoond/v4/settings"
 )
 
 // The `spoond config show` subcommand (#137): what each setting is,

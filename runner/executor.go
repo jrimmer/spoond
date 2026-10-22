@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jrimmer/spoond/v3/metrics"
+	"github.com/jrimmer/spoond/v4/metrics"
 )
 
 // DefaultJobTimeout is the default RUNNER_JOB_TIMEOUT (L4): it bounds

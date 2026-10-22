@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/jrimmer/spoond/v3/identity"
+	"github.com/jrimmer/spoond/v4/identity"
 )
 
 // UserView is the JSON shape of a user in API responses. Token hashes are

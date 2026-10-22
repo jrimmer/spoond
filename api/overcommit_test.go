@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrimmer/spoond/v3/substrate"
+	"github.com/jrimmer/spoond/v4/substrate"
 )
 
 // The overcommit cap (MEMORY_OVERCOMMIT, owner 2026-10-14): free-page

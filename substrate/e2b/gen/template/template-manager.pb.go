@@ -7,7 +7,7 @@
 package template_manager
 
 import (
-	orchestrator "github.com/jrimmer/spoond/v3/substrate/e2b/gen/orchestrator"
+	orchestrator "github.com/jrimmer/spoond/v4/substrate/e2b/gen/orchestrator"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	emptypb "google.golang.org/protobuf/types/known/emptypb"

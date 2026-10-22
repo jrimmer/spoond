@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrimmer/spoond/v3/store"
-	"github.com/jrimmer/spoond/v3/substrate"
+	"github.com/jrimmer/spoond/v4/store"
+	"github.com/jrimmer/spoond/v4/substrate"
 )
 
 // Warm-pool tests for the overcommit cap and the low-memory floor

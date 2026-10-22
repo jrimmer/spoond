@@ -21,7 +21,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jrimmer/spoond/v3/deploy"
+	"github.com/jrimmer/spoond/v4/deploy"
 )
 
 // What the phase writes and creates, every path resolved under

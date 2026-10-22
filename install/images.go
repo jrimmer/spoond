@@ -1,6 +1,6 @@
 // The images phase: the image catalog (docs/plans/2026-10-16-4.0-install.md,
 // the `images` row). It writes the embedded build context
-// (github.com/jrimmer/spoond/v3/images) to /var/lib/spoond/images, picks
+// (github.com/jrimmer/spoond/v4/images) to /var/lib/spoond/images, picks
 // the images the install wants from --images, asks the installed binary
 // which of them already have a current build, and runs one
 // `spoond images build` per missing image. The build's environment
@@ -21,7 +21,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/jrimmer/spoond/v3/images"
+	"github.com/jrimmer/spoond/v4/images"
 )
 
 func init() { Phases[PhaseImages] = imagesPhase }

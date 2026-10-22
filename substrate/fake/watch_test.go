@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrimmer/spoond/v3/substrate"
+	"github.com/jrimmer/spoond/v4/substrate"
 )
 
 // watchCtx returns a watch context the test can cancel, with some slack

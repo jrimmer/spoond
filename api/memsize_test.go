@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/jrimmer/spoond/v3/sizes"
+	"github.com/jrimmer/spoond/v4/sizes"
 )
 
 // seedMemEntries records n fresh samples of usedBytes for lease id on

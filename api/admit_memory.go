@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jrimmer/spoond/v3/substrate"
+	"github.com/jrimmer/spoond/v4/substrate"
 )
 
 // admitMemory admits memoryMB of guest memory for owner against the one

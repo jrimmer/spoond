@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrimmer/spoond/v3/sizes"
-	"github.com/jrimmer/spoond/v3/store"
-	"github.com/jrimmer/spoond/v3/substrate/e2b"
+	"github.com/jrimmer/spoond/v4/sizes"
+	"github.com/jrimmer/spoond/v4/store"
+	"github.com/jrimmer/spoond/v4/substrate/e2b"
 )
 
 // TestEffectiveMinMemoryMB: the manifest's min_memory_mb wins; unset,

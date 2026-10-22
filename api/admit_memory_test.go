@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrimmer/spoond/v3/substrate"
+	"github.com/jrimmer/spoond/v4/substrate"
 )
 
 // Tests for the admission undo (spoond-ljv2): a create or resume that

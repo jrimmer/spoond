@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/jrimmer/spoond/v3/sizes"
+	"github.com/jrimmer/spoond/v4/sizes"
 )
 
 // Lease size advice from measured memory (#130 R1). Owners have been

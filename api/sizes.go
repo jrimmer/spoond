@@ -7,8 +7,8 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/jrimmer/spoond/v3/sizes"
-	"github.com/jrimmer/spoond/v3/store"
+	"github.com/jrimmer/spoond/v4/sizes"
+	"github.com/jrimmer/spoond/v4/store"
 )
 
 // DefaultMaxLeaseMemoryMB is MAX_LEASE_MEMORY_MB when unset: the most

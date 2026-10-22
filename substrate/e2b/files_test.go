@@ -16,11 +16,11 @@ import (
 
 	"connectrpc.com/connect"
 
-	"github.com/jrimmer/spoond/v3/substrate"
-	"github.com/jrimmer/spoond/v3/substrate/e2b/gen/envd/filesystem"
-	"github.com/jrimmer/spoond/v3/substrate/e2b/gen/envd/filesystem/filesystemconnect"
-	"github.com/jrimmer/spoond/v3/substrate/e2b/gen/envd/process"
-	"github.com/jrimmer/spoond/v3/substrate/e2b/gen/envd/process/processconnect"
+	"github.com/jrimmer/spoond/v4/substrate"
+	"github.com/jrimmer/spoond/v4/substrate/e2b/gen/envd/filesystem"
+	"github.com/jrimmer/spoond/v4/substrate/e2b/gen/envd/filesystem/filesystemconnect"
+	"github.com/jrimmer/spoond/v4/substrate/e2b/gen/envd/process"
+	"github.com/jrimmer/spoond/v4/substrate/e2b/gen/envd/process/processconnect"
 )
 
 const filesSandboxID = "i0123456789abcdefghij"

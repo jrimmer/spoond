@@ -3,7 +3,7 @@
 package main
 
 import (
-	"github.com/jrimmer/spoond/v3/cmd/spoond-drain"
+	"github.com/jrimmer/spoond/v4/cmd/spoond-drain"
 )
 
 func init() {

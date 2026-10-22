@@ -13,9 +13,9 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/jrimmer/spoond/v3/identity"
-	"github.com/jrimmer/spoond/v3/substrate"
-	"github.com/jrimmer/spoond/v3/substrate/fake"
+	"github.com/jrimmer/spoond/v4/identity"
+	"github.com/jrimmer/spoond/v4/substrate"
+	"github.com/jrimmer/spoond/v4/substrate/fake"
 )
 
 // dialStream opens a WebSocket to /stream on ts with the given headers.

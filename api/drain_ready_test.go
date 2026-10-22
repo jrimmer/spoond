@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrimmer/spoond/v3/store"
-	"github.com/jrimmer/spoond/v3/substrate"
+	"github.com/jrimmer/spoond/v4/store"
+	"github.com/jrimmer/spoond/v4/substrate"
 )
 
 // spoond-638d: a drain --start resume must not run before a restarted

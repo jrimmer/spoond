@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jrimmer/spoond/v3/substrate"
+	"github.com/jrimmer/spoond/v4/substrate"
 )
 
 // secretsTestServer is a test server with the service and fake substrate

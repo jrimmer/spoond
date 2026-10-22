@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jrimmer/spoond/v3/substrate"
+	"github.com/jrimmer/spoond/v4/substrate"
 )
 
 // Lease secrets (#80): an optional {name: value} object on lease create

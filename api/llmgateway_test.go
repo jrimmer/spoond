@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrimmer/spoond/v3/identity"
+	"github.com/jrimmer/spoond/v4/identity"
 )
 
 // newLLMTestServer builds a Server with an LLM gateway backed by a fake

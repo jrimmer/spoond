@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrimmer/spoond/v3/api"
-	"github.com/jrimmer/spoond/v3/sizes"
+	"github.com/jrimmer/spoond/v4/api"
+	"github.com/jrimmer/spoond/v4/sizes"
 )
 
 // TestParseGuestDNS pins the startup validation of SPOOND_GUEST_DNS_ADDR:

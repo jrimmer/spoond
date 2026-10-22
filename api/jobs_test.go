@@ -17,9 +17,9 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/jrimmer/spoond/v3/store"
-	"github.com/jrimmer/spoond/v3/substrate"
-	"github.com/jrimmer/spoond/v3/substrate/fake"
+	"github.com/jrimmer/spoond/v4/store"
+	"github.com/jrimmer/spoond/v4/substrate"
+	"github.com/jrimmer/spoond/v4/substrate/fake"
 )
 
 // The tests in this file exercise background exec jobs (2.6, #135)

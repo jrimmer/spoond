@@ -23,7 +23,7 @@ package api
 import (
 	"context"
 
-	"github.com/jrimmer/spoond/v3/store"
+	"github.com/jrimmer/spoond/v4/store"
 )
 
 // writeLeaseHistoryStamps records one ended lease in the lease_history

@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrimmer/spoond/v3/store"
-	"github.com/jrimmer/spoond/v3/substrate"
+	"github.com/jrimmer/spoond/v4/store"
+	"github.com/jrimmer/spoond/v4/substrate"
 )
 
 // spoond-63a: every transition to lost stops the guest. These tests drive

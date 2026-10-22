@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jrimmer/spoond/v3/identity"
+	"github.com/jrimmer/spoond/v4/identity"
 )
 
 // newQuotaTestServer bootstraps admin (legacy token) + a user whose

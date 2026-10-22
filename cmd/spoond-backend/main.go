@@ -205,16 +205,16 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jrimmer/spoond/v3/api"
-	"github.com/jrimmer/spoond/v3/identity"
-	"github.com/jrimmer/spoond/v3/internal/tlsfiles"
-	"github.com/jrimmer/spoond/v3/metrics"
-	"github.com/jrimmer/spoond/v3/notify"
-	"github.com/jrimmer/spoond/v3/settings"
-	"github.com/jrimmer/spoond/v3/sizes"
-	"github.com/jrimmer/spoond/v3/store"
-	"github.com/jrimmer/spoond/v3/substrate"
-	"github.com/jrimmer/spoond/v3/substrate/e2b"
+	"github.com/jrimmer/spoond/v4/api"
+	"github.com/jrimmer/spoond/v4/identity"
+	"github.com/jrimmer/spoond/v4/internal/tlsfiles"
+	"github.com/jrimmer/spoond/v4/metrics"
+	"github.com/jrimmer/spoond/v4/notify"
+	"github.com/jrimmer/spoond/v4/settings"
+	"github.com/jrimmer/spoond/v4/sizes"
+	"github.com/jrimmer/spoond/v4/store"
+	"github.com/jrimmer/spoond/v4/substrate"
+	"github.com/jrimmer/spoond/v4/substrate/e2b"
 )
 
 func envOr(key, def string) string {

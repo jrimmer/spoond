@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrimmer/spoond/v3/grid"
+	"github.com/jrimmer/spoond/v4/grid"
 )
 
 // update is set by -update: golden files are rewritten instead of

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jrimmer/spoond/v3/substrate"
+	"github.com/jrimmer/spoond/v4/substrate"
 )
 
 // Rootfs liveness probe (spoond-5ca, incident 2026-10-06). The kernel NBD

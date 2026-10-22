@@ -30,7 +30,7 @@ import (
 
 	_ "modernc.org/sqlite" // register the "sqlite" database/sql driver
 
-	"github.com/jrimmer/spoond/v3/store"
+	"github.com/jrimmer/spoond/v4/store"
 )
 
 // seedPinnedRow is kept for the other pinned-row tests: it inserts a

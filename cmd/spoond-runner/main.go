@@ -66,9 +66,9 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
-	"github.com/jrimmer/spoond/v3/metrics"
-	"github.com/jrimmer/spoond/v3/runner"
-	"github.com/jrimmer/spoond/v3/settings"
+	"github.com/jrimmer/spoond/v4/metrics"
+	"github.com/jrimmer/spoond/v4/runner"
+	"github.com/jrimmer/spoond/v4/settings"
 )
 
 func envOr(key, def string) string {

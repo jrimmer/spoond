@@ -19,9 +19,9 @@ import (
 
 	"connectrpc.com/connect"
 
-	"github.com/jrimmer/spoond/v3/substrate"
-	"github.com/jrimmer/spoond/v3/substrate/e2b/gen/envd/filesystem"
-	"github.com/jrimmer/spoond/v3/substrate/e2b/gen/envd/filesystem/filesystemconnect"
+	"github.com/jrimmer/spoond/v4/substrate"
+	"github.com/jrimmer/spoond/v4/substrate/e2b/gen/envd/filesystem"
+	"github.com/jrimmer/spoond/v4/substrate/e2b/gen/envd/filesystem/filesystemconnect"
 )
 
 // WriteFile writes data to path via envd's HTTP POST /files (multipart).

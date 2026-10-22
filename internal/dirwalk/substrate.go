@@ -5,7 +5,7 @@ import (
 	"errors"
 	"path"
 
-	"github.com/jrimmer/spoond/v3/substrate"
+	"github.com/jrimmer/spoond/v4/substrate"
 )
 
 // Substrate adapts a substrate.Substrate's file methods (ListDir, Stat,

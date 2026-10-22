@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jrimmer/spoond/v3/internal/env"
+	"github.com/jrimmer/spoond/v4/internal/env"
 )
 
 // captureWarnings clears the once-per-process deprecation set and then

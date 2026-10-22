@@ -26,7 +26,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/jrimmer/spoond/v3/substrate"
+	"github.com/jrimmer/spoond/v4/substrate"
 )
 
 const (

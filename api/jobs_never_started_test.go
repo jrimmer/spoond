@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrimmer/spoond/v3/store"
-	"github.com/jrimmer/spoond/v3/substrate"
-	"github.com/jrimmer/spoond/v3/substrate/fake"
+	"github.com/jrimmer/spoond/v4/store"
+	"github.com/jrimmer/spoond/v4/substrate"
+	"github.com/jrimmer/spoond/v4/substrate/fake"
 )
 
 // TestJobNeverStartedMarkedLost: the start answers 202, then its stream

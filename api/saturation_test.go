@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrimmer/spoond/v3/substrate"
+	"github.com/jrimmer/spoond/v4/substrate"
 )
 
 // writePSI writes /proc/pressure-shaped io and cpu files with the given

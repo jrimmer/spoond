@@ -33,7 +33,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jrimmer/spoond/v3/settings"
+	"github.com/jrimmer/spoond/v4/settings"
 )
 
 // doc is the capability document's shape (api/capabilities.go); field

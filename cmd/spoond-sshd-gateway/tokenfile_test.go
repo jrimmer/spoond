@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jrimmer/spoond/v3/settings"
+	"github.com/jrimmer/spoond/v4/settings"
 )
 
 // TestGatewayToken (#137 C2): Main's backend-token resolution — the

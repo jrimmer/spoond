@@ -6,7 +6,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/jrimmer/spoond/v3/substrate"
+	"github.com/jrimmer/spoond/v4/substrate"
 )
 
 // watchBuffer is how many events one watcher buffers before a slow

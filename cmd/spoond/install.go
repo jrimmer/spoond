@@ -13,7 +13,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/jrimmer/spoond/v3/install"
+	"github.com/jrimmer/spoond/v4/install"
 )
 
 func init() {

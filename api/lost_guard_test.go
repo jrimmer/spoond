@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrimmer/spoond/v3/substrate"
+	"github.com/jrimmer/spoond/v4/substrate"
 )
 
 // B1/B2 guard tests (spoond-63a round 2): a lost transition never deletes

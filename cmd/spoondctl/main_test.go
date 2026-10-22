@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jrimmer/spoond/v3/internal/env"
+	"github.com/jrimmer/spoond/v4/internal/env"
 )
 
 // Each renamed variable spoondctl reads proves the three-way contract:

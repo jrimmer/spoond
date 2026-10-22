@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jrimmer/spoond/v3/internal/dirwalk"
-	"github.com/jrimmer/spoond/v3/substrate"
+	"github.com/jrimmer/spoond/v4/internal/dirwalk"
+	"github.com/jrimmer/spoond/v4/substrate"
 )
 
 // Lease file operations (#114): the API surface of the substrate file

@@ -16,7 +16,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/jrimmer/spoond/v3/install"
+	"github.com/jrimmer/spoond/v4/install"
 )
 
 // stdoutPipe swaps os.Stdout for a pipe and returns a closer that

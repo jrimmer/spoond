@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrimmer/spoond/v3/store"
-	"github.com/jrimmer/spoond/v3/substrate/e2b"
+	"github.com/jrimmer/spoond/v4/store"
+	"github.com/jrimmer/spoond/v4/substrate/e2b"
 )
 
 // The lost-lease snapshot grace (owner decision 2026-10-02): a lease

@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrimmer/spoond/v3/metrics"
-	"github.com/jrimmer/spoond/v3/substrate"
+	"github.com/jrimmer/spoond/v4/metrics"
+	"github.com/jrimmer/spoond/v4/substrate"
 )
 
 // overcommitShortfallHere reads the box's cap shortfall for a 1024 MiB

@@ -39,13 +39,13 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/jrimmer/spoond/v3/install"
+	"github.com/jrimmer/spoond/v4/install"
 
-	"github.com/jrimmer/spoond/v3/internal/tlsfiles"
-	"github.com/jrimmer/spoond/v3/notify"
-	"github.com/jrimmer/spoond/v3/settings"
-	"github.com/jrimmer/spoond/v3/store"
-	"github.com/jrimmer/spoond/v3/substrate/e2b"
+	"github.com/jrimmer/spoond/v4/internal/tlsfiles"
+	"github.com/jrimmer/spoond/v4/notify"
+	"github.com/jrimmer/spoond/v4/settings"
+	"github.com/jrimmer/spoond/v4/store"
+	"github.com/jrimmer/spoond/v4/substrate/e2b"
 
 	_ "modernc.org/sqlite" // register the "sqlite" driver for the read-only probe
 )

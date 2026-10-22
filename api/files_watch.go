@@ -26,7 +26,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/jrimmer/spoond/v3/substrate"
+	"github.com/jrimmer/spoond/v4/substrate"
 )
 
 // watchPace holds the stream's timings, one place so tests can shrink

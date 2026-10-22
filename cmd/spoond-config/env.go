@@ -23,7 +23,7 @@ import (
 	"bufio"
 	"strings"
 
-	"github.com/jrimmer/spoond/v3/settings"
+	"github.com/jrimmer/spoond/v4/settings"
 )
 
 // source names where an effective value came from. Values are stable

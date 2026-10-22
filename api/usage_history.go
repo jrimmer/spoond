@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/jrimmer/spoond/v3/store"
+	"github.com/jrimmer/spoond/v4/store"
 )
 
 // Usage history (#140 U4): the sampler writes one usage_samples row per

@@ -3,7 +3,7 @@
 package main
 
 import (
-	"github.com/jrimmer/spoond/v3/cmd/spoond-sshd-gateway"
+	"github.com/jrimmer/spoond/v4/cmd/spoond-sshd-gateway"
 )
 
 func init() {

@@ -12,7 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/jrimmer/spoond/v3/notify"
+	"github.com/jrimmer/spoond/v4/notify"
 )
 
 // SetNotifier installs the webhook notifier. Call before Start: the

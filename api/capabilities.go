@@ -7,8 +7,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/jrimmer/spoond/v3/mcp"
-	"github.com/jrimmer/spoond/v3/sizes"
+	"github.com/jrimmer/spoond/v4/mcp"
+	"github.com/jrimmer/spoond/v4/sizes"
 )
 
 // The auth model an api.auth line reports (docs/api.md's ownership

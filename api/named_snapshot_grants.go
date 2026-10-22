@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/jrimmer/spoond/v3/store"
+	"github.com/jrimmer/spoond/v4/store"
 )
 
 // Named-snapshot grants (#141): an owner lets another user start leases

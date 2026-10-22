@@ -17,8 +17,8 @@ import (
 	runnerv1 "gitea.dev/actions-proto-go/runner/v1"
 	"gitea.dev/actions-proto-go/runner/v1/runnerv1connect"
 
-	"github.com/jrimmer/spoond/v3/runner"
-	"github.com/jrimmer/spoond/v3/settings"
+	"github.com/jrimmer/spoond/v4/runner"
+	"github.com/jrimmer/spoond/v4/settings"
 )
 
 // The fake backend pair here stands in for Forgejo and the spoond lease

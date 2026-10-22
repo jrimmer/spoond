@@ -49,10 +49,10 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/jrimmer/spoond/v3/sizes"
-	"github.com/jrimmer/spoond/v3/store"
-	"github.com/jrimmer/spoond/v3/substrate"
-	"github.com/jrimmer/spoond/v3/substrate/e2b"
+	"github.com/jrimmer/spoond/v4/sizes"
+	"github.com/jrimmer/spoond/v4/store"
+	"github.com/jrimmer/spoond/v4/substrate"
+	"github.com/jrimmer/spoond/v4/substrate/e2b"
 )
 
 const (

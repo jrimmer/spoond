@@ -29,7 +29,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jrimmer/spoond/v3/deploy"
+	"github.com/jrimmer/spoond/v4/deploy"
 )
 
 // Production paths and constants the spoond phase owns. Every file name

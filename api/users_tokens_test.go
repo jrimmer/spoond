@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrimmer/spoond/v3/identity"
+	"github.com/jrimmer/spoond/v4/identity"
 )
 
 // newTokenTestServer builds a Server with an identity store, a

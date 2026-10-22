@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrimmer/spoond/v3/store"
+	"github.com/jrimmer/spoond/v4/store"
 )
 
 // recordsFixtureDB creates a catalog through store.Open, whose

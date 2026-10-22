@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrimmer/spoond/v3/substrate"
+	"github.com/jrimmer/spoond/v4/substrate"
 )
 
 // TestForkBatchAdmissionLeavesNoTakeBackBehind pins the all-or-nothing

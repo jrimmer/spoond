@@ -13,8 +13,8 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/emptypb"
 
-	"github.com/jrimmer/spoond/v3/substrate"
-	orchestrator "github.com/jrimmer/spoond/v3/substrate/e2b/gen/orchestrator"
+	"github.com/jrimmer/spoond/v4/substrate"
+	orchestrator "github.com/jrimmer/spoond/v4/substrate/e2b/gen/orchestrator"
 )
 
 // recordingOrchestrator is a gRPC stand-in that keeps each Create request

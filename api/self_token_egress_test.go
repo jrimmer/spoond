@@ -3,7 +3,7 @@ package api
 import (
 	"testing"
 
-	"github.com/jrimmer/spoond/v3/substrate"
+	"github.com/jrimmer/spoond/v4/substrate"
 )
 
 // A self-token lease reaches the host's API port, and only that port,

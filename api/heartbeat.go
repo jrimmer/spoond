@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jrimmer/spoond/v3/metrics"
+	"github.com/jrimmer/spoond/v4/metrics"
 )
 
 // leaseHeartbeatPrefix is the path prefix of the guest-service lease

@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jrimmer/spoond/v3/identity"
+	"github.com/jrimmer/spoond/v4/identity"
 )
 
 // doUsersReqFromIPCounter hands each refusal probe of a route walk its

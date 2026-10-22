@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jrimmer/spoond/v3/store"
+	"github.com/jrimmer/spoond/v4/store"
 )
 
 // Fair shares (#145 FS1, amended 2026-10-14). Every owner gets an equal

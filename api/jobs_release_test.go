@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrimmer/spoond/v3/metrics"
-	"github.com/jrimmer/spoond/v3/substrate/fake"
+	"github.com/jrimmer/spoond/v4/metrics"
+	"github.com/jrimmer/spoond/v4/substrate/fake"
 	dto "github.com/prometheus/client_model/go"
 )
 

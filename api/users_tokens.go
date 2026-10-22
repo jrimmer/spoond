@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jrimmer/spoond/v3/identity"
+	"github.com/jrimmer/spoond/v4/identity"
 )
 
 // Named per-user tokens (A2, unified auth #138): several credentials

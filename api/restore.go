@@ -8,8 +8,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/jrimmer/spoond/v3/store"
-	"github.com/jrimmer/spoond/v3/substrate"
+	"github.com/jrimmer/spoond/v4/store"
+	"github.com/jrimmer/spoond/v4/substrate"
 )
 
 // Restore in place (2.3, #121): POST /api/leases/{id}/restore replaces

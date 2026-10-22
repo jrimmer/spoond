@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jrimmer/spoond/v3/substrate"
+	"github.com/jrimmer/spoond/v4/substrate"
 )
 
 // Admin endpoints (U10): POST /api/admin/drain pauses every running

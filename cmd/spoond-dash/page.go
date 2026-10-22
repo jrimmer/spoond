@@ -16,7 +16,7 @@ import (
 	"html"
 	"strings"
 
-	"github.com/jrimmer/spoond/v3/grid"
+	"github.com/jrimmer/spoond/v4/grid"
 )
 
 // gridLine is one grid row as HTML: its row number (the element id is

@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jrimmer/spoond/v3/identity"
-	"github.com/jrimmer/spoond/v3/substrate"
+	"github.com/jrimmer/spoond/v4/identity"
+	"github.com/jrimmer/spoond/v4/substrate"
 )
 
 // createFromSnapshot creates a lease over the API with the given body

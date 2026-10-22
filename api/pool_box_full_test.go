@@ -17,8 +17,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrimmer/spoond/v3/metrics"
-	"github.com/jrimmer/spoond/v3/substrate"
+	"github.com/jrimmer/spoond/v4/metrics"
+	"github.com/jrimmer/spoond/v4/substrate"
 )
 
 // fixedNode is one NodeInfo behind a lock: the stocked-pool fixtures

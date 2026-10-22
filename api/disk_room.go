@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jrimmer/spoond/v3/store"
-	"github.com/jrimmer/spoond/v3/substrate"
+	"github.com/jrimmer/spoond/v4/store"
+	"github.com/jrimmer/spoond/v4/substrate"
 )
 
 // errDiskUnknown marks a snapshot-capacity read that failed: disk room

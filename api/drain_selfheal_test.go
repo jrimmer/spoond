@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrimmer/spoond/v3/substrate"
+	"github.com/jrimmer/spoond/v4/substrate"
 )
 
 // errTestResumeRefused is an admission refusal (box_full: take-back

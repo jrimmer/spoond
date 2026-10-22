@@ -8,7 +8,7 @@ import (
 	"path"
 	"strings"
 
-	"github.com/jrimmer/spoond/v3/internal/gitignore"
+	"github.com/jrimmer/spoond/v4/internal/gitignore"
 )
 
 // loadIgnoreLines parses one .gitignore file's contents into matcher

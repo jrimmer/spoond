@@ -9,7 +9,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/jrimmer/spoond/v3/identity"
+	"github.com/jrimmer/spoond/v4/identity"
 )
 
 // newMemQuotaServer bootstraps admin + a user over images of the given

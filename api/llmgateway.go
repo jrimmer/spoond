@@ -15,8 +15,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jrimmer/spoond/v3/identity"
-	"github.com/jrimmer/spoond/v3/metrics"
+	"github.com/jrimmer/spoond/v4/identity"
+	"github.com/jrimmer/spoond/v4/metrics"
 )
 
 // llmGatewayPrefix is the path prefix for the per-lease LLM gateway.

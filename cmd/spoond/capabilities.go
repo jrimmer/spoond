@@ -3,8 +3,8 @@
 package main
 
 import (
-	"github.com/jrimmer/spoond/v3/api"
-	"github.com/jrimmer/spoond/v3/cmd/spoond-capabilities"
+	"github.com/jrimmer/spoond/v4/api"
+	"github.com/jrimmer/spoond/v4/cmd/spoond-capabilities"
 )
 
 func init() {

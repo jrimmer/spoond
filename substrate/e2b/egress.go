@@ -1,8 +1,8 @@
 package e2b
 
 import (
-	"github.com/jrimmer/spoond/v3/substrate"
-	orchestrator "github.com/jrimmer/spoond/v3/substrate/e2b/gen/orchestrator"
+	"github.com/jrimmer/spoond/v4/substrate"
+	orchestrator "github.com/jrimmer/spoond/v4/substrate/e2b/gen/orchestrator"
 )
 
 // dnsFallback is added to allowed_cidrs whenever allowed_domains is present

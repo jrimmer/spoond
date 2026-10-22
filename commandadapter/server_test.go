@@ -8,7 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/jrimmer/spoond/v3/runner"
+	"github.com/jrimmer/spoond/v4/runner"
 )
 
 // fakeSandbox is an in-memory SandboxProvider for tests.

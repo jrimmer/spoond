@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jrimmer/spoond/v3/store"
-	"github.com/jrimmer/spoond/v3/substrate"
+	"github.com/jrimmer/spoond/v4/store"
+	"github.com/jrimmer/spoond/v4/substrate"
 )
 
 // Named-snapshot grants (#141). The fixtures go through the real routes:

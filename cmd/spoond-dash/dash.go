@@ -82,9 +82,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jrimmer/spoond/v3/grid"
-	"github.com/jrimmer/spoond/v3/internal/tlsfiles"
-	"github.com/jrimmer/spoond/v3/settings"
+	"github.com/jrimmer/spoond/v4/grid"
+	"github.com/jrimmer/spoond/v4/internal/tlsfiles"
+	"github.com/jrimmer/spoond/v4/settings"
 	"golang.org/x/crypto/bcrypt"
 	_ "modernc.org/sqlite"
 )

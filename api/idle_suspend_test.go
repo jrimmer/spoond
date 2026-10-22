@@ -13,7 +13,7 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"github.com/jrimmer/spoond/v3/substrate"
+	"github.com/jrimmer/spoond/v4/substrate"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -21,8 +21,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrimmer/spoond/v3/metrics"
-	"github.com/jrimmer/spoond/v3/store"
+	"github.com/jrimmer/spoond/v4/metrics"
+	"github.com/jrimmer/spoond/v4/store"
 )
 
 // idleSuspendsCounter reads spoond_idle_suspends_total from the

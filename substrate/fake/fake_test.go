@@ -3,7 +3,7 @@ package fake
 import (
 	"testing"
 
-	"github.com/jrimmer/spoond/v3/substrate"
+	"github.com/jrimmer/spoond/v4/substrate"
 )
 
 // Compile checks: the fake implements the substrate interfaces.
