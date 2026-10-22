@@ -139,3 +139,46 @@ func TestGuestUnreachableDisabled(t *testing.T) {
 		t.Fatalf("lease = %s with the cutoff disabled, want running", l.State)
 	}
 }
+
+// TestGuestUnreachablePausedUnderPressure: while the host is over its
+// saturation targets one guest can stall far longer than its neighbours
+// and still be working, so silence then does not count: the clock pauses
+// and runs on once the host is calm again.
+func TestGuestUnreachablePausedUnderPressure(t *testing.T) {
+	svc, sub, l := newRootfsProbeService(t, false)
+	if _, err := svc.grant(context.Background(), "consumer-a", "py-base", time.Minute, false, "", nil, "", "", nil); err != nil {
+		t.Fatalf("grant second: %v", err)
+	}
+	dir := t.TempDir()
+	svc.pressure.root = dir
+	svc.cfg.SaturationIOFullPct, svc.cfg.SaturationCPUSomePct = 20, 75
+	sub.rootfsTimeout[l.SandboxID] = true
+	t.Cleanup(func() { svc.now = time.Now })
+	cutoff := svc.guestUnreachableAfter()
+	base := time.Now()
+	at := func(d time.Duration, ioFull float64) {
+		writePSI(t, dir, ioFull, 0)
+		expirePressure(svc)
+		probeAt(svc, base.Add(d))
+	}
+
+	at(0, 0)
+	at(cutoff/2, 0) // half the cutoff on a calm host
+	// An hour and more under I/O pressure adds nothing.
+	at(cutoff+time.Second, 50)
+	at(2*cutoff, 50)
+	if l.State != "running" {
+		t.Fatalf("lease = %s after silence under pressure, want running", l.State)
+	}
+	// Calm again: the interval from the last pressured probe does not
+	// count either, then the clock runs on from half the cutoff.
+	at(2*cutoff+time.Minute, 0)
+	at(2*cutoff+time.Minute+cutoff/2-time.Second, 0)
+	if l.State != "running" {
+		t.Fatalf("lease = %s just short of the cutoff, want running", l.State)
+	}
+	at(2*cutoff+time.Minute+cutoff/2+time.Second, 0)
+	if l.State != "lost" || l.LostReason != "guest unreachable for 60 min" {
+		t.Fatalf("lease = %s (%q) after a full calm cutoff, want lost", l.State, l.LostReason)
+	}
+}

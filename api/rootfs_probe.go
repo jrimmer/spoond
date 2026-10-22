@@ -107,12 +107,17 @@ type rootfsProbeFailure struct {
 	count     int
 }
 
-// guestUnreachable is when a lease's guest stopped answering the probe.
+// guestUnreachable is how long a lease's guest has been silent to the
+// probe. Only the time between two silent probes on a calm host counts:
+// while the host is over its saturation targets a guest can be stalled
+// far longer than its neighbours without being hung, so the clock pauses.
 // Like rootfsProbeFailure it is keyed to the sandbox, so a recovered
 // lease starts a fresh clock.
 type guestUnreachable struct {
 	sandboxID string
-	since     time.Time
+	silent    time.Duration
+	last      time.Time // the last silent probe
+	pressured bool      // the host was over its targets at that probe
 }
 
 // runRootfsProbeLoop runs the rootfs liveness probe every
@@ -227,6 +232,10 @@ func (s *Service) probeRootfsLeases(ctx context.Context) {
 			answering++
 		}
 	}
+	// A host over its saturation targets (the gate on new work) pauses
+	// every silent guest's clock: one VM can stall far more than the
+	// others there and still be working.
+	pressured := s.checkSaturation(true) != nil
 
 	for i, l := range targets {
 		if s.draining.Load() {
@@ -249,7 +258,7 @@ func (s *Service) probeRootfsLeases(ctx context.Context) {
 			if s.metrics != nil {
 				s.metrics.RootfsProbeFailuresTotal.Inc()
 			}
-			s.checkGuestUnreachable(ctx, l, now, answering)
+			s.checkGuestUnreachable(ctx, l, now, answering, pressured)
 		case rootfsProbeUnavailable:
 			// The orchestrator List failed while confirming the sandbox:
 			// the guest may be perfectly healthy. Never count it toward
@@ -259,9 +268,9 @@ func (s *Service) probeRootfsLeases(ctx context.Context) {
 			if s.metrics != nil {
 				s.metrics.RootfsProbeFailuresTotal.Inc()
 			}
-			s.checkGuestUnreachable(ctx, l, now, answering)
+			s.checkGuestUnreachable(ctx, l, now, answering, pressured)
 		case rootfsProbeTransport:
-			s.guestUnreachableFor(l, now)
+			s.guestUnreachableFor(l, now, pressured)
 			s.countRootfsFailure(ctx, l)
 		case rootfsProbeEIO:
 			s.countRootfsFailure(ctx, l)
@@ -366,28 +375,35 @@ func (s *Service) countRootfsFailure(ctx context.Context, l *Lease) {
 	s.recoverDeadRootfs(ctx, l)
 }
 
-// guestUnreachableFor starts the lease's unreachable clock if it is not
-// running and returns how long the guest has been silent.
-func (s *Service) guestUnreachableFor(l *Lease, now time.Time) time.Duration {
+// guestUnreachableFor records a silent probe and returns how long the
+// guest has been silent. The time since the previous silent probe counts
+// only when the host was calm at both, so pressure pauses the clock.
+func (s *Service) guestUnreachableFor(l *Lease, now time.Time, pressured bool) time.Duration {
 	s.rootfsProbeMu.Lock()
 	defer s.rootfsProbeMu.Unlock()
 	u := s.guestUnreachable[l.ID]
 	if u == nil || u.sandboxID != l.SandboxID {
-		u = &guestUnreachable{sandboxID: l.SandboxID, since: now}
+		u = &guestUnreachable{sandboxID: l.SandboxID, last: now, pressured: pressured}
 		s.guestUnreachable[l.ID] = u
+		return 0
 	}
-	return now.Sub(u.since)
+	if !pressured && !u.pressured && now.After(u.last) {
+		u.silent += now.Sub(u.last)
+	}
+	u.last, u.pressured = now, pressured
+	return u.silent
 }
 
 // checkGuestUnreachable runs the clock for a probe that timed out or
 // could not reach the guest, and recovers the lease like a crash once the
 // guest has been silent past the cutoff while answering other leases
 // prove the host and the orchestrator work (#159). With no other lease
-// answering, a slow host or an outage looks the same, so nothing is done.
-func (s *Service) checkGuestUnreachable(ctx context.Context, l *Lease, now time.Time, answering int) {
-	silent := s.guestUnreachableFor(l, now)
+// answering, a slow host or an outage looks the same, so nothing is done;
+// a host over its saturation targets does not run the clock at all.
+func (s *Service) checkGuestUnreachable(ctx context.Context, l *Lease, now time.Time, answering int, pressured bool) {
+	silent := s.guestUnreachableFor(l, now, pressured)
 	after := s.guestUnreachableAfter()
-	if after <= 0 || silent < after || answering == 0 {
+	if after <= 0 || silent < after || answering == 0 || pressured {
 		return
 	}
 	cause := fmt.Sprintf("guest unreachable for %d min", int(silent/time.Minute))
