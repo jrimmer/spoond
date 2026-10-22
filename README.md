@@ -323,21 +323,16 @@ containers. [docs/install.md](docs/install.md) has both.
 
 ## Status
 
-**v3.13.2** (2026-10-21) is the current release. spoond 3.x shares a host
-fairly: every active owner gets an equal, floating slice of memory and
-snapshot disk, and when a request does not fit, spoond takes room back
-from the biggest borrower; it pauses a lease on its own before the host
-runs out of memory, now checking every second. 3.11 rounds out the
-guest file and process API for agent clients: stable machine-readable
-error codes, a bounded gitignore-aware directory listing, ranged file
-reads, directory watches, and background jobs that can be deleted,
-kept for less time and capped in output. 3.12 lets a guest release its
-own lease when the caller asks for that at create: a lease-scoped token
-that can release or keep alive that one lease and nothing else. 3.13
-recovers a guest that has stopped answering for an hour, as it would a
-crash, and lets a CI runner label start its job from a named snapshot.
-Clients
-moving from 2.9 read
+**v4.0.0** (2026-10-22) is the current release. spoond 4.0 installs on
+any Debian 13 host with KVM in one command (`spoond install`), or with
+Docker from `deploy/docker/`, using the release's artifacts; see
+[docs/install.md](docs/install.md). It shares a host fairly: every active
+owner gets an equal, floating slice of memory and snapshot disk, and
+spoond pauses a lease on its own before the host runs out of memory.
+4.0 removes what 3.x deprecated: the `/api/sandboxes` path, keyless LLM
+access and `hold_ttl`, and the Go module path is now `/v4`. Clients
+moving from 3.x read the 4.0.0 section of [CHANGELOG.md](CHANGELOG.md);
+clients moving from 2.9 also read
 [docs/upgrading-3.0.md](docs/upgrading-3.0.md).
 
 Every release and what changed in it is in [CHANGELOG.md](CHANGELOG.md)

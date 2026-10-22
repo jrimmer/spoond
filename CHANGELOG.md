@@ -10,6 +10,20 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+## [4.0.0] - 2026-10-22
+
+spoond 4.0 installs on a host that is not ours: `spoond install` sets up a
+Debian 13 host natively, and `deploy/docker/` runs the same services with
+Docker, both from the release's artifacts. It also removes the surfaces
+3.x deprecated. Upgrading from 3.x:
+
+- Call the lease API under `/api/leases`; `/api/sandboxes` answers `410`.
+- Give every identity user that calls the LLM gateway a key; keyless
+  access is gone, and `LLM_OPEN_LEGACY` should be removed from
+  `backend.env`.
+- Stop sending `hold_ttl` (it has done nothing since 3.0).
+- Go importers change the module path to `github.com/jrimmer/spoond/v4`.
+
 ### Added
 
 - **`spoond install` (4.0).** One command installs a Debian 13 host:
@@ -73,6 +87,9 @@ summarised from README "Status".
 
 ### Changed
 
+- **The Go module path is `github.com/jrimmer/spoond/v4`.** Importers
+  change their import paths; nothing else in the exported API changed
+  for 4.0.
 - **README: a dashboard screenshot, and a shorter dashboard section**
   that says what the dashboard shows rather than how each panel is drawn.
 - **README: Status names the current release only**; the release history
