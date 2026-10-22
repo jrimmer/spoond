@@ -481,6 +481,40 @@ func hostIptables(ctx context.Context, env *Env, r *Reporter, st *hostState) err
 		}
 		r.Add(Changed, name, note)
 	}
+	return removeNftLeftovers(ctx, env, r)
+}
+
+// iptablesNftNames are the table names the iptables-nft backend
+// creates, in the ip and ip6 families.
+var iptablesNftNames = map[string]bool{"filter": true, "nat": true, "mangle": true, "raw": true, "security": true}
+
+// removeNftLeftovers deletes the tables the iptables-nft backend left
+// behind. apt starts Docker before the switch to legacy, and its
+// iptables-nft FORWARD chain (policy DROP) keeps dropping the leases'
+// traffic beside the legacy rules: a template build cannot even resolve
+// a name. Only tables nft marks as managed by iptables-nft go; nft's
+// own tables (e2b_guard, an nftables.conf ruleset) are left alone.
+func removeNftLeftovers(ctx context.Context, env *Env, r *Reporter) error {
+	out, err := env.query(ctx, "nft", "list", "tables")
+	if err != nil {
+		return nil // no nft, or nothing to list: no leftovers
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		f := strings.Fields(line)
+		if len(f) != 3 || f[0] != "table" || (f[1] != "ip" && f[1] != "ip6") || !iptablesNftNames[f[2]] {
+			continue
+		}
+		family, table := f[1], f[2]
+		// nft prints the "managed by iptables-nft" warning on stderr.
+		body, err := env.query(ctx, "sh", "-c", "nft list table "+family+" "+table+" 2>&1")
+		if err != nil || !strings.Contains(string(body), "managed by iptables-nft") {
+			continue // gone meanwhile, or nft's own
+		}
+		if err := env.exec(ctx, "nft", "delete", "table", family, table); err != nil {
+			return fmt.Errorf("%w — could not remove the iptables-nft leftover %s %s; run `nft delete table %s %s`, then rerun", err, family, table, family, table)
+		}
+		r.Add(Changed, "nft table "+family+" "+table, dryRunNote(env, "removed the iptables-nft backend's leftover; its FORWARD policy would drop the leases' traffic"))
+	}
 	return nil
 }
 

@@ -596,6 +596,7 @@ func TestHostIptablesSwitchesToLegacy(t *testing.T) {
 		"update-alternatives --set iptables /usr/sbin/iptables-legacy",
 		"update-alternatives --query ip6tables",
 		"update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy",
+		"nft list tables",
 	}
 	if len(runner.calls) != len(want) {
 		t.Fatalf("calls = %v, want %v", runner.calls, want)
@@ -616,7 +617,7 @@ func TestHostIptablesSwitchesToLegacy(t *testing.T) {
 }
 
 // TestHostIptablesAlreadyLegacy: both on legacy, so only the two
-// queries run and the rows are kept.
+// queries (and the nft table list) run and the rows are kept.
 func TestHostIptablesAlreadyLegacy(t *testing.T) {
 	env, _, runner := testEnv(t)
 	runner.reply = map[string]fakeReply{}
@@ -627,8 +628,8 @@ func TestHostIptablesAlreadyLegacy(t *testing.T) {
 	if err := hostIptables(context.Background(), env, r, &hostState{}); err != nil {
 		t.Fatal(err)
 	}
-	if len(runner.calls) != 2 {
-		t.Errorf("calls = %v, want only the two queries", runner.calls)
+	if len(runner.calls) != 3 {
+		t.Errorf("calls = %v, want only the two queries and the nft table list", runner.calls)
 	}
 	for _, it := range r.Items() {
 		if it.Result != Kept {
@@ -865,6 +866,7 @@ func TestHostSystemStepsSecondRunQuiet(t *testing.T) {
 			allowed: []string{
 				"update-alternatives --query iptables",
 				"update-alternatives --query ip6tables",
+				"nft list tables",
 			},
 		},
 	}
@@ -987,9 +989,9 @@ func TestHostSystemDryRunWritesNothingButPlans(t *testing.T) {
 		}
 	}
 
-	// Only queries ran: dpkg and the alternatives.
+	// Only queries ran: dpkg, the alternatives and the nft table list.
 	for _, c := range runner.calls {
-		if !strings.HasPrefix(c, "dpkg-query") && !strings.HasPrefix(c, "update-alternatives --query") {
+		if !strings.HasPrefix(c, "dpkg-query") && !strings.HasPrefix(c, "update-alternatives --query") && !strings.HasPrefix(c, "nft list ") {
 			t.Errorf("dry run ran changing command %q", c)
 		}
 	}
@@ -1010,5 +1012,34 @@ func TestHostSystemDryRunWritesNothingButPlans(t *testing.T) {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("dry-run report lacks %q:\n%s", want, out.String())
 		}
+	}
+}
+
+// TestHostIptablesRemovesNftLeftovers: the iptables-nft backend's own
+// tables go (Docker's FORWARD DROP lives there); nft's own tables stay.
+func TestHostIptablesRemovesNftLeftovers(t *testing.T) {
+	env, _, runner := testEnv(t)
+	runner.reply = map[string]fakeReply{}
+	addReply(runner, "update-alternatives --query iptables", altQuery("/usr/sbin/iptables-legacy"))
+	addReply(runner, "update-alternatives --query ip6tables", altQuery("/usr/sbin/ip6tables-legacy"))
+	addReply(runner, "nft list tables", "table ip nat\ntable ip filter\ntable inet e2b_guard\ntable ip6 filter\n")
+	addReply(runner, "sh -c nft list table ip nat 2>&1", "# Warning: table ip nat is managed by iptables-nft, do not touch!\ntable ip nat {\n}\n")
+	addReply(runner, "sh -c nft list table ip filter 2>&1", "# Warning: table ip filter is managed by iptables-nft, do not touch!\ntable ip filter {\n}\n")
+	addReply(runner, "sh -c nft list table ip6 filter 2>&1", "table ip6 filter {\n}\n")
+	addReply(runner, "nft delete table ip nat", "")
+	addReply(runner, "nft delete table ip filter", "")
+
+	r := &Reporter{Phase: PhaseHost}
+	if err := hostIptables(context.Background(), env, r, &hostState{}); err != nil {
+		t.Fatal(err)
+	}
+	deleted := map[string]bool{}
+	for _, c := range runner.calls {
+		if strings.HasPrefix(c, "nft delete table ") {
+			deleted[strings.TrimPrefix(c, "nft delete table ")] = true
+		}
+	}
+	if !deleted["ip nat"] || !deleted["ip filter"] || len(deleted) != 2 {
+		t.Errorf("deleted %v, want exactly the two iptables-nft tables", deleted)
 	}
 }
