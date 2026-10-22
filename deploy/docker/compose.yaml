@@ -4,6 +4,7 @@
 # spoond, it does not isolate it. The host needs KVM, the nbd module and
 # reserved hugepages, which the prepare service writes.
 #
+#   docker compose build              # the image, from this checkout
 #   docker compose run --rm prepare   # host settings; reboot if it says so
 #   docker compose run --rm init      # config and secrets into ./config
 #   docker compose up -d
@@ -12,7 +13,10 @@
 #   docker compose exec spoond spoond-container doctor
 #
 # Settings (an .env file next to this one, or the environment):
-#   SPOOND_IMAGE      the image (default ghcr.io/jrimmer/spoond:latest)
+#   SPOOND_VERSION    the release being built, without the v (e.g. 4.0.0):
+#                     the runtime tarball is downloaded for it unless one
+#                     sits in deploy/docker/artifacts/
+#   SPOOND_IMAGE      the image tag built and run (default spoond:local)
 #   SPOOND_HOST_NAME  the name clients reach this host by (init; default hostname -f)
 #   SPOOND_STORE_DIR  the snapshot store on the host (default /forkdcache/e2b)
 #   SPOOND_CONFIG     config, secrets and the database (default ./config)
@@ -20,10 +24,14 @@
 name: spoond
 
 x-spoond: &spoond
-  image: ${SPOOND_IMAGE:-ghcr.io/jrimmer/spoond:latest}
+  image: ${SPOOND_IMAGE:-spoond:local}
+  # spoond publishes no image: it is built here, never pulled.
+  pull_policy: never
   build:
     context: ../..
     dockerfile: deploy/docker/Dockerfile
+    args:
+      VERSION: ${SPOOND_VERSION:-}
   privileged: true
   network_mode: host
   restart: unless-stopped

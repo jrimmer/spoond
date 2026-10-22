@@ -446,20 +446,22 @@ func TestCheckFileSecrets(t *testing.T) {
 	}
 }
 
-// TestCatalogResult: a broken build fails, an image never built on this
-// host warns (a minimal install builds two of the baked images), all
-// ready passes.
+// TestCatalogResult: a broken build fails, a manifest image never
+// built on this host warns, an empty catalog warns (spoond ships no
+// images), all ready passes.
 func TestCatalogResult(t *testing.T) {
 	for _, tc := range []struct {
 		name              string
+		n                 int
 		missing, notBuilt []string
 		want              string
 	}{
-		{"all ready", nil, nil, "PASS"},
-		{"minimal install", nil, []string{"dev-base", "node-base"}, "WARN"},
-		{"broken build", []string{"py-base (current build not ready)"}, []string{"dev-base"}, "FAIL"},
+		{"all ready", 4, nil, nil, "PASS"},
+		{"manifest image not built", 2, nil, []string{"db", "tools"}, "WARN"},
+		{"broken build", 4, []string{"app (current build not ready)"}, []string{"db"}, "FAIL"},
+		{"empty catalog", 0, nil, nil, "WARN"},
 	} {
-		got := catalogResult(4, tc.missing, tc.notBuilt)
+		got := catalogResult(tc.n, tc.missing, tc.notBuilt)
 		if len(got) != 1 || got[0].status != tc.want {
 			t.Errorf("%s: %+v, want %s", tc.name, got, tc.want)
 		}

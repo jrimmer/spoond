@@ -1,13 +1,13 @@
 // Tests for the images phase (images.go): a temp Root, a fake runner
 // answering `spoond images list` from a captured sample, and a
-// backend.env written under the root. Every test pins one rule: the
-// context lands under /var/lib/spoond/images with the hook modes and
-// survives a rerun unchanged; none/minimal/all pick the right names;
-// images already in the catalog are kept and the missing ones run
-// exactly the env + build command, flags before `build`; no backend.env
-// token value reaches any command line; a failed build fails the phase
-// with the fix after the earlier images built; a dry run writes
-// nothing and builds nothing.
+// backend.env and an operator manifest written under the root. Every
+// test pins one rule: the guest pieces land under /var/lib/spoond/guest
+// and survive a rerun unchanged; none builds nothing and a manifest
+// builds its baked entries; images already in the catalog are kept and
+// the missing ones run exactly the env + build command, flags before
+// `build`; no backend.env token value reaches any command line; a
+// failed build fails the phase with the fix after the earlier images
+// built; a dry run writes nothing and builds nothing.
 package install
 
 import (
@@ -21,12 +21,46 @@ import (
 )
 
 // sampleImagesList is captured `spoond images list` output, tabwriter
-// shape and all: go-base has a current build (seven fields), py-base
-// does not (its empty BUILD and DIGEST cells collapse, leaving five).
-const sampleImagesList = `NAME     BUILD                                 DIGEST                                          VCPU  MEM_MB  DISK_MB  UPDATED_AT
-go-base  5f0c3e9a-4b1d-4c2e-9a77-1d2e3f405162  localhost:5000/go-base@sha256:1a2b3c4d5e6f7a8b  2     2048    6144     2026-10-16T08:00:00Z
-py-base                                                                                        2     1024    4096     2026-10-16T07:00:00Z
+// shape and all: tools has a current build (seven fields), app does
+// not (its empty BUILD and DIGEST cells collapse, leaving five).
+const sampleImagesList = `NAME   BUILD                                 DIGEST                                        VCPU  MEM_MB  DISK_MB  UPDATED_AT
+tools  5f0c3e9a-4b1d-4c2e-9a77-1d2e3f405162  localhost:5000/tools@sha256:1a2b3c4d5e6f7a8b  2     2048    6144     2026-10-16T08:00:00Z
+app                                                                                       2     1024    4096     2026-10-16T07:00:00Z
 `
+
+// testManifest is the operator manifest the build tests pass as
+// --images: three baked entries in file order and one that is not.
+const testManifest = `images:
+  - name: app
+    baked: true
+    dockerfile: app.dockerfile
+  - name: tools
+    baked: true
+    dockerfile: tools.dockerfile
+  - name: draft
+    baked: false
+    dockerfile: draft.dockerfile
+  - name: db
+    baked: true
+    dockerfile: db.dockerfile
+`
+
+// testManifestPath is where writeManifest puts it (under the root).
+const testManifestPath = "/srv/catalog/manifest.yaml"
+
+// writeManifest writes testManifest under the root and points
+// --images at it.
+func writeManifest(t *testing.T, env *Env) {
+	t.Helper()
+	path := env.Resolve(testManifestPath)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(testManifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	env.Opt.Images = testManifestPath
+}
 
 // listCmd is the catalog query the phase runs.
 const listCmd = "/opt/spoond/spoond images list"
@@ -129,152 +163,114 @@ SPOOND_GUEST_DNS_ADDR=10.1.0.2
 	}
 }
 
-// contextPaths are the embedded files a written context must have,
-// with their modes: the .sh hooks 0755, everything else 0644.
-var contextPaths = map[string]os.FileMode{
-	"/var/lib/spoond/images/manifest.yaml":                0o644,
-	"/var/lib/spoond/images/py-base.dockerfile":           0o644,
-	"/var/lib/spoond/images/go-base.dockerfile":           0o644,
-	"/var/lib/spoond/images/scylla-init-hook.sh":          0o755,
-	"/var/lib/spoond/images/elixir-base-postgres-hook.sh": 0o755,
-	"/var/lib/spoond/images/guest/spoond-guest-init":      0o644,
-	"/var/lib/spoond/images/guest/spoond-tmux.sh":         0o755,
+// guestPaths are the embedded files a run must write, all 0755.
+var guestPaths = []string{
+	"/var/lib/spoond/guest/spoond-guest-init",
+	"/var/lib/spoond/guest/spoond-tmux.sh",
 }
 
-// TestImagesPhaseWritesContext pins where the build context lands and
-// its modes: under /var/lib/spoond/images with the layout kept, the
-// .sh hooks 0755 and the rest 0644 (guest/spoond-guest-init is
-// chmod'ed by COPY --chmod inside the dockerfile, not on disk). A
-// second run keeps every file: writeFile compares before it writes.
-func TestImagesPhaseWritesContext(t *testing.T) {
+// TestImagesPhaseWritesGuest pins where the guest pieces land and
+// their mode: under /var/lib/spoond/guest, 0755. A second run keeps
+// every file: writeFile compares before it writes.
+func TestImagesPhaseWritesGuest(t *testing.T) {
 	env, out, _ := imagesTestEnv(t)
-	env.Opt.Images = ImagesNone // the context write is what this test watches
 
 	runImagesPhase(t, env)
-	for path, want := range contextPaths {
-		b, err := os.ReadFile(env.Resolve(path))
-		if err != nil {
-			t.Fatalf("context file %s: %v", path, err)
-		}
-		if len(b) == 0 {
-			t.Errorf("context file %s is empty", path)
-		}
+	for _, path := range guestPaths {
 		fi, err := os.Stat(env.Resolve(path))
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("guest file %s: %v", path, err)
 		}
-		if got := fi.Mode().Perm(); got != want {
-			t.Errorf("%s mode = %#o, want %#o", path, got, want)
+		if fi.Size() == 0 {
+			t.Errorf("guest file %s is empty", path)
 		}
-	}
-	if _, err := os.Stat(env.Resolve("/var/lib/spoond/images/README.md")); !os.IsNotExist(err) {
-		t.Error("README.md was written; it is not build context")
+		if got := fi.Mode().Perm(); got != 0o755 {
+			t.Errorf("%s mode = %#o, want 0755", path, got)
+		}
 	}
 	if !strings.Contains(out.String(), "created") {
 		t.Errorf("first run report, want created rows:\n%s", out.String())
 	}
 
-	// Second run: every context file kept, content untouched.
 	out.Reset()
-	before := map[string][]byte{}
-	for path := range contextPaths {
-		b, _ := os.ReadFile(env.Resolve(path))
-		before[path] = b
-	}
 	items := runImagesPhase(t, env)
-	for path := range contextPaths {
-		b, err := os.ReadFile(env.Resolve(path))
-		if err != nil || string(b) != string(before[path]) {
-			t.Errorf("second run changed %s: %v", path, err)
-		}
-	}
 	kept := 0
 	for _, it := range items {
-		if it.Result == Kept && strings.HasPrefix(it.Name, "/var/lib/spoond/images/") {
+		if it.Result == Kept && strings.HasPrefix(it.Name, "/var/lib/spoond/guest/") {
 			kept++
 		}
 	}
-	// 17 files ride in the embedded context (pinned in
-	// images/embed_test.go); a stricter floor here would churn with
-	// every new image.
-	if kept < len(contextPaths) {
-		t.Errorf("second run kept %d context files, want at least %d; rows:\n%s",
-			kept, len(contextPaths), out.String())
+	if kept != len(guestPaths) {
+		t.Errorf("second run kept %d guest files, want %d; rows:\n%s", kept, len(guestPaths), out.String())
 	}
 }
 
-// TestImagesPhaseSelection pins none/minimal/all against the runner:
-// none is one skipped row and returns; minimal builds py-base and
-// go-base; all builds every baked manifest entry (rust-base is
-// baked: false and never in).
-func TestImagesPhaseSelection(t *testing.T) {
-	t.Run("none", func(t *testing.T) {
+// TestImagesPhaseNone pins the default: spoond ships no images, so
+// the phase writes the guest pieces, reports one skipped row and runs
+// nothing.
+func TestImagesPhaseNone(t *testing.T) {
+	for _, images := range []string{"", ImagesNone} {
 		env, out, runner := imagesTestEnv(t)
-		env.Opt.Images = ImagesNone
+		env.Opt.Images = images
 		items := runImagesPhase(t, env)
-		// The context write comes first, so its rows are there too;
-		// the last row is the none verdict.
 		if n := len(items); n < 2 || items[n-1].Result != Skipped || items[n-1].Name != "images" {
-			t.Fatalf("last row = %+v, want the skipped none row after the context rows", items)
-		}
-		for _, it := range items[:len(items)-1] {
-			if strings.HasPrefix(it.Name, "py-") || strings.HasPrefix(it.Name, "go-") || it.Result == Failed {
-				t.Fatalf("none built rows beyond the context: %+v", items)
-			}
+			t.Fatalf("--images %q: last row = %+v, want the skipped row after the guest rows", images, items)
 		}
 		if len(runner.calls) != 0 {
-			t.Errorf("none ran commands: %v", runner.calls)
+			t.Errorf("--images %q ran commands: %v", images, runner.calls)
 		}
-		if !strings.Contains(out.String(), "skipped") {
-			t.Errorf("report, want a skipped row:\n%s", out.String())
+		if !strings.Contains(out.String(), "spoond ships no images") {
+			t.Errorf("--images %q report, want the no-images row:\n%s", images, out.String())
 		}
-	})
+	}
+}
 
-	t.Run("minimal", func(t *testing.T) {
-		env, _, runner := imagesTestEnv(t)
-		env.Opt.Images = ImagesMinimal
-		runImagesPhase(t, env)
-		// go-base already has a current build in the sample
-		// catalog, so only py-base is missing.
-		got := runner.buildNames()
-		want := []string{"py-base"}
-		if strings.Join(got, ",") != strings.Join(want, ",") {
-			t.Errorf("built %v, want %v (calls: %v)", got, want, runner.calls)
-		}
-	})
+// TestImagesPhaseManifest pins the build set: every baked entry in
+// file order, minus the one the catalog already has; draft is not
+// baked and never in.
+func TestImagesPhaseManifest(t *testing.T) {
+	env, _, runner := imagesTestEnv(t)
+	writeManifest(t, env)
+	runImagesPhase(t, env)
+	got := runner.buildNames()
+	want := []string{"app", "db"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("built %v, want %v (calls: %v)", got, want, runner.calls)
+	}
+}
 
-	t.Run("all", func(t *testing.T) {
-		env, _, runner := imagesTestEnv(t)
-		env.Opt.Images = ImagesAll
-		runImagesPhase(t, env)
-		// All the baked entries but the one the sample catalog
-		// already has.
-		got := runner.buildNames()
-		want := []string{"py-base", "dev-base", "node-base", "elixir-base", "elixir-release",
-			"llm-review", "rust-qt-base", "rust-gpui-base", "scylla"}
-		if strings.Join(got, ",") != strings.Join(want, ",") {
-			t.Errorf("built %v, want the manifest's baked images %v", got, want)
-		}
-	})
+// TestImagesPhaseMissingManifest fails the phase with the read error
+// before anything runs.
+func TestImagesPhaseMissingManifest(t *testing.T) {
+	env, _, runner := imagesTestEnv(t)
+	env.Opt.Images = "/srv/none/manifest.yaml"
+	_, err := RunPhase(context.Background(), env, PhaseImages, Phases[PhaseImages])
+	if err == nil || !strings.Contains(err.Error(), "read the image manifest") {
+		t.Fatalf("err = %v, want the manifest read failure", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Errorf("ran commands: %v", runner.calls)
+	}
 }
 
 // TestImagesPhaseBuildCommand pins the exact build command: an `env`
 // prefix of only the five backend.env keys that exist, then the
 // binary, then the flags BEFORE `build` (Go's flag package stops at
-// the first positional), then the image name.
+// the first positional) with the manifest's directory as the context,
+// then the image name.
 func TestImagesPhaseBuildCommand(t *testing.T) {
 	env, _, runner := imagesTestEnv(t)
-	env.Opt.Images = ImagesMinimal
+	writeManifest(t, env)
 	writeBackendEnv(t, env)
 	runImagesPhase(t, env)
 
 	want := "env IMAGE_REGISTRY=localhost:5000 SPOOND_DB_PATH=/var/lib/spoond/spoond.db " +
 		"E2B_GRPC_ADDR=127.0.0.1:5008 E2B_TOKEN_SEED_FILE=/etc/spoond/e2b-token-seed " +
 		"SPOOND_GUEST_DNS_ADDR=10.1.0.2 " +
-		"/opt/spoond/spoond images -manifest /var/lib/spoond/images/manifest.yaml " +
-		"-context /var/lib/spoond/images build py-base"
-	if len(runner.calls) != 2 {
-		t.Fatalf("calls = %v, want the list query and one build", runner.calls)
+		"/opt/spoond/spoond images -manifest /srv/catalog/manifest.yaml " +
+		"-context /srv/catalog build app"
+	if len(runner.calls) != 3 {
+		t.Fatalf("calls = %v, want the list query and two builds", runner.calls)
 	}
 	if runner.calls[0] != listCmd {
 		t.Errorf("first call = %q, want the catalog query", runner.calls[0])
@@ -289,7 +285,7 @@ func TestImagesPhaseBuildCommand(t *testing.T) {
 // them — every recorded call is scanned, not just the build.
 func TestImagesPhaseBuildEnvKeysFromBackendEnvOnly(t *testing.T) {
 	env, _, runner := imagesTestEnv(t)
-	env.Opt.Images = ImagesAll
+	writeManifest(t, env)
 	writeBackendEnv(t, env)
 	runImagesPhase(t, env)
 
@@ -316,15 +312,15 @@ func TestImagesPhaseBuildEnvKeysFromBackendEnvOnly(t *testing.T) {
 // five keys are simply left out and the plain build command runs.
 func TestImagesPhaseMissingBackendEnv(t *testing.T) {
 	env, _, runner := imagesTestEnv(t)
-	env.Opt.Images = ImagesMinimal
+	writeManifest(t, env)
 	runImagesPhase(t, env)
 
 	// Without backend.env no KEY=VALUE joins the prefix, but the
 	// command still runs under env (1).
-	want := "env /opt/spoond/spoond images -manifest /var/lib/spoond/images/manifest.yaml " +
-		"-context /var/lib/spoond/images build py-base"
-	if len(runner.calls) != 2 || runner.calls[1] != want {
-		t.Errorf("calls = %v, want the query and %q", runner.calls, want)
+	want := "env /opt/spoond/spoond images -manifest /srv/catalog/manifest.yaml " +
+		"-context /srv/catalog build app"
+	if len(runner.calls) != 3 || runner.calls[1] != want {
+		t.Errorf("calls = %v, want the query and %q first", runner.calls, want)
 	}
 }
 
@@ -333,44 +329,44 @@ func TestImagesPhaseMissingBackendEnv(t *testing.T) {
 // show the earlier images built.
 func TestImagesPhaseFailedBuild(t *testing.T) {
 	env, _, runner := imagesTestEnv(t)
-	env.Opt.Images = ImagesAll
+	writeManifest(t, env)
 	runner.listOut = []byte(catalogHeader) // an empty catalog: everything is missing
-	runner.failBuilds = map[string]bool{"go-base": true}
+	runner.failBuilds = map[string]bool{"tools": true}
 
 	items, err := RunPhase(context.Background(), env, PhaseImages, Phases[PhaseImages])
 	if err == nil {
-		t.Fatal("phase succeeded, want the go-base build failure")
+		t.Fatal("phase succeeded, want the tools build failure")
 	}
-	wantErr := "spoond images build go-base failed; rerun `spoond install images` after fixing it"
+	wantErr := "spoond images build tools failed; rerun `spoond install images` after fixing it"
 	if err.Error() != "images: "+wantErr {
 		t.Errorf("err = %q, want the phase-prefixed %q", err, wantErr)
 	}
 	var failed bool
 	for _, it := range items {
-		if it.Result == Failed && it.Name == "go-base" && it.Note == wantErr {
+		if it.Result == Failed && it.Name == "tools" && it.Note == wantErr {
 			failed = true
 		}
 	}
 	if !failed {
-		t.Errorf("no failed row for go-base with the fix; rows: %+v", items)
+		t.Errorf("no failed row for tools with the fix; rows: %+v", items)
 	}
 	// Earlier images were built before the failure stopped the phase.
 	got := runner.buildNames()
-	if len(got) != 2 || got[0] != "py-base" || got[1] != "go-base" {
-		t.Errorf("built %v before stopping, want py-base then the failed go-base", got)
+	if len(got) != 2 || got[0] != "app" || got[1] != "tools" {
+		t.Errorf("built %v before stopping, want app then the failed tools", got)
 	}
 }
 
-// TestImagesPhaseDryRun pins the dry run: no context file is written,
+// TestImagesPhaseDryRun pins the dry run: no guest file is written,
 // the catalog query may run, no build does.
 func TestImagesPhaseDryRun(t *testing.T) {
 	env, _, runner := imagesTestEnv(t)
-	env.Opt.Images = ImagesMinimal
+	writeManifest(t, env)
 	env.DryRun = true
 	runImagesPhase(t, env)
 
-	if _, err := os.Stat(env.Resolve("/var/lib/spoond/images")); !os.IsNotExist(err) {
-		t.Error("dry run wrote the build context")
+	if _, err := os.Stat(env.Resolve("/var/lib/spoond/guest")); !os.IsNotExist(err) {
+		t.Error("dry run wrote the guest pieces")
 	}
 	if builds := runner.buildCalls(); len(builds) != 0 {
 		t.Errorf("dry run built images: %v", builds)
@@ -381,38 +377,32 @@ func TestImagesPhaseDryRun(t *testing.T) {
 }
 
 // TestImagesPhaseBaseRegistry: --base-registry goes to each build
-// (spoond images build pulls, falling back to a local build); a release
-// binary pulls its own version's tag from the published prefix by
-// default; a development binary builds locally.
+// (spoond images build pulls, falling back to a local build); without
+// it every build is local, release binary or not: spoond publishes no
+// images to pull.
 func TestImagesPhaseBaseRegistry(t *testing.T) {
 	for _, tc := range []struct {
 		name, version, flag, want string
 	}{
-		{"flag on a dev build", "", "registry.example.com/base", "-base-registry registry.example.com/base -base-tag latest"},
-		{"flag on a release", "v4.0.0", "registry.example.com/base", "-base-registry registry.example.com/base -base-tag v4.0.0"},
-		{"release default", "v4.0.0", "", "-base-registry " + publishedBaseImages + " -base-tag v4.0.0"},
-		{"pseudo-version builds", "v3.9.2-0.20261022085442-1f71d1d9bda0", "", ""},
+		{"flag", "v4.1.0", "registry.example.com/base", "build -base-registry registry.example.com/base app"},
+		{"release builds locally", "v4.1.0", "", ""},
+		{"dev builds locally", "", "", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env, _, runner := imagesTestEnv(t)
-			env.Opt.Images = ImagesMinimal
+			writeManifest(t, env)
 			env.Opt.BaseRegistry = tc.flag
 			env.Version = tc.version
 			runImagesPhase(t, env)
-			var build string
-			for _, call := range runner.calls {
-				if strings.Contains(call, " build ") {
-					build = call
-				}
-			}
-			if build == "" {
+			builds := runner.buildCalls()
+			if len(builds) == 0 {
 				t.Fatalf("no build ran; calls: %v", runner.calls)
 			}
-			if tc.want == "" && strings.Contains(build, "-base-registry") {
-				t.Errorf("build = %q, want a local build", build)
+			if tc.want == "" && strings.Contains(builds[0], "-base-registry") {
+				t.Errorf("build = %q, want a local build", builds[0])
 			}
-			if tc.want != "" && !strings.Contains(build, tc.want) {
-				t.Errorf("build = %q, want %q", build, tc.want)
+			if tc.want != "" && !strings.Contains(builds[0], tc.want) {
+				t.Errorf("build = %q, want %q", builds[0], tc.want)
 			}
 		})
 	}
@@ -423,8 +413,8 @@ func TestImagesPhaseBaseRegistry(t *testing.T) {
 // out; a built row is named.
 func TestParseImagesList(t *testing.T) {
 	got := parseImagesList([]byte(sampleImagesList))
-	if len(got) != 1 || got[0] != "go-base" {
-		t.Fatalf("parseImagesList(sample) = %v, want [go-base]", got)
+	if len(got) != 1 || got[0] != "tools" {
+		t.Fatalf("parseImagesList(sample) = %v, want [tools]", got)
 	}
 	header := "NAME  BUILD  DIGEST  VCPU  MEM_MB  DISK_MB  UPDATED_AT\n"
 	if got := parseImagesList([]byte(header)); got != nil {

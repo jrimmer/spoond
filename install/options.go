@@ -37,10 +37,11 @@ type Options struct {
 	// release download (--runtime; runtime phase).
 	Runtime string
 
-	// Images is the catalog to build: minimal, all or none
-	// (--images; images phase). Empty means minimal.
+	// Images is the operator's image manifest whose baked images
+	// the images phase builds, or none (--images). Empty means none:
+	// spoond ships no images.
 	Images string
-	// BaseRegistry is a registry prefix base Docker images are
+	// BaseRegistry is a registry prefix the manifest's images are
 	// pulled from instead of built (--base-registry; images phase).
 	BaseRegistry string
 
@@ -66,8 +67,6 @@ type Options struct {
 const (
 	DefaultStoreDir = "/forkdcache/e2b"
 	HugepagesAuto   = "auto"
-	ImagesMinimal   = "minimal"
-	ImagesAll       = "all"
 	ImagesNone      = "none"
 )
 
@@ -87,12 +86,12 @@ func (o Options) hugepages() string {
 	return HugepagesAuto
 }
 
-// images returns Images or minimal.
+// images returns Images or none.
 func (o Options) images() string {
 	if o.Images != "" {
 		return o.Images
 	}
-	return ImagesMinimal
+	return ImagesNone
 }
 
 // Validate checks the flag values that need no host access, so a typo
@@ -104,10 +103,15 @@ func (o Options) Validate() error {
 			return fmt.Errorf("--hugepages %q: want a positive page count or %q", hp, HugepagesAuto)
 		}
 	}
+	// minimal and all named 4.0's built-in catalog, which spoond no
+	// longer ships: refused with the fix rather than read as a
+	// manifest path that happens not to exist.
 	switch o.images() {
-	case ImagesMinimal, ImagesAll, ImagesNone:
-	default:
-		return fmt.Errorf("--images %q: want %s, %s or %s", o.Images, ImagesMinimal, ImagesAll, ImagesNone)
+	case "minimal", "all":
+		return fmt.Errorf("--images %s: spoond ships no image catalog; pass your own manifest (--images path/to/manifest.yaml) or none", o.Images)
+	}
+	if o.BaseRegistry != "" && o.images() == ImagesNone {
+		return errors.New("--base-registry needs --images: it names where that manifest's images are pulled from")
 	}
 	if (o.TLSCert == "") != (o.TLSKey == "") {
 		return errors.New("--tls-cert and --tls-key go together")

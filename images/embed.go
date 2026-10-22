@@ -1,23 +1,20 @@
-// Package images ships the image build context — images/ itself: the
-// manifest, the dockerfiles, the guest scripts, the hooks and the
-// signing key — inside the spoond binary. A release install has only
-// that binary on the host, so `spoond install images` writes this
-// context to /var/lib/spoond/images and builds the catalog from there,
-// exactly as a build from the repo checkout would.
+// Package images ships spoond's guest pieces — images/guest: the
+// template start command (spoond-guest-init) and the tmux profile for
+// interactive SSH logins (spoond-tmux.sh) — inside the spoond binary.
+// spoond ships no images: an operator's Dockerfile copies these files
+// in (README.md says how), and `spoond install images` writes them to
+// /var/lib/spoond/guest so a build context can take them from there.
 //
-// Everything under images/ ships except README.md (operator docs) and
-// this file; guest/ goes in recursively. When you add a dockerfile,
-// hook or key, extend the patterns here in the same commit.
+// README.md (operator docs) and this file stay out. When you add a
+// guest file, it ships through the guest pattern below.
 package images
 
 import (
 	"embed"
 )
 
-// Context is the docker build context the installer writes to
-// /var/lib/spoond/images: manifest.yaml, every dockerfile, the
-// elixir and scylla init hooks, validate-image.py, the scylla repo
-// list and signing key, and guest/ (the guest init and tmux profile).
+// Context is guest/ as the installer writes it under /var/lib/spoond:
+// guest/spoond-guest-init and guest/spoond-tmux.sh.
 //
-//go:embed manifest.yaml *.dockerfile *.sh *.py *.list *.asc *.gpg guest
+//go:embed guest
 var Context embed.FS

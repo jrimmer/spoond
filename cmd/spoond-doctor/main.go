@@ -2,7 +2,7 @@
 // deployment. It exercises every external surface the backend depends on —
 // the E2B orchestrator (health, NodeInfo), the image registry, the lease
 // API listener, the SSH gateway port, the token seed, the SQLite catalog
-// with its baked images, the pinned E2B artifacts, the build storage, TLS
+// and its images' builds, the pinned E2B artifacts, the build storage, TLS
 // material, the LLM upstream and disk — and reports a PASS/FAIL/WARN
 // table with a non-zero exit when anything is failing.
 //
@@ -65,20 +65,10 @@ var doctorArtifacts = install.Pins()
 // SPOOND_CONTAINER=1, and there is no systemd to ask about units.
 func inContainer() bool { return os.Getenv("SPOOND_CONTAINER") == "1" }
 
-// defaultManifest is the image manifest doctor reads: the one spoond
-// install extracts, else a source checkout's.
-func defaultManifest() string {
-	const installed = "/var/lib/spoond/images/manifest.yaml"
-	if _, err := os.Stat(installed); err == nil {
-		return installed
-	}
-	return "/root/src/spoond/images/manifest.yaml"
-}
-
 func Main(args []string) int {
 	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
 	jsonOut := fs.Bool("json", false, "machine-readable JSON output")
-	manifestPath := fs.String("manifest", defaultManifest(), "image manifest path")
+	manifestPath := fs.String("manifest", "", "an image manifest whose baked images must be in the catalog (optional)")
 	_ = fs.Parse(args)
 
 	results := runChecks(*manifestPath)
@@ -568,69 +558,77 @@ func duration(d time.Duration) string {
 	return d.String()
 }
 
-// checkCatalog verifies every manifest image with baked: true has a
-// current_build_id in ready state.
+// checkCatalog verifies the image catalog: every image row must have a
+// current build in ready state. With a manifest, its baked images must
+// also have a row. spoond ships no images, so an empty catalog is a
+// warning naming how to build one, not a failure.
 func checkCatalog(manifestPath string) []checkResult {
-	m, err := loadDoctorManifest(manifestPath)
-	if err != nil {
-		return []checkResult{{"catalog: baked images", "FAIL", err.Error()}}
-	}
 	var baked []string
-	for _, img := range m.Images {
-		if img.Baked {
-			baked = append(baked, img.Name)
+	if manifestPath != "" {
+		m, err := loadDoctorManifest(manifestPath)
+		if err != nil {
+			return []checkResult{{"catalog: images", "FAIL", err.Error()}}
 		}
-	}
-	if len(baked) == 0 {
-		return []checkResult{{"catalog: baked images", "WARN", "no baked images in " + manifestPath}}
+		for _, img := range m.Images {
+			if img.Baked {
+				baked = append(baked, img.Name)
+			}
+		}
 	}
 	dbPath := envOr("SPOOND_DB_PATH", "/var/lib/spoond/spoond.db")
 	db, err := store.Open(dbPath)
 	if err != nil {
-		return []checkResult{{"catalog: baked images", "FAIL", fmt.Sprintf("open %s: %v", dbPath, err)}}
+		return []checkResult{{"catalog: images", "FAIL", fmt.Sprintf("open %s: %v", dbPath, err)}}
 	}
 	defer db.Close()
 	ctx := context.Background()
-	// A baked image with no catalog row was never built on this host
-	// (spoond install --images minimal builds two): a warning naming
-	// the build. A row whose current build is missing or not ready is
-	// a broken image: a failure.
+	rows, err := db.ListImages(ctx)
+	if err != nil {
+		return []checkResult{{"catalog: images", "FAIL", err.Error()}}
+	}
+	// A row whose current build is missing or not ready is a broken
+	// image: a failure. A baked manifest image with no row was never
+	// built on this host: a warning naming the build.
 	var missing, notBuilt []string
-	for _, name := range baked {
-		img, err := db.GetImage(ctx, name)
-		if err != nil {
-			notBuilt = append(notBuilt, name)
-			continue
-		}
+	have := map[string]bool{}
+	for _, img := range rows {
+		have[img.Name] = true
 		if img.CurrentBuildID == "" {
-			missing = append(missing, name+" (no current build)")
+			missing = append(missing, img.Name+" (no current build)")
 			continue
 		}
 		b, err := db.GetBuild(ctx, img.CurrentBuildID)
 		if err != nil || b.State != "ready" {
-			missing = append(missing, name+" (current build not ready)")
+			missing = append(missing, img.Name+" (current build not ready)")
 		}
 	}
-	return catalogResult(len(baked), missing, notBuilt)
+	for _, name := range baked {
+		if !have[name] {
+			notBuilt = append(notBuilt, name)
+		}
+	}
+	return catalogResult(len(rows), missing, notBuilt)
 }
 
-// catalogResult renders the baked-images check: FAIL for a broken
-// build, WARN for images never built here, PASS otherwise.
-func catalogResult(baked int, missing, notBuilt []string) []checkResult {
-	ready := baked - len(missing) - len(notBuilt)
+// catalogResult renders the catalog check over n image rows: FAIL for
+// a broken build, WARN for manifest images never built here or an
+// empty catalog, PASS otherwise.
+func catalogResult(n int, missing, notBuilt []string) []checkResult {
 	switch {
 	case len(missing) > 0:
-		return []checkResult{{"catalog: baked images", "FAIL",
-			fmt.Sprintf("%d of %d baked image(s) lack a ready build: %s", len(missing), baked, strings.Join(missing, ", "))}}
+		return []checkResult{{"catalog: images", "FAIL",
+			fmt.Sprintf("%d of %d image(s) lack a ready build: %s", len(missing), n, strings.Join(missing, ", "))}}
 	case len(notBuilt) > 0:
-		return []checkResult{{"catalog: baked images", "WARN",
-			fmt.Sprintf("%d/%d baked image(s) ready; not built on this host: %s (spoond images build <name>)", ready, baked, strings.Join(notBuilt, ", "))}}
+		return []checkResult{{"catalog: images", "WARN",
+			fmt.Sprintf("%d image(s) ready; not built on this host: %s (spoond images build <name>)", n, strings.Join(notBuilt, ", "))}}
+	case n == 0:
+		return []checkResult{{"catalog: images", "WARN",
+			"no images in the catalog: leases need one (spoond images build; see images/README.md)"}}
 	}
-	return []checkResult{{"catalog: baked images", "PASS", fmt.Sprintf("%d/%d baked image(s) have a ready build", baked, baked)}}
+	return []checkResult{{"catalog: images", "PASS", fmt.Sprintf("%d image(s) have a ready build", n)}}
 }
 
-// doctorManifestImage is the subset of images/manifest.yaml the doctor
-// reads.
+// doctorManifest is the subset of an image manifest the doctor reads.
 type doctorManifest struct {
 	Images []struct {
 		Name  string `yaml:"name"`

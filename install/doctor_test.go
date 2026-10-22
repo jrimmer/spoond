@@ -37,7 +37,7 @@ func doctorRunnerReply(out []byte, err error) map[string]fakeReply {
 		"systemd-run --wait --pipe --quiet --collect " +
 			"-p EnvironmentFile=-/etc/spoond/llm.env " +
 			"-p EnvironmentFile=/etc/spoond/backend.env " +
-			"/opt/spoond/spoond doctor -manifest /var/lib/spoond/images/manifest.yaml": {out: out, err: err},
+			"/opt/spoond/spoond doctor": {out: out, err: err},
 	}
 }
 
@@ -53,8 +53,8 @@ const doctorTable = "PASS  config: CONSUMER_TOKENS          set\n" +
 
 // TestDoctorPhaseCommandPinned pins the exact command line and the
 // kept row: the systemd-run wrapper with the backend env file, the
-// optional llm.env (the leading minus), the installed binary and the
-// manifest flag, and nothing else. No secret value is on it.
+// optional llm.env (the leading minus) and the installed binary's
+// doctor, and nothing else. No secret value is on it.
 func TestDoctorPhaseCommandPinned(t *testing.T) {
 	env, out, runner := doctorTestEnv()
 	runner.reply = doctorRunnerReply([]byte(doctorTable), nil)
@@ -66,7 +66,7 @@ func TestDoctorPhaseCommandPinned(t *testing.T) {
 	want := "systemd-run --wait --pipe --quiet --collect " +
 		"-p EnvironmentFile=-/etc/spoond/llm.env " +
 		"-p EnvironmentFile=/etc/spoond/backend.env " +
-		"/opt/spoond/spoond doctor -manifest /var/lib/spoond/images/manifest.yaml"
+		"/opt/spoond/spoond doctor"
 
 	if len(runner.calls) != 1 || runner.calls[0] != want {
 		t.Fatalf("ran %v, want exactly\n  %s", runner.calls, want)

@@ -1,12 +1,14 @@
-// The images phase: the image catalog (docs/plans/2026-10-16-4.0-install.md,
-// the `images` row). It writes the embedded build context
-// (github.com/jrimmer/spoond/v4/images) to /var/lib/spoond/images, picks
-// the images the install wants from --images, asks the installed binary
-// which of them already have a current build, and runs one
-// `spoond images build` per missing image. The build's environment
-// values come from /etc/spoond/backend.env and go on the command line
-// as a plain `env KEY=VALUE` prefix — and only the five keys the build
-// needs: no token or other backend.env secret ever reaches an argv.
+// The images phase (docs/plans/2026-10-16-4.0-install.md, the `images`
+// row). spoond ships no images: the phase writes the embedded guest
+// pieces (github.com/jrimmer/spoond/v4/images) to /var/lib/spoond/guest,
+// where an operator's build context copies spoond-guest-init from
+// (images/README.md). With --images <manifest> it then builds that
+// manifest's baked images: it asks the installed binary which already
+// have a current build and runs one `spoond images build` per missing
+// image. The build's environment values come from
+// /etc/spoond/backend.env and go on the command line as a plain
+// `env KEY=VALUE` prefix — and only the five keys the build needs: no
+// token or other backend.env secret ever reaches an argv.
 package install
 
 import (
@@ -16,7 +18,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -27,10 +28,9 @@ import (
 func init() { Phases[PhaseImages] = imagesPhase }
 
 const (
-	// imagesContextPath is where the embedded build context lands,
-	// the directory layout kept: manifest.yaml, the dockerfiles,
-	// the hooks and keys, guest/.
-	imagesContextPath = "/var/lib/spoond/images"
+	// imagesGuestRoot is where the embedded guest/ lands:
+	// /var/lib/spoond/guest/spoond-guest-init and spoond-tmux.sh.
+	imagesGuestRoot = "/var/lib/spoond"
 	// imagesBackendEnvPath is the env file the build values come
 	// from (the spoond phase wrote it).
 	imagesBackendEnvPath = "/etc/spoond/backend.env"
@@ -51,33 +51,28 @@ var imagesBuildEnvKeys = []string{
 	"SPOOND_GUEST_DNS_ADDR",
 }
 
-// imagesMinimalNames is the `minimal` catalog: the two base images
-// (--images minimal, the default).
-var imagesMinimalNames = []string{"py-base", "go-base"}
-
 func imagesPhase(ctx context.Context, env *Env) ([]Item, error) {
 	r := &Reporter{Phase: PhaseImages, Out: env.Out}
 
-	// The build context: a release install has only the spoond
-	// binary, so the context ships inside it and lands here before
-	// anything else. Unchanged files are kept.
-	if err := imagesWriteContext(env, r); err != nil {
+	// The guest pieces every operator Dockerfile copies in. Unchanged
+	// files are kept.
+	if err := imagesWriteGuest(env, r); err != nil {
 		return r.Items(), err
 	}
 
-	// Which images this install wants.
-	var names []string
-	switch env.Opt.images() {
-	case ImagesNone:
-		r.Add(Skipped, "images", "--images none: no catalog built")
+	manifest := env.Opt.images()
+	if manifest == ImagesNone {
+		r.Add(Skipped, "images", "spoond ships no images: build your own with spoond images build (images/README.md), or pass --images <manifest>")
 		return r.Items(), nil
-	case ImagesAll:
-		var err error
-		if names, err = imagesManifestBaked(); err != nil {
-			return r.Items(), err
-		}
-	default: // ImagesMinimal
-		names = imagesMinimalNames
+	}
+	names, err := imagesManifestBaked(env.Resolve(manifest))
+	if err != nil {
+		r.Add(Failed, manifest, err.Error())
+		return r.Items(), err
+	}
+	if len(names) == 0 {
+		r.Add(Skipped, manifest, "no baked images in the manifest")
+		return r.Items(), nil
 	}
 
 	// What the catalog already has.
@@ -86,13 +81,8 @@ func imagesPhase(ctx context.Context, env *Env) ([]Item, error) {
 		return r.Items(), err
 	}
 
-	// Base images: pulled from --base-registry, or from the published
-	// prefix for a release binary; an image the prefix lacks is built
-	// locally (spoond images build falls back).
-	if reg, tag := baseImages(env); reg != "" {
-		r.Add(Kept, "base images", "pulled from "+reg+" (tag "+tag+") when published, else built locally")
-	} else {
-		r.Add(Kept, "base images", "built locally: not a release binary (pass --base-registry to pull)")
+	if env.Opt.BaseRegistry != "" {
+		r.Add(Kept, "base images", "pulled from "+env.Opt.BaseRegistry+" when published there, else built locally")
 	}
 
 	// Build the missing ones, one at a time: a failure stops the
@@ -102,7 +92,7 @@ func imagesPhase(ctx context.Context, env *Env) ([]Item, error) {
 			r.Add(Kept, name, "current build already in the catalog")
 			continue
 		}
-		if err := imagesBuild(ctx, env, name); err != nil {
+		if err := imagesBuild(ctx, env, manifest, name); err != nil {
 			note := imagesBuildFailedNote(name)
 			r.Add(Failed, name, note)
 			return r.Items(), errors.New(note)
@@ -116,12 +106,11 @@ func imagesPhase(ctx context.Context, env *Env) ([]Item, error) {
 	return r.Items(), nil
 }
 
-// imagesWriteContext writes every embedded file under
-// /var/lib/spoond/images, the layout kept: env.writeFile compares
-// before it writes, so a rerun keeps every unchanged file. Files land
-// 0644 except the .sh scripts: 0755. The dockerfiles' COPY --chmod
-// sets the bits inside the images either way.
-func imagesWriteContext(env *Env, r *Reporter) error {
+// imagesWriteGuest writes every embedded file under /var/lib/spoond
+// (guest/...), the layout kept: env.writeFile compares before it
+// writes, so a rerun keeps every unchanged file. The files are
+// scripts an image runs, so they land 0755.
+func imagesWriteGuest(env *Env, r *Reporter) error {
 	return fs.WalkDir(images.Context, ".", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -129,26 +118,21 @@ func imagesWriteContext(env *Env, r *Reporter) error {
 		if d.IsDir() {
 			return nil
 		}
-		mode := fs.FileMode(0o644)
-		if strings.HasSuffix(path, ".sh") {
-			mode = 0o755
-		}
 		b, err := fs.ReadFile(images.Context, path)
 		if err != nil {
 			return fmt.Errorf("embedded %s: %w", path, err)
 		}
-		return env.writeFile(r, filepath.Join(imagesContextPath, path), b, mode)
+		return env.writeFile(r, filepath.Join(imagesGuestRoot, path), b, 0o755)
 	})
 }
 
 // imagesManifestBaked returns the manifest's baked image names in file
-// order — the `all` catalog — parsed from the embedded manifest.yaml
-// as cmd/spoond-images parses it; only the name and baked fields are
-// needed here.
-func imagesManifestBaked() ([]string, error) {
-	b, err := fs.ReadFile(images.Context, "manifest.yaml")
+// order, parsed as cmd/spoond-images parses it; only the name and
+// baked fields are needed here. path is the host path (Root applied).
+func imagesManifestBaked(path string) ([]string, error) {
+	b, err := os.ReadFile(path)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read the image manifest: %w", err)
 	}
 	var m struct {
 		Images []struct {
@@ -157,7 +141,7 @@ func imagesManifestBaked() ([]string, error) {
 		} `yaml:"images"`
 	}
 	if err := yaml.Unmarshal(b, &m); err != nil {
-		return nil, fmt.Errorf("parse manifest.yaml: %w", err)
+		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 	var names []string
 	for _, e := range m.Images {
@@ -211,13 +195,15 @@ func parseImagesList(out []byte) []string {
 
 // imagesBuild runs one build:
 //
-//	env K=V ... /opt/spoond/spoond images -manifest <ctx>/manifest.yaml -context <ctx> build <name>
+//	env K=V ... /opt/spoond/spoond images -manifest <manifest> -context <its dir> build <name>
 //
-// The flags go before `build`: Go's flag package stops at the first
-// positional argument. The `env` prefix carries only
-// imagesBuildEnvKeys, read from backend.env — missing keys are left
-// out and the build falls back to spoond-images' own defaults.
-func imagesBuild(ctx context.Context, env *Env, name string) error {
+// The images flags go before `build` (Go's flag package stops at the
+// first positional argument); -base-registry is build's own flag, after
+// it. The context is the manifest's directory, where
+// its dockerfiles sit. The `env` prefix carries only imagesBuildEnvKeys,
+// read from backend.env — missing keys are left out and the build falls
+// back to spoond-images' own defaults.
+func imagesBuild(ctx context.Context, env *Env, manifest, name string) error {
 	var args []string
 	if b, err := os.ReadFile(env.Resolve(imagesBackendEnvPath)); err == nil {
 		vals := imagesParseEnvFile(b)
@@ -232,39 +218,15 @@ func imagesBuild(ctx context.Context, env *Env, name string) error {
 	args = append(args,
 		imagesSpoondBin,
 		"images",
-		"-manifest", filepath.Join(imagesContextPath, "manifest.yaml"),
-		"-context", imagesContextPath,
+		"-manifest", manifest,
+		"-context", filepath.Dir(manifest),
 		"build",
 	)
-	if reg, tag := baseImages(env); reg != "" {
-		args = append(args, "-base-registry", reg, "-base-tag", tag)
+	if reg := env.Opt.BaseRegistry; reg != "" {
+		args = append(args, "-base-registry", reg)
 	}
 	args = append(args, name)
 	return env.exec(ctx, "env", args...)
-}
-
-// publishedBaseImages is where a release's base images are published
-// (spoond images publish --prefix, tagged with the release version).
-const publishedBaseImages = "ghcr.io/jrimmer/spoond-images"
-
-// releaseTag matches a release version (v4.0.0, v4.0.0-rc.1), not a
-// development pseudo-version.
-var releaseTag = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$`)
-
-// baseImages is the prefix and tag base images are pulled from:
-// --base-registry (the release's tag on a release binary, else latest),
-// else the published prefix for a release binary, else none (build).
-func baseImages(env *Env) (string, string) {
-	release := releaseTag.MatchString(env.Version)
-	switch {
-	case env.Opt.BaseRegistry != "" && release:
-		return env.Opt.BaseRegistry, env.Version
-	case env.Opt.BaseRegistry != "":
-		return env.Opt.BaseRegistry, "latest"
-	case release:
-		return publishedBaseImages, env.Version
-	}
-	return "", ""
 }
 
 // imagesParseEnvFile reads KEY=VALUE lines — comments (#) and blanks

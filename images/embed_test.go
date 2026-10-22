@@ -1,7 +1,6 @@
-// Tests for the embedded build context (embed.go): the files the
-// image builds need ride in the binary — the manifest, the two base
-// dockerfiles the minimal catalog builds, and the guest scripts — and
-// README.md (operator docs) does not.
+// Tests for the embedded guest pieces (embed.go): guest/ rides in the
+// binary, nothing else does — no image definitions, and not README.md
+// (operator docs).
 package images
 
 import (
@@ -9,19 +8,26 @@ import (
 	"testing"
 )
 
-func TestContextHasBuildFiles(t *testing.T) {
-	for _, name := range []string{
-		"manifest.yaml",
-		"py-base.dockerfile",
-		"go-base.dockerfile",
-	} {
-		b, err := fs.ReadFile(Context, name)
-		if err != nil {
-			t.Errorf("Context: %s: %v", name, err)
-			continue
-		}
-		if len(b) == 0 {
-			t.Errorf("Context: %s is empty", name)
+func TestContextHasGuestInit(t *testing.T) {
+	b, err := fs.ReadFile(Context, "guest/spoond-guest-init")
+	if err != nil {
+		t.Fatalf("Context: guest/spoond-guest-init: %v", err)
+	}
+	if len(b) == 0 {
+		t.Error("Context: guest/spoond-guest-init is empty")
+	}
+}
+
+// TestContextShipsNoCatalog guards the bare install: spoond ships no
+// image definitions, only the guest pieces.
+func TestContextShipsNoCatalog(t *testing.T) {
+	entries, err := fs.ReadDir(Context, ".")
+	if err != nil {
+		t.Fatalf("read Context: %v", err)
+	}
+	for _, e := range entries {
+		if e.Name() != "guest" {
+			t.Errorf("Context has %s; only guest/ ships", e.Name())
 		}
 	}
 }

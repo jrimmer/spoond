@@ -17,8 +17,12 @@ func TestOptionsValidate(t *testing.T) {
 		{"hugepages auto", Options{Hugepages: "auto"}, ""},
 		{"hugepages word", Options{Hugepages: "lots"}, "--hugepages"},
 		{"hugepages zero", Options{Hugepages: "0"}, "--hugepages"},
-		{"images all", Options{Images: "all"}, ""},
-		{"images bad", Options{Images: "some"}, "--images"},
+		{"images none", Options{Images: "none"}, ""},
+		{"images manifest", Options{Images: "/srv/catalog/manifest.yaml"}, ""},
+		{"images all (4.0 catalog)", Options{Images: "all"}, "ships no image catalog"},
+		{"images minimal (4.0 catalog)", Options{Images: "minimal"}, "ships no image catalog"},
+		{"base registry with a manifest", Options{Images: "m.yaml", BaseRegistry: "r.example.com/x"}, ""},
+		{"base registry alone", Options{BaseRegistry: "r.example.com/x"}, "--base-registry"},
 		{"tls pair", Options{TLSCert: "c", TLSKey: "k"}, ""},
 		{"tls cert alone", Options{TLSCert: "c"}, "--tls-cert"},
 		{"runner pair", Options{RunnerURL: "u", RunnerTokenFile: "f"}, ""},
@@ -39,7 +43,7 @@ func TestOptionsValidate(t *testing.T) {
 
 func TestOptionsDefaults(t *testing.T) {
 	var o Options
-	if o.storeDir() != DefaultStoreDir || o.hugepages() != HugepagesAuto || o.images() != ImagesMinimal {
+	if o.storeDir() != DefaultStoreDir || o.hugepages() != HugepagesAuto || o.images() != ImagesNone {
 		t.Fatalf("defaults: store %q hugepages %q images %q", o.storeDir(), o.hugepages(), o.images())
 	}
 }

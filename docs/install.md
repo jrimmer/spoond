@@ -4,12 +4,14 @@ spoond is the control plane; the sandboxes themselves are run by E2B's
 orchestrator (see [substrate.md](substrate.md)). An install brings up one
 host with both: the E2B orchestrator and its pinned Firecracker, guest
 kernel and busybox, and spoond's backend, SSH gateway and dashboard, with
-the local container registry and the image catalog.
+the local container registry. spoond ships no sandbox images: the host's
+image catalog starts empty, and the operator builds the images leases
+run ([images/README.md](../images/README.md)).
 
 There are two ways to install, both from the same release:
 
 - **Native**: `spoond install` on a Debian 13 host. It sets up the host,
-  installs every service as a systemd unit and builds the image catalog.
+  installs every service as a systemd unit.
 - **Docker**: `deploy/docker/compose.yaml` runs the same services as
   containers, after one `prepare` run writes the host's kernel settings.
 
@@ -30,8 +32,7 @@ file that exists.
 - Free ports 8890 (lease API), 8891 (proxy), 2222 (SSH gateway), 8893
   (dashboard), 5000 (registry), 5007 and 5008 (orchestrator).
 - Internet access during the install: apt packages, the release's
-  runtime tarball, the pinned Firecracker, kernel and busybox, and the
-  base images.
+  runtime tarball and the pinned Firecracker, kernel and busybox.
 
 Sandbox memory is hugepage-backed. `--hugepages auto` (the default) keeps
 `max(6 GiB, 17 %)` of memory for the host and reserves the rest in 2 MiB
@@ -59,7 +60,7 @@ prints the plan and changes nothing.
 | `host` | apt packages (Docker among them); the `nbd` (`nbds_max=256`), `tun` and `kvm` modules and the nbd udev rule; sysctls and hugepages (also on the kernel command line, through `update-grub`); the legacy iptables backend; the snapshot store and its directories; Docker's store drop-in and the local registry (`registry:2.8.3` on `127.0.0.1:5000`); the AppArmor Unix-socket check |
 | `runtime` | the release's `spoond-runtime` tarball (the orchestrator and envd) for this binary's version, checked against `SHA256SUMS`, or `--runtime <tarball>`; the pinned Firecracker, kernel and busybox, each checked by SHA-256; `/etc/e2b/orchestrator.env` and `flags.json`; the envd token seed; the `e2b-guard` firewall and the orchestrator unit; waits for the orchestrator's `/health` |
 | `spoond` | the binary as `/opt/spoond/spoond`; every secret, `backend.env`, the drain hook's files, the gateway and dashboard env; TLS from `--tls-cert`/`--tls-key`, else a self-signed pair for `--host-name`; the backend, gateway, dashboard and drain units, started; waits for `/healthz`; the first admin user from `--admin-key` |
-| `images` | the image catalog: `--images minimal` (default: `py-base` and `go-base`), `all` or `none`. A release binary pulls each base Docker image from `ghcr.io/jrimmer/spoond-images` when it is published for the version (`--base-registry` names another prefix) and builds it locally otherwise |
+| `images` | the guest pieces an image's Dockerfile copies in, as `/var/lib/spoond/guest/` ([images/README.md](../images/README.md)). Nothing is built by default; `--images <manifest>` builds that manifest's baked images, pulled from `--base-registry <prefix>` when given and built locally otherwise |
 | `doctor` | `spoond doctor` over the result; the install fails if doctor does |
 
 `--host-name` defaults to `hostname -f`; it names the TLS certificate and
@@ -82,7 +83,7 @@ host phase finishes its other steps and asks for a reboot; run
 | `/etc/spoond/dash-password`, `dash.env` | the dashboard's generated password (user `admin`) and its configuration |
 | `/etc/spoond-gateway.env`, `/etc/spoond-gateway/` | the gateway's token and host name; its keys (made at first start) |
 | `/etc/e2b/orchestrator.env`, `flags.json`, `drain.env` | the orchestrator's configuration and drain hooks |
-| `/var/lib/spoond/` | the SQLite database, the identity store (`users.json`), backups and the image build context |
+| `/var/lib/spoond/` | the SQLite database, the identity store (`users.json`), backups and the guest pieces images copy in (`guest/`) |
 | `/etc/systemd/system/` | `e2b-guard`, `e2b-orchestrator`, `spoond-backend`, `spoond-sshd-gateway`, `spoond-dash`, `spoond-drain` |
 
 Back up `/etc/spoond` and `/var/lib/spoond` together. Edit `backend.env`
@@ -100,6 +101,7 @@ release tag:
 ```bash
 cd deploy/docker
 export SPOOND_HOST_NAME=sandbox.example.com   # or put it in .env
+SPOOND_VERSION=<version> docker compose build # the image, from this checkout
 docker compose run --rm prepare     # modules, sysctls, hugepages, kernel command line
 sudo update-grub                    # the hugepages on the kernel command line
 # reboot only if prepare says the kernel could not reserve the pages
@@ -112,10 +114,11 @@ docker compose exec spoond spoond-container install images
 docker compose exec spoond spoond-container doctor
 ```
 
-The image is `ghcr.io/jrimmer/spoond:<version>` (`SPOOND_IMAGE`);
-`docker compose build` builds it from the checkout instead, with the
-release's runtime tarball in `deploy/docker/artifacts/` or downloaded for
-the build's `VERSION`. The snapshot store is `SPOOND_STORE_DIR` on the
+spoond publishes no image: `docker compose build` builds it from the
+checkout as `spoond:local` (`SPOOND_IMAGE`), and compose never pulls it.
+The build takes the release's runtime tarball from
+`deploy/docker/artifacts/` when one is there, else downloads it for
+`SPOOND_VERSION`. The snapshot store is `SPOOND_STORE_DIR` on the
 host (default `/forkdcache/e2b`; it must exist), and `./config`
 (`SPOOND_CONFIG`) holds the configuration, the secrets and the database,
 laid out as on a native host under `etc/` and `var/`: back it up.

@@ -1,7 +1,7 @@
 // The doctor phase: the last row of the install phase table
 // (docs/plans/2026-10-16-4.0-install.md, S6b). It runs `spoond doctor`
 // over the installed result — orchestrator, registry, LLM upstream,
-// listeners, catalog — and the install fails when doctor fails, so a
+// listeners, the image catalog — and the install fails when doctor fails, so a
 // half-installed host never reports success.
 //
 // The command runs through systemd-run with the backend's env files as
@@ -32,9 +32,6 @@ const (
 	// minus on its EnvironmentFile means systemd carries on when it
 	// does not exist.
 	doctorLLMEnv = "/etc/spoond/llm.env"
-	// doctorManifest is the image catalog doctor's catalog check
-	// reads (the images phase wrote it).
-	doctorManifest = "/var/lib/spoond/images/manifest.yaml"
 )
 
 // doctorPhase implements the doctor row of the phase table.
@@ -67,7 +64,7 @@ func doctorPhase(ctx context.Context, env *Env) ([]Item, error) {
 		"-p", "EnvironmentFile=-"+doctorLLMEnv,
 		"-p", "EnvironmentFile="+doctorBackendEnv,
 		"/opt/spoond/spoond",
-		"doctor", "-manifest", doctorManifest,
+		"doctor",
 	)
 
 	// Doctor's own stdout is the PASS/FAIL/WARN table: write it as

@@ -21,7 +21,7 @@ spoond (this repo, one Go binary)          e2b-orchestrator (our fork of
 │ Forgejo Actions runner           │ ────▶ │ envd in every guest (:49983) │
 │ SQLite state (leases, catalog)   │ :5007 └──────────────────────────────┘
 └──────────────────────────────────┘
-images/*.dockerfile → docker → local registry → E2B templates (spoond images)
+your Dockerfiles → docker → local registry → E2B templates (spoond images)
 ```
 
 spoond is a generic microVM utility: it takes no position on how agents
@@ -168,8 +168,9 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
   `Retry-After` and the lease stays suspended; no failed resume marks a
   lease lost. Automatic suspends name their reason on the lease and its
   `suspended` event.
-- **Images**: one Dockerfile per capability in `images/`, built into E2B
-  templates by `spoond images build <name>` (or `--all`). Every guest
+- **Images**: spoond ships none. Any Dockerfile that copies in spoond's
+  guest init ([images/README.md](images/README.md)) is built into an E2B
+  template by `spoond images build <name>` (or `--all`). Every guest
   resolves names through the LAN resolver only and carries a container
   marker, so container tools such as kaniko work inside sandboxes.
 - **SSH gateway**: `ssh new@sandbox.example` auto-creates a persistent
@@ -316,9 +317,9 @@ command installs it:
 sudo ./spoond install --host-name sandbox.example.com --admin-key ~/.ssh/id_ed25519.pub
 ```
 
-It sets up the host, the E2B orchestrator, spoond's services and the
-image catalog, creates the first admin user and ends with `spoond
-doctor`; Docker Compose (`deploy/docker/`) runs the same stack in
+It sets up the host, the E2B orchestrator and spoond's services, creates
+the first admin user and ends with `spoond doctor`; the images leases
+run are yours to build ([images/README.md](images/README.md)); Docker Compose (`deploy/docker/`) runs the same stack in
 containers. [docs/install.md](docs/install.md) has both.
 
 ## Status

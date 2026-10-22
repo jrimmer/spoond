@@ -49,8 +49,9 @@ const installUsage = `usage: spoond install [flags] [phase] [flags]
       --store-disk DEV       make the snapshot store a ZFS pool on DEV
       --store-dir DIR        the snapshot store (default /forkdcache/e2b)
       --runtime FILE         a local spoond-runtime tarball, not the download
-      --images SET           minimal (default), all or none
-      --base-registry PFX    pull base Docker images from PFX, not build
+      --images MANIFEST      build MANIFEST's baked images (default none:
+                             spoond ships no images)
+      --base-registry PFX    pull those images from PFX, not build
       --runner-url URL       register a Forgejo Actions runner
       --runner-token-file F  its registration token, read from a file
       --container            run from inside the Docker image (Docker install)
@@ -89,8 +90,8 @@ func installMain(args []string) int {
 	fs.StringVar(&opt.StoreDisk, "store-disk", "", "disk or partition for the snapshot store's ZFS pool")
 	fs.StringVar(&opt.StoreDir, "store-dir", install.DefaultStoreDir, "snapshot store directory")
 	fs.StringVar(&opt.Runtime, "runtime", "", "local spoond-runtime tarball")
-	fs.StringVar(&opt.Images, "images", install.ImagesMinimal, "image catalog: minimal, all or none")
-	fs.StringVar(&opt.BaseRegistry, "base-registry", "", "registry prefix to pull base images from")
+	fs.StringVar(&opt.Images, "images", install.ImagesNone, "image manifest whose baked images to build, or none")
+	fs.StringVar(&opt.BaseRegistry, "base-registry", "", "registry prefix to pull the manifest's images from")
 	fs.StringVar(&opt.RunnerURL, "runner-url", "", "Forgejo URL to register an Actions runner with")
 	fs.StringVar(&opt.RunnerTokenFile, "runner-token-file", "", "file holding the runner registration token")
 	fs.BoolVar(&opt.Container, "container", false, "run from inside the Docker image")
