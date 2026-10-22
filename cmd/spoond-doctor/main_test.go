@@ -445,3 +445,23 @@ func TestCheckFileSecrets(t *testing.T) {
 		t.Fatalf("bad.env = %+v, want WARN naming both files", b)
 	}
 }
+
+// TestCatalogResult: a broken build fails, an image never built on this
+// host warns (a minimal install builds two of the baked images), all
+// ready passes.
+func TestCatalogResult(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		missing, notBuilt []string
+		want              string
+	}{
+		{"all ready", nil, nil, "PASS"},
+		{"minimal install", nil, []string{"dev-base", "node-base"}, "WARN"},
+		{"broken build", []string{"py-base (current build not ready)"}, []string{"dev-base"}, "FAIL"},
+	} {
+		got := catalogResult(4, tc.missing, tc.notBuilt)
+		if len(got) != 1 || got[0].status != tc.want {
+			t.Errorf("%s: %+v, want %s", tc.name, got, tc.want)
+		}
+	}
+}

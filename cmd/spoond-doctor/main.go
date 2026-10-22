@@ -574,11 +574,15 @@ func checkCatalog(manifestPath string) []checkResult {
 	}
 	defer db.Close()
 	ctx := context.Background()
-	var missing []string
+	// A baked image with no catalog row was never built on this host
+	// (spoond install --images minimal builds two): a warning naming
+	// the build. A row whose current build is missing or not ready is
+	// a broken image: a failure.
+	var missing, notBuilt []string
 	for _, name := range baked {
 		img, err := db.GetImage(ctx, name)
 		if err != nil {
-			missing = append(missing, name+" (no catalog row)")
+			notBuilt = append(notBuilt, name)
 			continue
 		}
 		if img.CurrentBuildID == "" {
@@ -590,11 +594,22 @@ func checkCatalog(manifestPath string) []checkResult {
 			missing = append(missing, name+" (current build not ready)")
 		}
 	}
-	if len(missing) > 0 {
+	return catalogResult(len(baked), missing, notBuilt)
+}
+
+// catalogResult renders the baked-images check: FAIL for a broken
+// build, WARN for images never built here, PASS otherwise.
+func catalogResult(baked int, missing, notBuilt []string) []checkResult {
+	ready := baked - len(missing) - len(notBuilt)
+	switch {
+	case len(missing) > 0:
 		return []checkResult{{"catalog: baked images", "FAIL",
-			fmt.Sprintf("%d of %d baked image(s) lack a ready build: %s", len(missing), len(baked), strings.Join(missing, ", "))}}
+			fmt.Sprintf("%d of %d baked image(s) lack a ready build: %s", len(missing), baked, strings.Join(missing, ", "))}}
+	case len(notBuilt) > 0:
+		return []checkResult{{"catalog: baked images", "WARN",
+			fmt.Sprintf("%d/%d baked image(s) ready; not built on this host: %s (spoond images build <name>)", ready, baked, strings.Join(notBuilt, ", "))}}
 	}
-	return []checkResult{{"catalog: baked images", "PASS", fmt.Sprintf("%d/%d baked image(s) have a ready build", len(baked), len(baked))}}
+	return []checkResult{{"catalog: baked images", "PASS", fmt.Sprintf("%d/%d baked image(s) have a ready build", baked, baked)}}
 }
 
 // doctorManifestImage is the subset of images/manifest.yaml the doctor
