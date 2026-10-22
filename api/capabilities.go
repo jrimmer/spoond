@@ -55,7 +55,10 @@ type capabilitySurfaces struct {
 // capabilityImage describes one catalog image. vcpu, memory_mb, disk_mb
 // and min_memory_mb are the same values GET /api/images?detail=1
 // reports — both read the same ListImages rows through the same
-// effectiveMinMemoryMB helper, so the two cannot disagree.
+// effectiveMinMemoryMB helper, so the two cannot disagree. capability
+// and description are the row's too: the image manifest's fields,
+// written by `spoond images build` or `spoond images describe`. spoond
+// keeps no list of its own, so a row without them omits both.
 type capabilityImage struct {
 	Name        string   `json:"name"`
 	Capability  string   `json:"capability,omitempty"`
@@ -291,8 +294,8 @@ func (s *Server) capabilities() capabilityJSON {
 			}
 			imgs = append(imgs, capabilityImage{
 				Name:        row.Name,
-				Capability:  ImageCapability(row.Name),
-				Description: ImageDescription(row.Name),
+				Capability:  row.Capability,
+				Description: row.Description,
 				VCPU:        row.VCPU,
 				MemoryMB:    row.MemoryMB,
 				DiskMB:      row.DiskMB,
@@ -358,35 +361,3 @@ func runnerImageTable() []runnerLabel {
 	}
 	return out
 }
-
-// imageMeta is the capability/description an image name carries
-// (#52): the manifest's (images/manifest.yaml) `capability` and
-// `description` fields, kept here as data beside the API. An image the
-// table does not know is an image built outside the manifest: the
-// document then omits both fields rather than guessing — a host may
-// also have catalog rows this source never named.
-type imageMeta struct {
-	Capability  string
-	Description string
-}
-
-// imageMetaTable is that data, one row per manifest image, name-keyed.
-var imageMetaTable = map[string]imageMeta{
-	"py-base":        {"python", "Python 3.12 slim base for Python build/test/CI jobs"},
-	"go-base":        {"golang", "Go 1.25 toolchain (go/gofmt) + git for Go build/test/CI jobs"},
-	"dev-base":       {"interactive-dev", "Interactive dev environment: tmux + sshd + git + python3 + build tools"},
-	"elixir-base":    {"elixir", "Elixir/Erlang OTP toolchain + git for Elixir build/test/CI jobs"},
-	"elixir-release": {"elixir-release", "Elixir/OTP + Rust + Node/pnpm + kaniko for full Phoenix+NIF release builds"},
-	"llm-review":     {"llm-review", "Python 3.12 + git + curl for LLM code-review jobs (language-agnostic)"},
-	"rust-base":      {"rust", "Rust stable toolchain + git for Rust build/test/CI jobs"},
-	"rust-qt-base":   {"rust-qt", "Rust (Arch) + Qt 6 for headless GUI tests"},
-	"scylla":         {"cql-database", "ScyllaDB single node, developer mode — a SERVICE image leased per job and reached from another lease's sandbox"},
-}
-
-// ImageCapability returns the image name's capability (manifest field),
-// "" when the table does not know the name.
-func ImageCapability(name string) string { return imageMetaTable[name].Capability }
-
-// ImageDescription returns the image name's one-line description
-// (manifest field), "" when the table does not know the name.
-func ImageDescription(name string) string { return imageMetaTable[name].Description }

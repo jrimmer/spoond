@@ -338,7 +338,9 @@ func TestMigration7HolderOnV6Database(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN self_token`,
 		`ALTER TABLE leases DROP COLUMN self_token_hash`,
 		`DROP TABLE IF EXISTS lease_history`,
-		`DELETE FROM schema_migrations WHERE version IN (7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33)`,
+		`ALTER TABLE images DROP COLUMN capability`,
+		`ALTER TABLE images DROP COLUMN description`,
+		`DELETE FROM schema_migrations WHERE version IN (7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34)`,
 	} {
 		if _, err := db6.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -429,7 +431,9 @@ func TestMigration9GenerationOnV8Database(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN self_token`,
 		`ALTER TABLE leases DROP COLUMN self_token_hash`,
 		`DROP TABLE IF EXISTS lease_history`,
-		`DELETE FROM schema_migrations WHERE version IN (9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33)`,
+		`ALTER TABLE images DROP COLUMN capability`,
+		`ALTER TABLE images DROP COLUMN description`,
+		`DELETE FROM schema_migrations WHERE version IN (9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34)`,
 	} {
 		if _, err := db8.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -518,7 +522,9 @@ func TestMigration23DiskMBBackfill(t *testing.T) {
 		`ALTER TABLE lease_jobs DROP COLUMN stderr_dropped_newlines`,
 		`ALTER TABLE lease_jobs DROP COLUMN stdout_dropped_ends_with_newline`,
 		`ALTER TABLE lease_jobs DROP COLUMN stderr_dropped_ends_with_newline`,
-		`DELETE FROM schema_migrations WHERE version IN (23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33)`,
+		`ALTER TABLE images DROP COLUMN capability`,
+		`ALTER TABLE images DROP COLUMN description`,
+		`DELETE FROM schema_migrations WHERE version IN (23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34)`,
 	} {
 		if _, err := db22.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -591,7 +597,9 @@ func TestMigration24UsageSamplesOnV23Database(t *testing.T) {
 		`ALTER TABLE lease_jobs DROP COLUMN stderr_dropped_newlines`,
 		`ALTER TABLE lease_jobs DROP COLUMN stdout_dropped_ends_with_newline`,
 		`ALTER TABLE lease_jobs DROP COLUMN stderr_dropped_ends_with_newline`,
-		`DELETE FROM schema_migrations WHERE version IN (24, 25, 26, 27, 28, 29, 30, 31, 32, 33)`,
+		`ALTER TABLE images DROP COLUMN capability`,
+		`ALTER TABLE images DROP COLUMN description`,
+		`DELETE FROM schema_migrations WHERE version IN (24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34)`,
 	} {
 		if _, err := db23.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -682,7 +690,9 @@ func TestMigration12MemoryMBBackfill(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN self_token`,
 		`ALTER TABLE leases DROP COLUMN self_token_hash`,
 		`DROP TABLE IF EXISTS lease_history`,
-		`DELETE FROM schema_migrations WHERE version IN (13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33)`,
+		`ALTER TABLE images DROP COLUMN capability`,
+		`ALTER TABLE images DROP COLUMN description`,
+		`DELETE FROM schema_migrations WHERE version IN (13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34)`,
 		`ALTER TABLE leases DROP COLUMN memory_mb`,
 		`ALTER TABLE leases DROP COLUMN paused_expiry_notified`,
 		`ALTER TABLE leases DROP COLUMN pinned_idle_since`,
@@ -770,7 +780,9 @@ func TestMigration15IdleSuspendOnV14Database(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN self_token`,
 		`ALTER TABLE leases DROP COLUMN self_token_hash`,
 		`DROP TABLE IF EXISTS lease_history`,
-		`DELETE FROM schema_migrations WHERE version IN (15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33)`,
+		`ALTER TABLE images DROP COLUMN capability`,
+		`ALTER TABLE images DROP COLUMN description`,
+		`DELETE FROM schema_migrations WHERE version IN (15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34)`,
 	} {
 		if _, err := db14.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -856,7 +868,9 @@ func TestMigration17NamedSnapshotsOnV16Database(t *testing.T) {
 		`ALTER TABLE lease_jobs DROP COLUMN stderr_dropped_newlines`,
 		`ALTER TABLE lease_jobs DROP COLUMN stdout_dropped_ends_with_newline`,
 		`ALTER TABLE lease_jobs DROP COLUMN stderr_dropped_ends_with_newline`,
-		`DELETE FROM schema_migrations WHERE version IN (17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33)`,
+		`ALTER TABLE images DROP COLUMN capability`,
+		`ALTER TABLE images DROP COLUMN description`,
+		`DELETE FROM schema_migrations WHERE version IN (17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34)`,
 	} {
 		if _, err := db16.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -945,7 +959,9 @@ func TestMigration19LostReasonOnV18Database(t *testing.T) {
 		`ALTER TABLE lease_jobs DROP COLUMN stderr_dropped_newlines`,
 		`ALTER TABLE lease_jobs DROP COLUMN stdout_dropped_ends_with_newline`,
 		`ALTER TABLE lease_jobs DROP COLUMN stderr_dropped_ends_with_newline`,
-		`DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33)`,
+		`ALTER TABLE images DROP COLUMN capability`,
+		`ALTER TABLE images DROP COLUMN description`,
+		`DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34)`,
 	} {
 		if _, err := db18.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -1040,7 +1056,9 @@ func TestMigration20JobMaxRuntimeOnV19Database(t *testing.T) {
 		`ALTER TABLE lease_jobs DROP COLUMN stderr_dropped_newlines`,
 		`ALTER TABLE lease_jobs DROP COLUMN stdout_dropped_ends_with_newline`,
 		`ALTER TABLE lease_jobs DROP COLUMN stderr_dropped_ends_with_newline`,
-		`DELETE FROM schema_migrations WHERE version IN (20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33)`,
+		`ALTER TABLE images DROP COLUMN capability`,
+		`ALTER TABLE images DROP COLUMN description`,
+		`DELETE FROM schema_migrations WHERE version IN (20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34)`,
 	} {
 		if _, err := db19.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -1139,7 +1157,9 @@ func TestMigration21SuspendFactsOnV20Database(t *testing.T) {
 		`ALTER TABLE lease_jobs DROP COLUMN stderr_dropped_newlines`,
 		`ALTER TABLE lease_jobs DROP COLUMN stdout_dropped_ends_with_newline`,
 		`ALTER TABLE lease_jobs DROP COLUMN stderr_dropped_ends_with_newline`,
-		`DELETE FROM schema_migrations WHERE version IN (21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33)`,
+		`ALTER TABLE images DROP COLUMN capability`,
+		`ALTER TABLE images DROP COLUMN description`,
+		`DELETE FROM schema_migrations WHERE version IN (21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34)`,
 	} {
 		if _, err := db20.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -1236,7 +1256,9 @@ func TestMigration22PinsHoldsAndBackfillsPausedAt(t *testing.T) {
 		`ALTER TABLE lease_jobs DROP COLUMN stderr_dropped_newlines`,
 		`ALTER TABLE lease_jobs DROP COLUMN stdout_dropped_ends_with_newline`,
 		`ALTER TABLE lease_jobs DROP COLUMN stderr_dropped_ends_with_newline`,
-		`DELETE FROM schema_migrations WHERE version IN (22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33)`,
+		`ALTER TABLE images DROP COLUMN capability`,
+		`ALTER TABLE images DROP COLUMN description`,
+		`DELETE FROM schema_migrations WHERE version IN (22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34)`,
 	} {
 		if _, err := db21.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -1491,7 +1513,9 @@ func TestMigration25VCPUBackfill(t *testing.T) {
 		`ALTER TABLE lease_jobs DROP COLUMN stderr_dropped_newlines`,
 		`ALTER TABLE lease_jobs DROP COLUMN stdout_dropped_ends_with_newline`,
 		`ALTER TABLE lease_jobs DROP COLUMN stderr_dropped_ends_with_newline`,
-		`DELETE FROM schema_migrations WHERE version IN (25, 26, 27, 28, 29, 30, 31, 32, 33)`,
+		`ALTER TABLE images DROP COLUMN capability`,
+		`ALTER TABLE images DROP COLUMN description`,
+		`DELETE FROM schema_migrations WHERE version IN (25, 26, 27, 28, 29, 30, 31, 32, 33, 34)`,
 	} {
 		if _, err := db24.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -1590,7 +1614,9 @@ func TestMigration26ImageSizesOnV25Database(t *testing.T) {
 		`ALTER TABLE lease_jobs DROP COLUMN stderr_dropped_newlines`,
 		`ALTER TABLE lease_jobs DROP COLUMN stdout_dropped_ends_with_newline`,
 		`ALTER TABLE lease_jobs DROP COLUMN stderr_dropped_ends_with_newline`,
-		`DELETE FROM schema_migrations WHERE version IN (26, 27, 28, 29, 30, 31, 32, 33)`,
+		`ALTER TABLE images DROP COLUMN capability`,
+		`ALTER TABLE images DROP COLUMN description`,
+		`DELETE FROM schema_migrations WHERE version IN (26, 27, 28, 29, 30, 31, 32, 33, 34)`,
 	} {
 		if _, err := db25.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -1675,7 +1701,9 @@ func TestMigration28GrantsAndSecretFacts(t *testing.T) {
 		`ALTER TABLE lease_jobs DROP COLUMN stderr_dropped_newlines`,
 		`ALTER TABLE lease_jobs DROP COLUMN stdout_dropped_ends_with_newline`,
 		`ALTER TABLE lease_jobs DROP COLUMN stderr_dropped_ends_with_newline`,
-		`DELETE FROM schema_migrations WHERE version IN (28, 29, 30, 31, 32, 33)`,
+		`ALTER TABLE images DROP COLUMN capability`,
+		`ALTER TABLE images DROP COLUMN description`,
+		`DELETE FROM schema_migrations WHERE version IN (28, 29, 30, 31, 32, 33, 34)`,
 	} {
 		if _, err := db27.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -1717,5 +1745,60 @@ func TestMigration28GrantsAndSecretFacts(t *testing.T) {
 		Owner: "alice", Name: "warm", Grantee: "bob", CreatedAt: base,
 	}); err != nil {
 		t.Fatalf("insert grant after migration: %v", err)
+	}
+}
+
+// TestMigration34ImageMetaOnV33Database: a version-33 database with an
+// image row opens at 34 with images.capability and images.description,
+// the existing row reading both empty (the document omits them until a
+// build or `spoond images describe` writes them), and both round-trip.
+func TestMigration34ImageMetaOnV33Database(t *testing.T) {
+	db, path := openTestDB(t)
+	ctx := context.Background()
+	img := ImageRow{
+		Name: "go-base", TemplateID: "tpl0123456789abcdefgh", CurrentBuildID: "b-1",
+		VCPU: 2, MemoryMB: 2048, DiskMB: 4096,
+		Env:       map[string]string{"GOPATH": "/go"},
+		UpdatedAt: time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC),
+	}
+	if err := db.UpsertImage(ctx, img); err != nil {
+		t.Fatalf("seed image: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	db33, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	for _, stmt := range []string{
+		`ALTER TABLE images DROP COLUMN capability`,
+		`ALTER TABLE images DROP COLUMN description`,
+		`DELETE FROM schema_migrations WHERE version IN (34)`,
+	} {
+		if _, err := db33.Exec(stmt); err != nil {
+			t.Fatalf("rewind (%s): %v", stmt, err)
+		}
+	}
+	db33.Close()
+
+	db, err = Open(path) // migration 34 applies here
+	if err != nil {
+		t.Fatalf("open v33 database: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	got, err := db.GetImage(ctx, "go-base")
+	if err != nil {
+		t.Fatalf("get image: %v", err)
+	}
+	if !reflect.DeepEqual(got, img) {
+		t.Fatalf("image after migration = %+v, want %+v (empty capability/description)", got, img)
+	}
+	if err := db.SetImageMeta(ctx, "go-base", "golang", "Go toolchain"); err != nil {
+		t.Fatalf("set meta after migration: %v", err)
+	}
+	if again, err := db.GetImage(ctx, "go-base"); err != nil || again.Capability != "golang" || again.Description != "Go toolchain" {
+		t.Fatalf("meta round trip = %q/%q (%v)", again.Capability, again.Description, err)
 	}
 }

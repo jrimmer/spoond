@@ -12,6 +12,9 @@
 //	spoond images list          print the image catalog
 //	spoond images publish <name> | --all
 //	                            republish built images to --prefix
+//	spoond images describe <name> | --all
+//	                            write the manifest's capability and
+//	                            description into existing catalog rows
 //
 // Flags:
 //
@@ -27,6 +30,14 @@
 // An entry's warm_sizes name presets from $SIZE_PRESETS (the backend's
 // setting; default sizes.DefaultSpec): each gets one more template build
 // at that preset's vcpu and memory.
+//
+// An entry's capability and description are the image builder's own
+// data: build records them in the catalog row, and GET /api/capabilities
+// serves them from there. An entry built on another (from) does not
+// inherit them. describe writes them into rows that already exist,
+// without building anything (a host whose images were built before the
+// catalog held them); --all covers every manifest entry, and an entry
+// with no catalog row is skipped with a note.
 //
 // Runs on the E2B host as root and talks to the orchestrator via
 // substrate/e2b.FromEnv().
@@ -164,7 +175,7 @@ func Main(args []string) int {
 	contextDir := fs.String("context", "images", "docker build context directory")
 	dbPath := fs.String("db", envOr("SPOOND_DB_PATH", "/var/lib/spoond/spoond.db"), "SQLite database path")
 	registry := fs.String("registry", envOr("IMAGE_REGISTRY", "localhost:5000"), "image registry")
-	all := fs.Bool("all", false, "build or publish every manifest entry with baked: true")
+	all := fs.Bool("all", false, "build or publish every manifest entry with baked: true; describe every manifest entry")
 	baseRegistry := fs.String("base-registry", "", "pull <prefix>/<name>:<base-tag> from here instead of docker build")
 	baseTag := fs.String("base-tag", "latest", "tag pulled with --base-registry")
 	prefix := fs.String("prefix", "", "publish destination prefix: images go to <prefix>/<name>:<tag>")
@@ -201,6 +212,8 @@ func Main(args []string) int {
 		})
 	case "publish":
 		return cmdPublish(ctx, positional[1:], *all, *manifestPath, *registry, *prefix, *tag)
+	case "describe":
+		return cmdDescribe(ctx, positional[1:], *all, *manifestPath, *dbPath, os.Stdout)
 	default:
 		fmt.Fprintf(os.Stderr, "spoond images: unknown command %q\n\n", positional[0])
 		usage(fs)
@@ -209,7 +222,7 @@ func Main(args []string) int {
 }
 
 func usage(fs *flag.FlagSet) {
-	fmt.Fprintf(os.Stderr, "usage: spoond images [-manifest path] [-context dir] [-db path] [-registry host:port] <command>\n\ncommands:\n  build <name>  build one image and turn it into an E2B template build\n  build --all   build every manifest entry with baked: true\n  list          print the image catalog\n  publish <name> | --all\n                republish built images to --prefix as <prefix>/<name>:<tag>\n\nflags:\n")
+	fmt.Fprintf(os.Stderr, "usage: spoond images [-manifest path] [-context dir] [-db path] [-registry host:port] <command>\n\ncommands:\n  build <name>  build one image and turn it into an E2B template build\n  build --all   build every manifest entry with baked: true\n  list          print the image catalog\n  publish <name> | --all\n                republish built images to --prefix as <prefix>/<name>:<tag>\n  describe <name> | --all\n                write the manifest's capability and description into existing catalog rows\n\nflags:\n")
 	fs.PrintDefaults()
 }
 
@@ -335,7 +348,8 @@ func templateBuildSize(buildID string) int64 {
 // leaves them unset (entry env keys win), passes that env as WARM_ENV,
 // injects the deployment's guest DNS resolver (SPOOND_GUEST_DNS_ADDR)
 // unless the entry sets it, and returns the docker --build-arg flags,
-// sorted.
+// sorted. Capability and description are never inherited: they say what
+// this image is, so a layer without them records none.
 func resolveBase(ctx context.Context, db *store.DB, img manifestImage) (manifestImage, []string, error) {
 	vals := map[string]string{}
 	for k, v := range img.BuildArgs {
@@ -565,15 +579,17 @@ func buildOne(ctx context.Context, db *store.DB, sub substrate.Substrate, img ma
 	row, err := db.GetImage(ctx, img.Name)
 	if errors.Is(err, store.ErrNotFound) {
 		row = store.ImageRow{
-			Name:       img.Name,
-			TemplateID: e2b.NewTemplateID(),
-			VCPU:       img.VCPU,
-			MemoryMB:   img.MemoryMB,
-			DiskMB:     img.DiskMB,
-			StartCmd:   startCmd,
-			ReadyCmd:   readyCmd,
-			Env:        img.Env,
-			UpdatedAt:  time.Now(),
+			Name:        img.Name,
+			TemplateID:  e2b.NewTemplateID(),
+			VCPU:        img.VCPU,
+			MemoryMB:    img.MemoryMB,
+			DiskMB:      img.DiskMB,
+			StartCmd:    startCmd,
+			ReadyCmd:    readyCmd,
+			Env:         img.Env,
+			Capability:  img.Capability,
+			Description: img.Description,
+			UpdatedAt:   time.Now(),
 		}
 		if err := db.UpsertImage(ctx, row); err != nil {
 			return err
@@ -598,6 +614,8 @@ func buildOne(ctx context.Context, db *store.DB, sub substrate.Substrate, img ma
 		StartCmd:       startCmd,
 		ReadyCmd:       readyCmd,
 		Env:            img.Env,
+		Capability:     img.Capability,
+		Description:    img.Description,
 		UpdatedAt:      time.Now(),
 	}); err != nil {
 		return err
@@ -729,6 +747,66 @@ func cmdList(ctx context.Context, dbPath string) int {
 	if err := w.Flush(); err != nil {
 		fmt.Fprintf(os.Stderr, "spoond images: %v\n", err)
 		return 1
+	}
+	return 0
+}
+
+// cmdDescribe writes the manifest's capability and description into the
+// catalog rows of the named entries (every manifest entry with all),
+// without building: the way a host whose images were built before the
+// catalog held these fields fills them in. An entry is written as the
+// manifest has it, so an empty field clears the row's. An entry with no
+// catalog row has never been built here and is skipped with a note; a
+// name the manifest does not have fails before anything is written.
+func cmdDescribe(ctx context.Context, names []string, all bool, manifestPath, dbPath string, stdout io.Writer) int {
+	if !all && len(names) == 0 {
+		fmt.Fprintln(os.Stderr, "spoond images: describe needs a name or --all")
+		return 2
+	}
+
+	m, err := loadManifest(manifestPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "spoond images: %v\n", err)
+		return 1
+	}
+
+	var targets []manifestImage
+	if all {
+		targets = m.Images
+	} else {
+		for _, name := range names {
+			found := false
+			for _, img := range m.Images {
+				if img.Name == name {
+					targets = append(targets, img)
+					found = true
+					break
+				}
+			}
+			if !found {
+				fmt.Fprintf(os.Stderr, "spoond images: %s: not in %s\n", name, manifestPath)
+				return 1
+			}
+		}
+	}
+
+	db, err := store.Open(dbPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "spoond images: %v\n", err)
+		return 1
+	}
+	defer db.Close()
+	for _, img := range targets {
+		err := db.SetImageMeta(ctx, img.Name, img.Capability, img.Description)
+		if errors.Is(err, store.ErrNotFound) {
+			fmt.Fprintf(os.Stderr, "spoond images: %s: not in the catalog (never built here), skipped\n", img.Name)
+			continue
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "spoond images: %s: %v\n", img.Name, err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "described %s capability=%q description=%q\n", img.Name, img.Capability, img.Description)
 	}
 	return 0
 }
