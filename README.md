@@ -337,7 +337,7 @@ the result.
 
 ## Status
 
-**v3.13.1** (2026-10-21) is the current release. spoond 3.x shares a host
+**v3.13.2** (2026-10-21) is the current release. spoond 3.x shares a host
 fairly: every active owner gets an equal, floating slice of memory and
 snapshot disk, and when a request does not fit, spoond takes room back
 from the biggest borrower; it pauses a lease on its own before the host

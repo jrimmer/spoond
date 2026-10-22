@@ -47,6 +47,18 @@ summarised from README "Status".
 - **README: Status names the current release only**; the release history
   lives here and on the releases page.
 
+## [3.13.2] - 2026-10-21
+
+### Fixed
+
+- **The CI runner stops a job Forgejo has cancelled (spoond #160).**
+  Forgejo cancels a task when a newer push to the same branch supersedes
+  its run, or when someone presses Cancel, and revokes the task's token.
+  The runner ignored that and ran the job to its end, holding a lease and
+  a runner slot, and the job's last API calls got `401`. The runner's
+  minute keepalive now reads Forgejo's answer: a cancelled task stops the
+  job, which reports cancelled and releases its lease.
+
 ## [3.13.1] - 2026-10-21
 
 ### Fixed
