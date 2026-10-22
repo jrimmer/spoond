@@ -194,6 +194,7 @@ var Known = []string{
 	"SPOOND_ADMIN_TOKEN_FILE",
 	"SPOOND_BACKUP_DIR",
 	"SPOOND_BUILD_TIMEOUT",
+	"SPOOND_CONTAINER",
 	"SPOOND_DB_PATH",
 	"SPOOND_DRAIN_INSECURE",
 	"SPOOND_DRAIN_URL",
@@ -538,6 +539,7 @@ var Specs = []Spec{
 	{"SPOOND_ADMIN_TOKEN_FILE", TypeList, Drain, false}, // token file paths, paired with SPOOND_DRAIN_URL
 	{"SPOOND_BACKUP_DIR", TypeString, Backend, false},
 	{"SPOOND_BUILD_TIMEOUT", TypeDuration, Backend, false},
+	{"SPOOND_CONTAINER", TypeBool, Doctor, false}, // set by the Docker image: compose, not systemd, runs the services
 	{"SPOOND_DB_PATH", TypeString, Backend, false},
 	{"SPOOND_DRAIN_INSECURE", TypeBool, Drain, false},
 	{"SPOOND_DRAIN_URL", TypeList, Drain, false}, // backend URLs, paired with SPOOND_ADMIN_TOKEN_FILE
