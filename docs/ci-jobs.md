@@ -37,6 +37,26 @@ mapping on the host rather than relying on the default.
 The image must have a current build in the catalog; otherwise the grant
 fails with `unknown image tag` rather than falling back.
 
+A value can also name a **named snapshot** instead of an image, so a job
+starts from a VM someone prepared and saved (a toolchain and warm
+dependency caches already in place):
+
+```
+IMAGE_MAP=web=snapshot:scout/node24,yaml=snapshot:yaml@3,shared=snapshot:alice:ci/base
+```
+
+- `snapshot:NAME` starts from the newest version of a snapshot the
+  runner's own identity (`LEASE_TOKEN`) saved; `snapshot:NAME@V` from
+  version V.
+- `snapshot:OWNER:NAME` starts from another user's snapshot, through a
+  grant that user gave the runner's identity. Without one the create
+  answers 404, like an unknown name.
+- `DEFAULT_IMAGE` takes the same forms.
+
+The snapshot is the job's environment from then on: whoever saves it owns
+what CI runs on. Replacing or deleting it changes or breaks those jobs at
+once, and spoond does not warn.
+
 ## Images come from Dockerfiles
 
 There are no bake scripts in the pipeline, no rootfs assembly and no
