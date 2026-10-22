@@ -1303,6 +1303,9 @@ func TestSpoondRestartAfterChange(t *testing.T) {
 		if got := countSubstring(strings.Join(run.calls, "\n"), "systemctl restart spoond-backend"); got != 1 {
 			t.Errorf("restart spoond-backend = %d after a binary change, want 1: %v", got, run.calls)
 		}
+		if got := countSubstring(strings.Join(run.calls, "\n"), "systemctl try-restart spoond-sshd-gateway spoond-dash"); got != 1 {
+			t.Errorf("try-restart gateway and dash = %d after a binary change, want 1: %v", got, run.calls)
+		}
 	})
 	t.Run("running before the run, nothing changed", func(t *testing.T) {
 		env, _, run, _ := spoondTestEnv(t)

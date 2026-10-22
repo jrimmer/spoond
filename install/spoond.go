@@ -205,6 +205,15 @@ func spoondPhase(ctx context.Context, env *Env) ([]Item, error) {
 			}
 			r.Add(Changed, "spoond-backend", "restarted for the new binary or backend.env")
 		}
+		// The gateway and the dashboard run the same binary: a new
+		// one restarts them too (try-restart leaves a stopped unit
+		// stopped).
+		if wasActive && binChanged {
+			if err := env.exec(ctx, "systemctl", "try-restart", "spoond-sshd-gateway", "spoond-dash"); err != nil {
+				return r.Items(), fmt.Errorf("systemctl try-restart spoond-sshd-gateway spoond-dash: %w", err)
+			}
+			r.Add(Changed, "spoond-sshd-gateway spoond-dash", "restarted for the new binary")
+		}
 	}
 
 	// ---- health (item 11) ------------------------------------------
