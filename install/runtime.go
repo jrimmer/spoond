@@ -546,13 +546,8 @@ func (p *runtimeState) installPinned(r *Reporter, ctx context.Context, env *Env,
 	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 		return fmt.Errorf("create %s: %w", filepath.Dir(full), err)
 	}
-	// WriteFile applies the mode only on create; chmod fixes the mode
-	// of an overwritten file too.
-	if err := os.WriteFile(full, b, art.mode); err != nil {
-		return fmt.Errorf("write %s: %w", full, err)
-	}
-	if err := os.Chmod(full, art.mode); err != nil {
-		return fmt.Errorf("chmod %s: %w", full, err)
+	if err := writeAtomic(full, b, art.mode); err != nil {
+		return err
 	}
 	if exists {
 		r.Add(Changed, art.path, "re-fetched and verified against the pin")

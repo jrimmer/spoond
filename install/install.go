@@ -262,15 +262,41 @@ func (env *Env) writeFile(r *Reporter, path string, content []byte, mode os.File
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create %s: %w", dir, err)
 	}
-	if err := os.WriteFile(full, content, mode); err != nil {
-		return fmt.Errorf("write %s: %w", full, err)
-	}
-	// WriteFile keeps an existing file's mode; a changed file takes
-	// the requested one.
-	if err := os.Chmod(full, mode); err != nil {
-		return fmt.Errorf("chmod %s: %w", full, err)
+	if err := writeAtomic(full, content, mode); err != nil {
+		return err
 	}
 	r.Add(res, path, "")
+	return nil
+}
+
+// writeAtomic replaces full with content at mode through a temporary
+// file in the same directory and a rename, so a running binary (the
+// backend's own /opt/spoond/spoond, the orchestrator) is replaced
+// rather than written into ("text file busy"), and a reader never sees
+// half a file.
+func writeAtomic(full string, content []byte, mode os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(full), "."+filepath.Base(full)+".new-*")
+	if err != nil {
+		return fmt.Errorf("write %s: %w", full, err)
+	}
+	name := tmp.Name()
+	_, werr := tmp.Write(content)
+	if werr == nil {
+		werr = tmp.Chmod(mode)
+	}
+	if werr == nil {
+		werr = tmp.Sync()
+	}
+	if cerr := tmp.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr == nil {
+		werr = os.Rename(name, full)
+	}
+	if werr != nil {
+		os.Remove(name)
+		return fmt.Errorf("write %s: %w", full, werr)
+	}
 	return nil
 }
 

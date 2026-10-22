@@ -85,11 +85,8 @@ func spoondCopyFile(src, dst string, mode os.FileMode) (bool, error) {
 	if err := os.MkdirAll(dirname(dst), 0o755); err != nil {
 		return false, fmt.Errorf("create %s: %w", dirname(dst), err)
 	}
-	if err := os.WriteFile(dst, srcBytes, mode); err != nil {
-		return false, fmt.Errorf("write %s: %w", dst, err)
-	}
-	if err := os.Chmod(dst, mode); err != nil {
-		return false, fmt.Errorf("chmod %s: %w", dst, err)
+	if err := writeAtomic(dst, srcBytes, mode); err != nil {
+		return false, err
 	}
 	return changed, nil
 }
