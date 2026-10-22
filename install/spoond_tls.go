@@ -33,6 +33,8 @@ const selfSignedYears = 10
 // paths (/etc/spoond/tls/cert.pem and privkey.pem, or the operator's
 // --tls-cert/--tls-key).
 type tlsPair struct {
+	// cert and key are the paths the services read (never Root
+	// prefixed: under --root the env files still name /etc/spoond/...).
 	cert, key string
 }
 
@@ -44,7 +46,6 @@ func spoondTLS(env *Env, r *Reporter, dd hostDefaults) (tlsPair, error) {
 	if env.Opt.TLSCert != "" {
 		// Options.Validate already refuses one flag without the
 		// other; both here must exist on the host.
-		certFull, keyFull := env.Resolve(env.Opt.TLSCert), env.Resolve(env.Opt.TLSKey)
 		for _, f := range []string{env.Opt.TLSCert, env.Opt.TLSKey} {
 			if _, err := os.Stat(env.Resolve(f)); err != nil {
 				note := fmt.Sprintf("%s is missing: point --tls-cert/--tls-key at an existing pair, or drop both flags for a self-signed one", f)
@@ -53,7 +54,7 @@ func spoondTLS(env *Env, r *Reporter, dd hostDefaults) (tlsPair, error) {
 			}
 		}
 		r.Add(Kept, env.Opt.TLSCert+" + "+env.Opt.TLSKey, "the operator's pair; backend.env and dash.env point at it")
-		return tlsPair{cert: certFull, key: keyFull}, nil
+		return tlsPair{cert: env.Opt.TLSCert, key: env.Opt.TLSKey}, nil
 	}
 
 	// Self-signed. An existing pair is kept (it may be a Let's
@@ -65,7 +66,7 @@ func spoondTLS(env *Env, r *Reporter, dd hostDefaults) (tlsPair, error) {
 	switch {
 	case certOK && keyOK:
 		r.Add(Kept, tlsCertPath, "the existing pair is kept ("+tlsKeyPath+" with it)")
-		return tlsPair{cert: certFull, key: keyFull}, nil
+		return tlsPair{cert: tlsCertPath, key: tlsKeyPath}, nil
 	case certOK:
 		r.Add(Failed, tlsCertPath, "exists but "+tlsKeyPath+" does not; remove the certificate (or install both) and rerun")
 		return tlsPair{}, fmt.Errorf("%s exists but %s does not; remove the certificate (or install both) and rerun", tlsCertPath, tlsKeyPath)
@@ -77,13 +78,13 @@ func spoondTLS(env *Env, r *Reporter, dd hostDefaults) (tlsPair, error) {
 	if env.DryRun {
 		r.Add(Created, tlsCertPath, "dry-run: a self-signed pair for "+dd.hostName+" would be written")
 		r.Add(Created, tlsKeyPath, "dry-run: nothing written")
-		return tlsPair{cert: certFull, key: keyFull}, nil
+		return tlsPair{cert: tlsCertPath, key: tlsKeyPath}, nil
 	}
 	if err := makeSelfSigned(env, r, dd); err != nil {
 		return tlsPair{}, err
 	}
 	r.Add(Kept, "tls pair", "self-signed for "+dd.hostName+" (10 years), cert 0644, key 0600")
-	return tlsPair{cert: certFull, key: keyFull}, nil
+	return tlsPair{cert: tlsCertPath, key: tlsKeyPath}, nil
 }
 
 // makeSelfSigned generates the ECDSA P-256 pair and writes cert.pem

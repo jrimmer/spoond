@@ -1505,3 +1505,23 @@ func TestGuestResolverContainerResolvedStub(t *testing.T) {
 		t.Errorf("container stub = %q (%s), want 192.0.2.10", got, note)
 	}
 }
+
+// TestSpoondTLSPathsNotRootPrefixed: under --root (the Docker init
+// service's ./config) the env files name the pair where the services
+// read it, /etc/spoond/tls/..., not the Root-prefixed path.
+func TestSpoondTLSPathsNotRootPrefixed(t *testing.T) {
+	env, _, _, _ := spoondTestEnv(t)
+	if _, text, err := runSpoond(t, env); err != nil {
+		t.Fatalf("run: %v\n%s", err, text)
+	}
+	for _, c := range []struct{ file, key, want string }{
+		{backendEnvPath, "TLS_CERT", tlsCertPath},
+		{backendEnvPath, "TLS_KEY", tlsKeyPath},
+		{dashEnvPath, "DASH_TLS_CERT", tlsCertPath},
+		{dashEnvPath, "DASH_TLS_KEY", tlsKeyPath},
+	} {
+		if got := envVal(t, env, c.file, c.key); got != c.want {
+			t.Errorf("%s %s = %q, want %q", c.file, c.key, got, c.want)
+		}
+	}
+}
