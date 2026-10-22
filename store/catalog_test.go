@@ -18,10 +18,12 @@ func TestImageUpsertGetList(t *testing.T) {
 	first := ImageRow{
 		Name: "py-base", TemplateID: "tpl0123456789abcdefgh",
 		VCPU: 2, MemoryMB: 1024, DiskMB: 4096,
-		StartCmd:  "/usr/local/bin/spoond-guest-init",
-		ReadyCmd:  "test -f /run/spoond-guest-ready",
-		Env:       map[string]string{"SPOOND_TOOL": "uv"},
-		UpdatedAt: time.Date(2026, 9, 30, 10, 0, 0, 0, time.UTC),
+		StartCmd:    "/usr/local/bin/spoond-guest-init",
+		ReadyCmd:    "test -f /run/spoond-guest-ready",
+		Env:         map[string]string{"SPOOND_TOOL": "uv"},
+		Capability:  "python",
+		Description: "Python 3.12 slim base",
+		UpdatedAt:   time.Date(2026, 9, 30, 10, 0, 0, 0, time.UTC),
 	}
 	if err := db.UpsertImage(ctx, first); err != nil {
 		t.Fatalf("upsert: %v", err)
@@ -34,11 +36,12 @@ func TestImageUpsertGetList(t *testing.T) {
 		t.Fatalf("got %+v, want %+v", got, first)
 	}
 
-	// A new build: current build id, digest, min_memory_mb and
-	// updated_at move; the template id is passed back unchanged.
+	// A new build: current build id, digest, min_memory_mb, description
+	// and updated_at move; the template id is passed back unchanged.
 	second := first
 	second.CurrentBuildID = "b-build-2"
 	second.MinMemoryMB = 768
+	second.Description = "Python 3.13 slim base"
 	second.Digest = "localhost:5000/py-base@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	second.UpdatedAt = first.UpdatedAt.Add(time.Minute)
 	if err := db.UpsertImage(ctx, second); err != nil {
@@ -62,6 +65,52 @@ func TestImageUpsertGetList(t *testing.T) {
 
 	if _, err := db.GetImage(ctx, "nope"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("get missing = %v, want ErrNotFound", err)
+	}
+}
+
+// TestSetImageMeta: SetImageMeta writes an existing row's capability
+// and description and leaves every other column (the build it points
+// at, updated_at) as it was; a name with no row is ErrNotFound and
+// creates nothing.
+func TestSetImageMeta(t *testing.T) {
+	db, _ := openTestDB(t)
+	ctx := context.Background()
+
+	row := ImageRow{
+		Name: "go-base", TemplateID: "tpl0123456789abcdefgh", CurrentBuildID: "b-1",
+		Digest: "localhost:5000/go-base@sha256:00", VCPU: 2, MemoryMB: 2048, DiskMB: 4096,
+		Env:       map[string]string{"GOPATH": "/go"},
+		UpdatedAt: time.Date(2026, 9, 30, 10, 0, 0, 0, time.UTC),
+	}
+	if err := db.UpsertImage(ctx, row); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	if err := db.SetImageMeta(ctx, "go-base", "golang", "Go toolchain"); err != nil {
+		t.Fatalf("set meta: %v", err)
+	}
+	got, err := db.GetImage(ctx, "go-base")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	want := row
+	want.Capability, want.Description = "golang", "Go toolchain"
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %+v, want %+v", got, want)
+	}
+
+	// Writing empty values clears them.
+	if err := db.SetImageMeta(ctx, "go-base", "", ""); err != nil {
+		t.Fatalf("clear meta: %v", err)
+	}
+	if got, err := db.GetImage(ctx, "go-base"); err != nil || got.Capability != "" || got.Description != "" {
+		t.Fatalf("cleared meta = %q/%q (%v), want empty", got.Capability, got.Description, err)
+	}
+
+	if err := db.SetImageMeta(ctx, "nope", "x", "y"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("set meta on a missing image = %v, want ErrNotFound", err)
+	}
+	if list, err := db.ListImages(ctx); err != nil || len(list) != 1 {
+		t.Fatalf("list = %+v (%v), want only go-base", list, err)
 	}
 }
 

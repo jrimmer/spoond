@@ -149,11 +149,14 @@ never carries a secret value or another user's data:
   a registered route has no row here or a row survives an unregistered
   route, so the document cannot silently drift from the mux.
 - `images` — the catalog's entries with a current build: `name`,
-  `capability` and `description` (the manifest's fields for the name,
-  absent for images built outside it), the default `vcpu`, `memory_mb`
-  and `disk_mb`, the effective `min_memory_mb`, and `warm_sizes` — the
-  same values [`GET /api/images?detail=1`](#get-apiimages) reports,
-  from the same catalog rows.
+  `capability` and `description` (the image's own manifest fields,
+  recorded in its catalog row by `spoond images build`, or by
+  `spoond images describe` without a rebuild; spoond keeps no list of
+  its own, so each is absent when the row has none), the default
+  `vcpu`, `memory_mb` and `disk_mb`, the effective `min_memory_mb`, and
+  `warm_sizes` — the same values
+  [`GET /api/images?detail=1`](#get-apiimages) reports, from the same
+  catalog rows.
 - `sizes` — the size presets and the per-lease limits, the same
   [`GET /api/sizes`](#get-apisizes--size-presets-and-limits) block.
 - `network_policies` — the four egress classes and their one-line

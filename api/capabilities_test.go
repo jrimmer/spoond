@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"go/ast"
 	"go/parser"
@@ -466,5 +467,45 @@ func TestCapabilitiesNeedsAToken(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("GET /api/capabilities without a token = %d, want 401", resp.StatusCode)
+	}
+}
+
+// TestCapabilitiesImageMetaFromCatalog: an image's capability and
+// description come from its catalog row (the manifest's fields, written
+// by `spoond images build` or `describe`), whatever the image is named;
+// a row without them omits both keys, as before. spoond keeps no list of
+// image names of its own.
+func TestCapabilitiesImageMetaFromCatalog(t *testing.T) {
+	ts, _, db, _ := newTestServerWithService(t)
+	ctx := context.Background()
+	seedImage(t, db, "acme-toolbox", 1024)
+	if err := db.SetImageMeta(ctx, "acme-toolbox", "acme", "Acme's build toolbox"); err != nil {
+		t.Fatalf("set meta: %v", err)
+	}
+	resp, body := doReq(t, "GET", ts.URL+"/api/capabilities", "token-a", nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("status %d: %v", resp.StatusCode, body)
+	}
+	byName := map[string]map[string]any{}
+	for _, r := range body["images"].([]any) {
+		img := r.(map[string]any)
+		byName[img["name"].(string)] = img
+	}
+	acme, ok := byName["acme-toolbox"]
+	if !ok {
+		t.Fatalf("images = %v, want acme-toolbox", body["images"])
+	}
+	if acme["capability"] != "acme" || acme["description"] != "Acme's build toolbox" {
+		t.Errorf("acme-toolbox = %v, want the catalog row's capability and description", acme)
+	}
+	// py-base's row has neither: both keys are omitted, not guessed.
+	py, ok := byName["py-base"]
+	if !ok {
+		t.Fatalf("images = %v, want py-base", body["images"])
+	}
+	for _, key := range []string{"capability", "description"} {
+		if v, present := py[key]; present {
+			t.Errorf("py-base %s = %v, want the key omitted (empty in the catalog)", key, v)
+		}
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -1127,5 +1128,147 @@ func TestBuildOneWithoutBaseRegistryIsUnchanged(t *testing.T) {
 		if strings.HasPrefix(c, "docker pull") || strings.HasPrefix(c, "docker tag") {
 			t.Fatalf("unexpected pull/tag without -base-registry: %v", cmdLog)
 		}
+	}
+}
+
+// TestCmdBuildRecordsCapabilityAndDescription: `spoond images build`
+// reads capability and description from the manifest and records them
+// in the image row (GET /api/capabilities serves them from there); a
+// layer built From that image does not inherit them, and a rebuild
+// writes what the manifest says now.
+func TestCmdBuildRecordsCapabilityAndDescription(t *testing.T) {
+	sub := &stubSubstrate{res: substrate.BuildResult{DiskSizeMB: 5000}}
+	setup(t, sub)
+	dir := t.TempDir()
+	manifestPath := filepath.Join(dir, "manifest.yaml")
+	dbPath := filepath.Join(dir, "cat.db")
+	write := func(desc string) {
+		t.Helper()
+		if err := os.WriteFile(manifestPath, []byte(`images:
+  - name: py-base
+    capability: python
+    description: "`+desc+`"
+    baked: true
+    dockerfile: py-base.dockerfile
+    vcpu: 2
+    memory_mb: 1024
+    disk_mb: 4096
+  - name: py-base-worker
+    baked: true
+    dockerfile: worker.dockerfile
+    from: py-base
+`), 0o644); err != nil {
+			t.Fatalf("write manifest: %v", err)
+		}
+	}
+	read := func(name string) store.ImageRow {
+		t.Helper()
+		cat, err := store.Open(dbPath)
+		if err != nil {
+			t.Fatalf("open catalog: %v", err)
+		}
+		defer cat.Close()
+		row, err := cat.GetImage(context.Background(), name)
+		if err != nil {
+			t.Fatalf("GetImage %s: %v", name, err)
+		}
+		return row
+	}
+
+	write("Python 3.12 slim base")
+	if code := cmdBuild(context.Background(), nil, true, manifestPath, dbPath,
+		buildOpts{registry: "localhost:5000", contextDir: "images"}); code != 0 {
+		t.Fatalf("exit code %d, want 0", code)
+	}
+	if row := read("py-base"); row.Capability != "python" || row.Description != "Python 3.12 slim base" {
+		t.Fatalf("py-base capability/description = %q/%q, want the manifest's", row.Capability, row.Description)
+	}
+	if row := read("py-base-worker"); row.Capability != "" || row.Description != "" {
+		t.Fatalf("layer inherited capability/description %q/%q, want none", row.Capability, row.Description)
+	}
+
+	write("Python 3.13 slim base")
+	if code := cmdBuild(context.Background(), []string{"py-base"}, false, manifestPath, dbPath,
+		buildOpts{registry: "localhost:5000", contextDir: "images"}); code != 0 {
+		t.Fatalf("rebuild exit code %d, want 0", code)
+	}
+	if row := read("py-base"); row.Description != "Python 3.13 slim base" {
+		t.Fatalf("rebuilt py-base description = %q, want the manifest's new one", row.Description)
+	}
+}
+
+// TestDescribe: `spoond images describe` writes the manifest's
+// capability and description into existing catalog rows and nothing
+// else, without docker or a template build; an entry with no row is
+// skipped (no row is created), and a name the manifest lacks fails.
+func TestDescribe(t *testing.T) {
+	sub := &stubSubstrate{}
+	setup(t, sub)
+	dir := t.TempDir()
+	manifestPath := filepath.Join(dir, "manifest.yaml")
+	dbPath := filepath.Join(dir, "cat.db")
+	if err := os.WriteFile(manifestPath, []byte(`images:
+  - name: py-base
+    capability: python
+    description: "Python 3.12 slim base"
+    baked: true
+    dockerfile: py-base.dockerfile
+  - name: go-base
+    capability: golang
+    description: "Go toolchain"
+    baked: true
+    dockerfile: go-base.dockerfile
+  - name: scratch
+    capability: scratch
+    dockerfile: scratch.dockerfile
+`), 0o644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	ctx := context.Background()
+	built := store.ImageRow{
+		Name: "py-base", TemplateID: "tpl0123456789abcdefgh", CurrentBuildID: "b-1",
+		Digest: wantDigest, VCPU: 2, MemoryMB: 1024, DiskMB: 4096,
+		StartCmd: startCmd, ReadyCmd: readyCmd,
+		Env:       map[string]string{"PATH": "/usr/local/bin"},
+		UpdatedAt: time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC),
+	}
+	cat, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open catalog: %v", err)
+	}
+	if err := cat.UpsertImage(ctx, built); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	cat.Close()
+
+	if code := Main([]string{"describe"}); code != 2 {
+		t.Fatalf("describe with no name: exit %d, want 2", code)
+	}
+	if code := Main([]string{"describe", "nope", "--manifest", manifestPath, "--db", dbPath}); code != 1 {
+		t.Fatalf("describe of a name the manifest lacks: exit %d, want 1", code)
+	}
+	if code := Main([]string{"describe", "--all", "--manifest", manifestPath, "--db", dbPath}); code != 0 {
+		t.Fatalf("describe --all: exit %d, want 0", code)
+	}
+	if len(cmdLog) != 0 || len(sub.reqs) != 0 {
+		t.Fatalf("describe ran docker %v or built %d templates", cmdLog, len(sub.reqs))
+	}
+
+	cat, err = store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen catalog: %v", err)
+	}
+	defer cat.Close()
+	got, err := cat.GetImage(ctx, "py-base")
+	if err != nil {
+		t.Fatalf("GetImage: %v", err)
+	}
+	want := built
+	want.Capability, want.Description = "python", "Python 3.12 slim base"
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("py-base after describe = %+v, want %+v", got, want)
+	}
+	if list, err := cat.ListImages(ctx); err != nil || len(list) != 1 {
+		t.Fatalf("catalog after describe = %+v (%v), want only py-base (no row created)", list, err)
 	}
 }

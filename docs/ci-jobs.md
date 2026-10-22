@@ -75,6 +75,14 @@ snapshot tags to re-bake: images are built from Dockerfiles by
    the build's disk size, measured when the build is written and
    refreshed by the hourly disk accounting pass.
 
+The entry's `capability` and `description` are recorded in the catalog
+row too, and `GET /api/capabilities` serves them from there (an entry
+built `from` another image does not inherit them). To set them on images
+that are already built, without rebuilding, run
+`spoond images describe <name>` (or `--all`, every manifest entry) with
+the same `--manifest`: it writes the two fields into the existing rows
+and skips, with a note, any entry that has no row yet.
+
 Builds run on the host as root, take minutes each, and are idempotent
 per name: the template id is stable for the life of the image name, and
 each build records a new `build_id` plus the Firecracker/kernel/envd

@@ -2,10 +2,14 @@
 
 // Live check per image against the orchestrator on the E2B host. Run with:
 //
-//	go test -tags e2blive -count=1 -timeout 60m ./cmd/spoond-images/
+//	SPOOND_IMAGES_MANIFEST=/path/to/manifest.yaml \
+//	  go test -tags e2blive -count=1 -timeout 60m ./cmd/spoond-images/
 //
-// from /root/src/spoond, with the E2B_* environment set (FromEnv
-// defaults). For every baked manifest image it creates a sandbox from
+// from a spoond checkout, with the E2B_* environment set (FromEnv
+// defaults). spoond ships no image catalog, so SPOOND_IMAGES_MANIFEST
+// names the manifest the host's images were built from (an absolute
+// path: go test runs in the package directory); unset, the test skips.
+// For every baked manifest image it creates a sandbox from
 // the image's current_build_id with the manifest env, runs `cat
 // /etc/resolv.conf`, checks every comma-separated address in
 // $SPOOND_GUEST_DNS_ADDR has a `nameserver` line (skipped when that is
@@ -14,8 +18,7 @@ package spoondimages
 
 import (
 	"context"
-	"path/filepath"
-	"runtime"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -25,20 +28,14 @@ import (
 	"github.com/jrimmer/spoond/v4/substrate/e2b"
 )
 
-// repoRoot is the spoond checkout root, resolved from this file's
-// location: go test runs with the package directory as the working
-// directory, so a cwd-relative path like images/manifest.yaml does not
-// resolve.
-var repoRoot = func() string {
-	_, file, _, _ := runtime.Caller(0)     // .../cmd/spoond-images/live_test.go
-	dir := filepath.Dir(file)              // .../cmd/spoond-images
-	return filepath.Dir(filepath.Dir(dir)) // checkout root
-}()
-
 func TestLiveImages(t *testing.T) {
 	ctx := context.Background()
 
-	m, err := loadManifest(filepath.Join(repoRoot, "images", "manifest.yaml"))
+	manifestPath := os.Getenv("SPOOND_IMAGES_MANIFEST")
+	if manifestPath == "" {
+		t.Skip("SPOOND_IMAGES_MANIFEST not set: point it at the manifest the host's images were built from")
+	}
+	m, err := loadManifest(manifestPath)
 	if err != nil {
 		t.Fatalf("loadManifest: %v", err)
 	}
