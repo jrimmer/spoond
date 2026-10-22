@@ -101,7 +101,7 @@ func roundTrip(t *testing.T, s *Server, req map[string]any) map[string]any {
 	// Rebuild server bound to this buffer pair.
 	srv := New(Config{
 		Sandbox: s.sandbox,
-		Image:   "dev-base",
+		Image:   "my-image",
 		TTL:     600,
 		Timeout: 60,
 		In:      &in,
@@ -224,5 +224,28 @@ func TestEveryToolHasAHandler(t *testing.T) {
 	}
 	if got, want := len(DefaultToolNames()), len(s.tools); got != want {
 		t.Errorf("DefaultToolNames() = %d names, New registered %d tools", got, want)
+	}
+}
+
+// TestToolCallNoImage: a server built with no Image (spoond ships no
+// default) fails each tool call with ErrNoImage, naming SPOOND_IMAGE,
+// and creates no sandbox.
+func TestToolCallNoImage(t *testing.T) {
+	fb := &fakeSandbox{}
+	s := New(Config{Sandbox: fb, Log: log.New(&bytes.Buffer{}, "", 0)})
+	resp := s.handleToolCall(context.Background(), 5, map[string]any{
+		"name":      "shell",
+		"arguments": map[string]any{"command": "uname -a"},
+	})
+	r := resp["result"].(map[string]any)
+	if r["isError"] != true {
+		t.Fatalf("expected an error result, got %v", r)
+	}
+	text := r["content"].([]any)[0].(map[string]any)["text"].(string)
+	if !strings.Contains(text, "SPOOND_IMAGE") {
+		t.Fatalf("error %q does not name SPOOND_IMAGE", text)
+	}
+	if fb.created != 0 {
+		t.Fatalf("expected no sandbox created, got %d", fb.created)
 	}
 }

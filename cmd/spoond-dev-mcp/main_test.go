@@ -79,15 +79,15 @@ func TestAgentTokenNames(t *testing.T) {
 }
 
 func TestImageNames(t *testing.T) {
-	t.Setenv("SPOOND_IMAGE", "go-base")
-	t.Setenv("FORKD_IMAGE", "dev-base")
-	if got := env.Get("SPOOND_IMAGE", ""); got != "go-base" {
+	t.Setenv("SPOOND_IMAGE", "new-image")
+	t.Setenv("FORKD_IMAGE", "old-image")
+	if got := env.Get("SPOOND_IMAGE", ""); got != "new-image" {
 		t.Fatalf("SPOOND_IMAGE must win, got %q", got)
 	}
 	t.Setenv("SPOOND_IMAGE", "")
 	os.Unsetenv("SPOOND_IMAGE")
 	warnings := captureWarnings(t, func() {
-		if got := env.Get("SPOOND_IMAGE", ""); got != "dev-base" {
+		if got := env.Get("SPOOND_IMAGE", ""); got != "old-image" {
 			t.Fatalf("FORKD_IMAGE fallback must still work, got %q", got)
 		}
 	})

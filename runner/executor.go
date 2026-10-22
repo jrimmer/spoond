@@ -28,7 +28,9 @@ type Executor struct {
 	Sandbox SandboxProvider
 	Sink    JobSink
 	Labels  map[string]string // runs-on label -> image tag
-	// DefaultImage is used when no label maps to an image.
+	// DefaultImage is used when no label maps to an image. Empty means
+	// none: a job whose labels map to nothing fails before a sandbox is
+	// created.
 	DefaultImage string
 	// TTL is the sandbox lease TTL in seconds.
 	TTL int
@@ -135,6 +137,11 @@ func (e *Executor) Run(ctx context.Context, job *Job) error {
 	defer cancelJob()
 
 	image := e.imageFor(wfJob)
+	if image == "" {
+		// No label mapped and no default is configured: there is no
+		// image to create the sandbox from (spoond ships no default).
+		return e.fail(ctx, job, fmt.Errorf("no image for runs-on labels %v: map one with IMAGE_MAP (label=image) or set DEFAULT_IMAGE on the runner", wfJob.RunsOnLabels()))
+	}
 	// A create can wait a long time: the admission queue (#129) holds it
 	// for up to RUNNER_ADMIT_WAIT_SECS and a capacity 503 is retried
 	// until the job's timeout. Forgejo declares a silent task failed
@@ -755,7 +762,8 @@ func (e *Executor) checkoutExec(ctx context.Context, sandboxID string, job *Job,
 	return nil
 }
 
-// imageFor maps a job's runs-on labels to an image tag.
+// imageFor maps a job's runs-on labels to an image tag, falling back to
+// DefaultImage; "" when neither names one.
 func (e *Executor) imageFor(job *WorkflowJob) string {
 	for _, label := range job.RunsOnLabels() {
 		if img, ok := e.Labels[label]; ok {

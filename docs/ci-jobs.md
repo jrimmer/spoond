@@ -10,29 +10,29 @@ microVM restored from a memory snapshot of an E2B template — is
 
 The runner maps a job's `runs-on` label to an image name via `IMAGE_MAP`
 (label=name, comma-separated). First matching label wins; a label that is
-not in the map falls through to `DEFAULT_IMAGE`.
+not in the map falls through to `DEFAULT_IMAGE`. Neither has a default:
+a job whose labels map through neither fails before a sandbox is
+created, with an error naming `IMAGE_MAP` and `DEFAULT_IMAGE`, and a
+runner with both unset warns at startup.
 
-Deployed on the production host:
+For example (the image names stand for images your backend serves):
 
 ```
-RUNNER_LABELS=forkd,ubuntu-latest,go,golang,elixir,elixir-base,llm-review,elixir-release,release
-IMAGE_MAP=ubuntu-latest=py-base,go=go-base,golang=go-base,elixir=elixir-base,\
-elixir-base=elixir-base,llm-review=llm-review,dev=dev-base,\
-elixir-release=elixir-release,release=elixir-release
-DEFAULT_IMAGE=py-base
+RUNNER_LABELS=ubuntu-latest,go,release
+IMAGE_MAP=ubuntu-latest=ci-image,go=go-ci-image,release=release-image
+DEFAULT_IMAGE=ci-image
 ```
 
-The `forkd` label is the runner's historical name, kept so workflows with
-`runs-on: forkd` keep matching; it maps to `DEFAULT_IMAGE`.
-
-So `runs-on: elixir-release` gets the `elixir-release` image. This is the
+So `runs-on: release` gets the `release-image` image. This is the
 only job-side knob: no workflow needs to know about the orchestrator,
 templates, builds or leases.
 
-**Footgun:** an unmapped or mistyped label silently gets `py-base`, and
-the job then fails somewhere unrelated with a missing toolchain. If a job
-needs a capability image, use a label from `IMAGE_MAP` and add the
-mapping on the host rather than relying on the default.
+**Footgun:** with `DEFAULT_IMAGE` set, an unmapped or mistyped label
+silently gets it, and the job then fails somewhere unrelated with a
+missing toolchain. If a job needs a capability image, use a label from
+`IMAGE_MAP` and add the mapping on the host rather than relying on the
+default; leave `DEFAULT_IMAGE` unset to make an unmapped label fail at
+once instead.
 
 The image must have a current build in the catalog; otherwise the grant
 fails with `unknown image tag` rather than falling back.

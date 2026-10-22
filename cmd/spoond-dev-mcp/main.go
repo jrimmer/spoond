@@ -19,6 +19,7 @@
 //
 //	SPOOND_BACKEND_URL=https://127.0.0.1:8890 \
 //	SPOOND_AGENT_TOKEN=<agent token> \
+//	SPOOND_IMAGE=my-image \
 //	spoond mcp
 //
 // Usage (HTTP):
@@ -26,7 +27,12 @@
 //	MCP_TRANSPORT=http MCP_LISTEN=:9090 \
 //	SPOOND_BACKEND_URL=https://127.0.0.1:8890 \
 //	SPOOND_AGENT_TOKEN=<agent token> \
+//	SPOOND_IMAGE=my-image \
 //	spoond mcp
+//
+// SPOOND_IMAGE is the image every tool call's sandbox is created from.
+// It has no default: without it the server starts with a warning and
+// fails each tool call with a message naming the setting.
 //
 // SPOOND_AGENT_TOKEN is the per-agent credential for this endpoint,
 // provisioned from the spoond users store (kind=agent, e.g. via
@@ -41,7 +47,7 @@
 //	  server "spoond-mcp" {
 //	    command = "spoond"
 //	    args = ["mcp"]
-//	    env = { SPOOND_BACKEND_URL = "...", SPOOND_AGENT_TOKEN = "..." }
+//	    env = { SPOOND_BACKEND_URL = "...", SPOOND_AGENT_TOKEN = "...", SPOOND_IMAGE = "..." }
 //	  }
 //	}
 package spoondmcp
@@ -71,7 +77,12 @@ func agentToken() string {
 func Main(args []string) int {
 	backendURL := env.Get("SPOOND_BACKEND_URL", "https://127.0.0.1:8890")
 	token := agentToken()
-	image := env.Get("SPOOND_IMAGE", "dev-base")
+	// The sandbox image has no default: without SPOOND_IMAGE every tool
+	// call fails with a message naming the setting (mcp.ErrNoImage).
+	image := env.Get("SPOOND_IMAGE", "")
+	if image == "" {
+		log.Printf("spoond-mcp: warning: SPOOND_IMAGE is not set; every tool call will fail until it names an image")
+	}
 	transport := env.Get("MCP_TRANSPORT", "stdio")
 	listenAddr := env.Get("MCP_LISTEN", ":9090")
 	httpToken := env.Get("MCP_AUTH_TOKEN", token) // default to the agent token

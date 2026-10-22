@@ -106,6 +106,7 @@ var Known = []string{
 	"FORGEJO_ADMIN_TOKEN",
 	"FORGEJO_URL",
 	"GATEWAY_ADDR",
+	"GATEWAY_DEFAULT_IMAGE",
 	"GATEWAY_IMAGE_ALIASES",
 	"GATEWAY_METRICS_LISTEN",
 	"GATEWAY_SSH_IMAGES",
@@ -441,6 +442,9 @@ var Specs = []Spec{
 	{"FORGEJO_ADMIN_TOKEN", TypeString, Runner, true},
 	{"FORGEJO_URL", TypeURL, Runner, false},
 	{"GATEWAY_ADDR", TypeAddr, Doctor, false},
+	// The image the gateway's `new` creates when none is named; no
+	// default (bare `new` is refused without it).
+	{"GATEWAY_DEFAULT_IMAGE", TypeString, Gateway, false},
 	{"GATEWAY_IMAGE_ALIASES", TypeList, Gateway, false}, // short=full pairs
 	{"GATEWAY_METRICS_LISTEN", TypeAddr, Gateway, false},
 	{"GATEWAY_SSH_IMAGES", TypeList, Gateway, false},

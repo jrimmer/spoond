@@ -131,8 +131,14 @@ file left outside `/etc/spoond/`, matching the unit's single
 
 ```bash
 ssh ctl@sandbox.example.com "ls"
-ssh new@sandbox.example.com    # auto-create + attach
+ssh new-my-image@sandbox.example.com    # auto-create + attach
 ```
+
+`new` needs the gateway told which images run sshd:
+`GATEWAY_SSH_IMAGES` in `/etc/spoond-gateway.env` (no default; with it
+empty every `new` is refused, naming the setting). A bare
+`ssh new@…` also needs `GATEWAY_DEFAULT_IMAGE` (no default; without it
+bare `new` asks for an image).
 
 ## 3. spoond-runner (Forgejo Actions)
 
@@ -154,11 +160,11 @@ cat > /etc/spoond/runner.env <<'EOF'
 FORGEJO_URL=https://git.example.com
 RUNNER_TOKEN=<registration token>
 RUNNER_NAME=spoond-runner
-RUNNER_LABELS=ubuntu-latest,go,golang,elixir,elixir-base,llm-review,elixir-release,release
+RUNNER_LABELS=ubuntu-latest,go,release
 LEASE_URL=https://sandbox.example.com:8890
 LEASE_TOKEN=<consumer token>
-IMAGE_MAP=ubuntu-latest=py-base,go=go-base,golang=go-base,elixir=elixir-base,elixir-base=elixir-base,llm-review=llm-review,dev=dev-base,elixir-release=elixir-release,release=elixir-release
-DEFAULT_IMAGE=py-base
+IMAGE_MAP=ubuntu-latest=ci-image,go=go-ci-image,release=release-image
+DEFAULT_IMAGE=ci-image
 RUNNER_FLOOR=3
 RUNNER_MAX=12
 RUNNER_SCALE_STEP=3
@@ -168,6 +174,11 @@ JOB_RECORD_DIR=/var/lib/spoond/jobs
 EOF
 chmod 600 /etc/spoond/runner.env
 ```
+
+The image names are placeholders for images your backend serves.
+`IMAGE_MAP` and `DEFAULT_IMAGE` have no defaults: a job whose labels map
+through neither fails before a sandbox is created, and a runner with
+both unset warns at startup.
 
 Pool tuning (`RUNNER_FLOOR`, `RUNNER_MAX`, `RUNNER_SCALE_STEP`,
 `SCALE_UP_DELAY`, `SCALE_DOWN_DELAY`, `JOB_RECORD_DIR`) is documented in

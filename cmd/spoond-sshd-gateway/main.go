@@ -4,8 +4,8 @@
 // sandboxes: `ssh <lease-id>@<gateway-host>`. It authenticates the
 // caller with a public key, resolves the lease id to a sandbox, and
 // relays the SSH session onto a process in the sandbox through the
-// backend's /api/leases/{id}/stream WebSocket (dev-base attaches to
-// tmux on login).
+// backend's /api/leases/{id}/stream WebSocket (what a login runs, a
+// plain shell or e.g. a tmux attach, is the image's own business).
 //
 // The lease id in the username is the capability: it is unguessable
 // (128-bit random). The gateway accepts any of the configured client
@@ -114,15 +114,22 @@ var (
 	shellyModel = flags.String("shelly-model", "gpt-oss-20b-fireworks", "default model id for the shelley agent")
 
 	// sshImages is the set of image tags that have sshd installed and
-	// can therefore support interactive SSH sessions. CI images (go-base,
-	// py-base, rust-base, etc.) typically don't have sshd. Defaults to
-	// dev-base only; operators can add more via GATEWAY_SSH_IMAGES.
-	sshImages     = flags.String("ssh-images", envOr("GATEWAY_SSH_IMAGES", "dev-base"), "comma-separated image tags that support interactive SSH (have sshd)")
+	// can therefore support interactive SSH sessions. CI images
+	// typically don't have sshd. There is no default: with it empty,
+	// `new` (ssh new@ or ctl new) is refused with a message naming
+	// GATEWAY_SSH_IMAGES.
+	sshImages     = flags.String("ssh-images", envOr("GATEWAY_SSH_IMAGES", ""), "comma-separated image tags that support interactive SSH (have sshd); empty = `new` is refused")
 	metricsListen = flags.String("metrics-listen", envOr("GATEWAY_METRICS_LISTEN", ""), "address for /metrics endpoint (empty = disabled)")
 
-	// extraImageAliases allows operators to add or override short-name
-	// → full-tag aliases without code changes. Format: short=full,short=full.
-	extraImageAliases = flags.String("image-aliases", envOr("GATEWAY_IMAGE_ALIASES", ""), "comma-separated short=full image aliases (e.g. rust=rust-base,js=js-base)")
+	// defaultImage is the image `new` creates when the caller names
+	// none (ssh new@, ctl new). There is no default: with it empty,
+	// `new` without an image is refused and asks for one.
+	defaultImage = flags.String("default-image", envOr("GATEWAY_DEFAULT_IMAGE", ""), "image `new` creates when none is named (empty = `new` needs an image)")
+
+	// extraImageAliases lets operators define short-name → full-tag
+	// aliases without code changes. Format: short=full,short=full.
+	// There are none built in.
+	extraImageAliases = flags.String("image-aliases", envOr("GATEWAY_IMAGE_ALIASES", ""), "comma-separated short=full image aliases (e.g. dev=my-image)")
 )
 
 // ErrGatewayToken reports gatewayToken's failure — the environment
@@ -189,8 +196,8 @@ func Main(args []string) int {
 	}
 
 	// Parse the set of images that support interactive SSH (have sshd
-	// installed). Default is dev-base only; operators can add more via
-	// GATEWAY_SSH_IMAGES=dev-base,rust-base,...
+	// installed), e.g. GATEWAY_SSH_IMAGES=my-image,other-image. There is
+	// no default; without one, `new` is refused.
 	sshImageSet = make(map[string]bool)
 	for _, img := range strings.Split(*sshImages, ",") {
 		img = strings.TrimSpace(img)
@@ -198,11 +205,13 @@ func Main(args []string) int {
 			sshImageSet[img] = true
 		}
 	}
+	if len(sshImageSet) == 0 {
+		log.Printf("warning: %s", errNoSSHImages)
+	}
 
-	// Parse extra image aliases from GATEWAY_IMAGE_ALIASES (format:
-	// short=full,short=full). These are merged into the hardcoded
-	// imageAliases map so operators can add new short names without
-	// code changes.
+	// Parse image aliases from GATEWAY_IMAGE_ALIASES (format:
+	// short=full,short=full) into imageAliases, which is otherwise
+	// empty: operators add short names without code changes.
 	if *extraImageAliases != "" {
 		for _, pair := range strings.Split(*extraImageAliases, ",") {
 			pair = strings.TrimSpace(pair)
@@ -411,21 +420,21 @@ func handleConn(conn net.Conn, config *ssh.ServerConfig, gatewayKey ssh.Signer) 
 			return
 		}
 		leaseID = created
-		motd = fmt.Sprintf("spoond: created lease %s (%s) — tmux 'dev' attached. Detach: Ctrl-b d. %s\n",
+		motd = fmt.Sprintf("spoond: created lease %s (%s). %s\n",
 			created, img, reconnect(created))
 		log.Printf("created lease %s (%s) for user %q", created, img, user)
 	} else {
-		// Attaching to an existing lease: show the id in the tmux footer
-		// and print the reconnect hint when the session ends, same as
-		// create — the id is just as easy to forget on reconnect.
-		motd = fmt.Sprintf("spoond: attached to lease %s — tmux 'dev' attached. Detach: Ctrl-b d. %s\n",
+		// Attaching to an existing lease: show the id and the reconnect
+		// hint, same as create — the id is just as easy to forget on
+		// reconnect.
+		motd = fmt.Sprintf("spoond: attached to lease %s. %s\n",
 			leaseID, reconnect(leaseID))
 	}
 
 	// Each accepted session channel becomes one process in the sandbox,
 	// started through the backend's /stream WebSocket (U09). The
-	// connection's client address feeds SSH_CONNECTION, which is what
-	// triggers dev-base's tmux attach.
+	// connection's client address feeds SSH_CONNECTION, which an image's
+	// login scripts can key on (e.g. to attach tmux).
 	clientIP, clientPort, _ := net.SplitHostPort(sconn.RemoteAddr().String())
 	for newChan := range chans {
 		if newChan.ChannelType() != "session" {
@@ -449,23 +458,26 @@ func isLeaseID(s string) bool {
 	return true
 }
 
-// imageAliases maps SSH username image names to backend snapshot tags.
-var imageAliases = map[string]string{
-	"dev":    "dev-base",
-	"go":     "go-base",
-	"py":     "py-base",
-	"python": "py-base",
-	"elixir": "elixir-base",
-	"llm":    "llm-review",
-	"base":   "dev-base",
-}
+// imageAliases maps operator-defined short names to image tags. None
+// are built in; GATEWAY_IMAGE_ALIASES fills it at startup. Any other
+// name is an image tag exactly as the backend's catalog names it.
+var imageAliases = map[string]string{}
 
 // sshImageSet is populated from the --ssh-images flag at startup.
 var sshImageSet map[string]bool
 
+// errNoSSHImages is `new`'s refusal (and the startup warning) on a
+// gateway with GATEWAY_SSH_IMAGES empty: no image is known to run sshd,
+// so no interactive sandbox can be created.
+var errNoSSHImages = errors.New("no interactive SSH image is configured: set GATEWAY_SSH_IMAGES (or --ssh-images) on the gateway to the images that run sshd")
+
+// errNoImage is `new`'s refusal when the caller names no image and the
+// gateway has no GATEWAY_DEFAULT_IMAGE.
+var errNoImage = errors.New("no image named and the gateway has no default image (GATEWAY_DEFAULT_IMAGE): name one, e.g. `new <image>` (ctl) or `ssh new-<image>@<host>`")
+
 // fetchKnownImages queries the backend's /api/images endpoint and returns
-// the list of known image tags. This is used to validate full image names
-// (e.g. "rust-base") that aren't in the imageAliases short-name map.
+// the list of known image tags. This is used to validate image names
+// that aren't operator aliases (imageAliases).
 func fetchKnownImages(ctx context.Context) ([]string, error) {
 	b, err := backendJSON(ctx, http.MethodGet, "/api/images", nil)
 	if err != nil {
@@ -492,28 +504,36 @@ func sshImageTags() []string {
 }
 
 // createSandbox parses an SSH username of the form new[-<image>] and
-// creates a persistent sandbox in the backend. Returns the new lease id
-// and the resolved image tag.
+// creates a persistent sandbox in the backend. Bare `new` uses
+// GATEWAY_DEFAULT_IMAGE and is refused without one. Returns the new
+// lease id and the resolved image tag.
 func createSandbox(ctx context.Context, user string) (string, string, error) {
-	image := "dev-base"
 	alias := ""
 	if user != "new" {
 		rest, ok := strings.CutPrefix(user, "new-")
 		if !ok || rest == "" {
-			return "", "", fmt.Errorf("unknown command %q — use a lease id or new[-<image>] (new, new-dev, new-go, new-py, new-elixir, new-llm, or new-<full-tag>)", user)
+			return "", "", fmt.Errorf("unknown command %q — use a lease id or new[-<image>] (new, or new-<image> with an image tag from the catalog)", user)
 		}
 		alias = rest
+	}
+	// Nothing interactive can be created until an image is known to run
+	// sshd; say so before any backend call.
+	if len(sshImageSet) == 0 {
+		return "", "", errNoSSHImages
+	}
+	image := *defaultImage
+	if alias == "" && image == "" {
+		return "", "", errNoImage
 	}
 	if alias != "" {
 		tag, ok := imageAliases[alias]
 		if !ok {
-			// Not a known short alias — try matching as a full image
-			// tag against the backend's known images. This lets new
-			// images (e.g. rust-base) be used immediately without
-			// adding a code-level alias.
+			// Not an operator alias — match it as an image tag against
+			// the backend's catalog, so any image the backend serves can
+			// be used by its own name.
 			known, err := fetchKnownImages(ctx)
 			if err != nil {
-				return "", "", fmt.Errorf("cannot verify image %q (backend /api/images unavailable: %v) — try a known short name: dev, go, py, elixir, llm", alias, err)
+				return "", "", fmt.Errorf("cannot verify image %q (backend /api/images unavailable: %v)", alias, err)
 			}
 			found := false
 			for _, k := range known {
@@ -525,19 +545,18 @@ func createSandbox(ctx context.Context, user string) (string, string, error) {
 			}
 			if !found {
 				sort.Strings(known)
-				return "", "", fmt.Errorf("unknown image %q — try a short name (dev, go, py, elixir, llm) or a known tag: %s", alias, strings.Join(known, ", "))
+				return "", "", fmt.Errorf("unknown image %q — name an image tag from the catalog: %s", alias, strings.Join(known, ", "))
 			}
 		} else {
 			image = tag
 		}
 	}
 
-	// Interactive SSH requires an image with sshd. Most CI images (go,
-	// py, elixir, rust, etc.) don't have sshd — they're for API exec
-	// workflows, not interactive shells. Reject before creating so we
-	// don't orphan a sandbox.
+	// Interactive SSH requires an image with sshd. CI images usually
+	// don't have sshd — they're for API exec workflows, not interactive
+	// shells. Reject before creating so we don't orphan a sandbox.
 	if !sshImageSet[image] {
-		return "", "", fmt.Errorf("image %q is not an interactive SSH image (no sshd) — interactive SSH requires one of: %s. Use the backend API for CI images.", image, strings.Join(sshImageTags(), ", "))
+		return "", "", fmt.Errorf("image %q is not an interactive SSH image (no sshd) — interactive SSH requires one of: %s (GATEWAY_SSH_IMAGES). Use the backend API for other images.", image, strings.Join(sshImageTags(), ", "))
 	}
 
 	payload, err := json.Marshal(map[string]any{
@@ -652,7 +671,7 @@ func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer, k
 
 	switch fields[0] {
 	case "help", "--help", "-h":
-		return "commands: new [dev|go|py|elixir|llm], create [image] [--snapshot <name[@v]> [--snapshot-owner <user>]] [--size <preset>] [--ttl N] [--persistent], ls [--json], stat <id> [--json], rm <id>, keepalive <id>, suspend <id>, resume <id>, restart <id> [--cold], cp <id> [tag], shelly <id>, tag <id> <name>, comment <id> <text>, snapshot save <lease> <name> [--key K] [--keep N], snapshot ls [prefix], snapshot show <name[@v]>, snapshot rm <name[@v]> [--force], whoami, prompt <id> <message>, ssh-key ls|add <pubkey> <name>|rm <id>, share add <id> <user> [ssh|http] [ttl]|ls|rm <id> <user> — add --json for raw output"
+		return "commands: new [image], create [image] [--snapshot <name[@v]> [--snapshot-owner <user>]] [--size <preset>] [--ttl N] [--persistent], ls [--json], stat <id> [--json], rm <id>, keepalive <id>, suspend <id>, resume <id>, restart <id> [--cold], cp <id> [tag], shelly <id>, tag <id> <name>, comment <id> <text>, snapshot save <lease> <name> [--key K] [--keep N], snapshot ls [prefix], snapshot show <name[@v]>, snapshot rm <name[@v]> [--force], whoami, prompt <id> <message>, ssh-key ls|add <pubkey> <name>|rm <id>, share add <id> <user> [ssh|http] [ttl]|ls|rm <id> <user> — add --json for raw output"
 	case "whoami":
 		if keyID == "" {
 			if jsonMode {
@@ -751,7 +770,9 @@ func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer, k
 		}
 		id, img, err := createSandbox(ctx, user)
 		if err != nil {
-			return fmt.Sprintf(`{"error":"%v"}`, err)
+			// %q: the refusals quote image names, which a bare
+			// "%v" would leave as invalid JSON.
+			return fmt.Sprintf(`{"error":%q}`, err.Error())
 		}
 		return fmt.Sprintf(`{"id":%q,"image":%q,"created":true}`, id, img)
 	case "ls":
@@ -1132,8 +1153,8 @@ func commandForRequest(reqType, payload string, ptyReq bool) (sessionCommand, bo
 
 // sessionEnv composes the env of the stream's first frame: the env the
 // client collected, TERM (default xterm-256color), the
-// SSH_CONNECTION/SSH_CLIENT pair whose presence triggers dev-base's tmux
-// attach, and the root account fields.
+// SSH_CONNECTION/SSH_CLIENT pair a login script can key on (e.g. to
+// attach tmux), and the root account fields.
 func sessionEnv(collected map[string]string, term, clientIP, clientPort, serverAddr string) map[string]string {
 	env := make(map[string]string, len(collected)+6)
 	for k, v := range collected {
