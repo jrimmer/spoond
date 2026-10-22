@@ -975,10 +975,13 @@ hung, and spoond recovers it the same way, from the last checkpoint or
 `lost` (#159). Its background jobs end `lost` with it, so callers
 following them stop waiting. The clock starts at the first probe that
 does not reach the guest and stops at any answer: a probe that reads the
-disk, or a successful exec through the API. spoond acts only when at
-least one other running lease answered in the same pass, so a host where
-every guest is slow, an orchestrator outage or a host with a single
-running lease never triggers it. A backend restart starts the clock
+disk, or a successful exec through the API. It pauses while the host is
+over the saturation gate's targets (`SATURATION_IO_FULL_PCT`,
+`SATURATION_CPU_SOME_PCT`): on an overloaded host one guest can stall far
+longer than its neighbours and still be working, so only silence on a
+calm host counts. spoond also acts only when at least one other running
+lease answered in the same pass, so an orchestrator outage or a host
+with a single running lease never triggers it. A backend restart starts the clock
 again. The lease gets a `guest_unreachable` event (detail
 `guest unreachable for N min`) before the recovery's own events, and the
 same text as its `lost_reason` if it is lost;
