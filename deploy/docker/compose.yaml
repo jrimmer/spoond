@@ -1,0 +1,125 @@
+# spoond with Docker Compose (docs/install.md, "Docker install").
+#
+# The containers run privileged with host networking: this packages
+# spoond, it does not isolate it. The host needs KVM, the nbd module and
+# reserved hugepages, which the prepare service writes.
+#
+#   docker compose run --rm prepare   # host settings; reboot if it says so
+#   docker compose run --rm init      # config and secrets into ./config
+#   docker compose up -d
+#   docker compose run --rm init install spoond --container --root /config --admin-key /config/admin.pub
+#   docker compose exec spoond spoond-container install images
+#   docker compose exec spoond spoond-container doctor
+#
+# Settings (an .env file next to this one, or the environment):
+#   SPOOND_IMAGE      the image (default ghcr.io/jrimmer/spoond:latest)
+#   SPOOND_HOST_NAME  the name clients reach this host by (init; default hostname -f)
+#   SPOOND_STORE_DIR  the snapshot store on the host (default /forkdcache/e2b)
+#   SPOOND_CONFIG     config, secrets and the database (default ./config)
+
+name: spoond
+
+x-spoond: &spoond
+  image: ${SPOOND_IMAGE:-ghcr.io/jrimmer/spoond:latest}
+  build:
+    context: ../..
+    dockerfile: deploy/docker/Dockerfile
+  privileged: true
+  network_mode: host
+  restart: unless-stopped
+  environment:
+    SPOOND_STORE_DIR: ${SPOOND_STORE_DIR:-/forkdcache/e2b}
+
+services:
+  # Run once, then reboot if it says so: modules, sysctl, hugepages and
+  # the kernel command line, written to the host through /host.
+  prepare:
+    <<: *spoond
+    profiles: [setup]
+    restart: "no"
+    command:
+      - install
+      - host
+      - --container
+      - --root=/host
+      - --store-dir=${SPOOND_STORE_DIR:-/forkdcache/e2b}
+    volumes:
+      - /:/host:rslave
+      - /lib/modules:/lib/modules:ro
+      - ${SPOOND_STORE_DIR:-/forkdcache/e2b}:${SPOOND_STORE_DIR:-/forkdcache/e2b}
+
+  # Run once: the orchestrator's and spoond's config and secrets under
+  # ./config. A rerun keeps every secret. Run it again without
+  # --config-only once the stack is up to create the first admin user.
+  init:
+    <<: *spoond
+    profiles: [setup]
+    restart: "no"
+    command: [init]
+    environment:
+      SPOOND_STORE_DIR: ${SPOOND_STORE_DIR:-/forkdcache/e2b}
+      SPOOND_HOST_NAME: ${SPOOND_HOST_NAME:-}
+    volumes:
+      - ${SPOOND_CONFIG:-./config}:/config
+      # systemd-resolved's upstream list, for the guests' DNS resolver
+      - /run/systemd:/run/systemd:ro
+
+  registry:
+    image: registry:2.8.3
+    restart: unless-stopped
+    ports:
+      - 127.0.0.1:5000:5000
+    volumes:
+      - ${SPOOND_STORE_DIR:-/forkdcache/e2b}/registry:/var/lib/registry
+
+  orchestrator:
+    <<: *spoond
+    command: [orchestrator]
+    # Drain suspends every lease before the orchestrator stops.
+    stop_grace_period: 6m
+    ulimits:
+      nofile: 1048576
+      memlock: -1
+    depends_on: [registry]
+    volumes:
+      - ${SPOOND_CONFIG:-./config}/etc/spoond:/etc/spoond:ro
+      - ${SPOOND_CONFIG:-./config}/etc/e2b:/etc/e2b:ro
+      - ${SPOOND_CONFIG:-./config}/etc/nftables.d:/etc/nftables.d:ro
+      - ${SPOOND_STORE_DIR:-/forkdcache/e2b}:${SPOOND_STORE_DIR:-/forkdcache/e2b}
+      - /dev:/dev
+      - /lib/modules:/lib/modules:ro
+
+  spoond:
+    <<: *spoond
+    command: [backend]
+    depends_on: [orchestrator, registry]
+    healthcheck:
+      test: [CMD, curl, -fsSk, -o, /dev/null, https://127.0.0.1:8890/healthz]
+      interval: 10s
+      timeout: 5s
+      start_period: 60s
+    volumes:
+      - ${SPOOND_CONFIG:-./config}/etc/spoond:/etc/spoond
+      - ${SPOOND_CONFIG:-./config}/etc/e2b:/etc/e2b
+      - ${SPOOND_CONFIG:-./config}/var/lib/spoond:/var/lib/spoond
+      - ${SPOOND_STORE_DIR:-/forkdcache/e2b}:${SPOOND_STORE_DIR:-/forkdcache/e2b}
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  gateway:
+    <<: *spoond
+    command: [gateway]
+    depends_on:
+      spoond:
+        condition: service_healthy
+    volumes:
+      - ${SPOOND_CONFIG:-./config}/etc/spoond-gateway.env:/etc/spoond-gateway.env:ro
+      - ${SPOOND_CONFIG:-./config}/etc/spoond-gateway:/etc/spoond-gateway
+
+  dash:
+    <<: *spoond
+    command: [dash]
+    depends_on:
+      spoond:
+        condition: service_healthy
+    volumes:
+      - ${SPOOND_CONFIG:-./config}/etc/spoond:/etc/spoond:ro

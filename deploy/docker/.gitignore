@@ -1,0 +1,4 @@
+# Written by the init service: config, secrets and the database.
+/config/
+# Local runtime tarballs for the image build.
+/artifacts/*.tar.gz

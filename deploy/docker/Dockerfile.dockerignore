@@ -1,0 +1,10 @@
+# The build context is the repository root; only the sources and
+# deploy/docker go in.
+.git
+.beads
+.claude
+**/*.tar.gz
+!deploy/docker/artifacts/*.tar.gz
+docs
+conformance
+tests
