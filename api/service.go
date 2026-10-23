@@ -2344,7 +2344,8 @@ func (s *Service) releaseBecauseIf(ctx context.Context, l *Lease, reason string,
 	// A running lease's hugepages come back with the release; a
 	// suspended one holds none.
 	freedMiB := 0
-	if l.live() {
+	wasLive := l.live()
+	if wasLive {
 		freedMiB = l.MemoryMB
 	}
 	s.store.mu.Unlock()
@@ -2358,6 +2359,9 @@ func (s *Service) releaseBecauseIf(ctx context.Context, l *Lease, reason string,
 	s.forgetAppliedEgress(l.ID)
 	s.clearPendingSecretRemovals(l.ID)
 
+	// The job records outlive the lease (ended_jobs): copied while the
+	// guest is still there to give a running job's stderr tail.
+	s.archiveJobsOfReleasedLease(context.WithoutCancel(ctx), l, wasLive)
 	if err := s.sub.Delete(ctx, l.SandboxID); err != nil {
 		s.log.Printf("release: delete %s: %v", l.SandboxID, err)
 		s.rememberOrphanSandbox(l.SandboxID)

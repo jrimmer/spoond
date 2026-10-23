@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"net/http"
 	"testing"
 	"time"
 
@@ -94,4 +95,52 @@ func TestCrashLostMarksJobsLost(t *testing.T) {
 		t.Fatalf("crash test = %d %v, want 200 lost", resp.StatusCode, body)
 	}
 	waitJobState(t, db, jobID, "lost", 2*time.Second)
+}
+
+// TestReleasedLeaseKeepsJobRecords: a lease's job records outlive it
+// (ended_jobs). A job still running at the release reads back lost,
+// reason lease_released, with the stderr tail the guest held at the
+// release; its owner still lists and gets it, nobody else does, and the
+// sweep prunes it once the retention window has run out.
+func TestReleasedLeaseKeepsJobRecords(t *testing.T) {
+	ts, svc, _, sub := newTestServerWithService(t)
+	id, lease, sandboxID := createJobLease(t, ts, svc)
+	installJobProcess(t, sub, fake.NewProcess(1009))
+	jobID, _ := startBackgroundJob(t, ts, id, map[string]any{"cmd": "worker-start"})
+	writeJobFile(t, sub, sandboxID, jobID, "stderr", "mail: HELLO failed: connection refused\n")
+
+	svc.releaseBecause(context.Background(), lease, "released from inside the lease")
+
+	resp, body := doReq(t, "GET", ts.URL+"/api/leases/"+id+"/jobs", "token-a", nil)
+	if resp.StatusCode != http.StatusOK || body["lease_ended"] != true {
+		t.Fatalf("list after release: %d %v", resp.StatusCode, body)
+	}
+	if jobs, _ := body["jobs"].([]any); len(jobs) != 1 {
+		t.Fatalf("list after release: jobs %v", body["jobs"])
+	}
+	resp, body = doReq(t, "GET", ts.URL+"/api/leases/"+id+"/jobs/"+jobID, "token-a", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("get after release: %d %v", resp.StatusCode, body)
+	}
+	job, _ := body["job"].(map[string]any)
+	if job["state"] != "lost" || job["reason"] != "lease_released" || job["ended_at"] == "" {
+		t.Fatalf("archived job = %v", job)
+	}
+	if want := "mail: HELLO failed: connection refused\n"; body["stderr"] != want || job["stderr_tail"] != want {
+		t.Fatalf("archived stderr %q, tail %q, want %q", body["stderr"], job["stderr_tail"], want)
+	}
+	if resp, _ := doReq(t, "GET", ts.URL+"/api/leases/"+id+"/jobs/nope", "token-a", nil); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("unknown job after release: %d, want 404", resp.StatusCode)
+	}
+	for _, path := range []string{"/jobs", "/jobs/" + jobID} {
+		if resp, _ := doReq(t, "GET", ts.URL+"/api/leases/"+id+path, "token-b", nil); resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("another owner's GET %s after release: %d, want 404", path, resp.StatusCode)
+		}
+	}
+
+	svc.now = func() time.Time { return time.Now().Add(svc.jobRetention() + time.Hour) }
+	svc.pruneJobs(context.Background())
+	if resp, _ := doReq(t, "GET", ts.URL+"/api/leases/"+id+"/jobs/"+jobID, "token-a", nil); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("pruned job: %d, want 404", resp.StatusCode)
+	}
 }

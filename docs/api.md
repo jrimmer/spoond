@@ -1035,6 +1035,17 @@ the record and guest files are kept under; `skipped` (see the next
 endpoint) names each stream the output cap has dropped anything from.
 Owner, admins and `http` shares as exec has them.
 
+**After the lease ends** the records stay readable by the lease's owner
+until the retention window prunes them (the job's `retention_secs`, else
+`JOB_RETENTION_SECS`), so a client can still learn how a lease's jobs
+ended when the guest released its own lease or died. Both job reads
+answer with `"lease_ended": true`. A job still running at the release
+reads `state: "lost"` with `reason: "lease_released"`, and its
+`stderr_tail` is the last 4 KiB the guest held when the lease went. The
+record read's `stderr` is that tail and `stdout` is empty, since the
+guest's files went with the sandbox. Shares end with the lease, so only
+the owner reads these.
+
 ### `GET /api/leases/{id}/jobs/{job}` — read one job
 
 Returns the record plus the last 64 KiB of `stdout` and `stderr`:

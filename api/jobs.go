@@ -1641,6 +1641,9 @@ func (s *Service) pruneJobs(ctx context.Context) {
 	if _, err := s.db.PruneLostJobs(ctx, now.Add(-s.jobRetention())); err != nil {
 		s.storeError("prune_lost_jobs", "", err)
 	}
+	if _, err := s.db.PruneEndedJobs(ctx, now, s.jobRetention()); err != nil {
+		s.storeError("prune_ended_jobs", "", err)
+	}
 }
 
 // readJobOutput reads the last n bytes of a job's stdout or stderr for
@@ -1763,6 +1766,44 @@ func (s *Service) leaseJobsView(ctx context.Context, leaseID string) map[string]
 		}
 	}
 	return view
+}
+
+// endedJobTailWait bounds the stderr reads a release makes for the jobs
+// still running on the lease, so a slow guest cannot hold the release.
+const endedJobTailWait = 3 * time.Second
+
+// archiveJobsOfReleasedLease keeps the lease's job records past the
+// release (ended_jobs): its lease_jobs rows cascade away with the lease
+// row, and a guest that died early and released its own lease would
+// otherwise leave no trace of why. Called before the sandbox goes: a job
+// still running is recorded lost (lease_released) with the stderr tail
+// read from the guest while it is there, when the lease was live. Best
+// effort: a failure is logged and never fails the release.
+func (s *Service) archiveJobsOfReleasedLease(ctx context.Context, l *Lease, live bool) {
+	jobs, err := s.db.ListJobs(ctx, l.ID)
+	if err != nil {
+		s.log.Printf("release: list jobs of %s: %v", l.ID, err)
+		return
+	}
+	if len(jobs) == 0 {
+		return
+	}
+	tails := map[string]string{}
+	if live {
+		rctx, cancel := context.WithTimeout(ctx, endedJobTailWait)
+		for _, j := range jobs {
+			if j.State != "running" {
+				continue
+			}
+			if tail, err := s.readJobStderrTail(rctx, l.SandboxID, j.JobID, jobStderrTailBytes, j); err == nil && tail != "" {
+				tails[j.JobID] = tail
+			}
+		}
+		cancel()
+	}
+	if _, err := s.db.ArchiveJobsOfLease(ctx, l.ID, l.Owner, s.now(), store.JobReasonLeaseReleased, tails); err != nil {
+		s.storeError("archive_jobs", l.ID, err)
+	}
 }
 
 // settleJobsOfReleasedLease ends the bookkeeping of every job still

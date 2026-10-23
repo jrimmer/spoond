@@ -102,8 +102,38 @@ func (s *Server) jobTarget(w http.ResponseWriter, r *http.Request, lease *Lease)
 	return row, true
 }
 
+// endedJobs resolves the jobs of a lease that has ended (ended_jobs):
+// ok when the caller's lease is gone and was the caller's own, rows its
+// archived jobs. Shares end with the lease, so only its owner reads
+// them. ok false sends the caller on to the live lookup and its 404.
+func (s *Server) endedJobs(r *http.Request) ([]store.JobRow, bool) {
+	owner, id := ownerFrom(r.Context()), r.PathValue("id")
+	if s.svc.lookupWithShare(owner, id, ShareHTTP) != nil {
+		return nil, false
+	}
+	rows, leaseOwner, err := s.svc.db.ListEndedJobs(r.Context(), id)
+	if err != nil {
+		s.svc.log.Printf("jobs: list ended %s: %v", id, err)
+		return nil, false
+	}
+	if len(rows) == 0 || leaseOwner != owner {
+		return nil, false
+	}
+	return rows, true
+}
+
 // handleJobsList answers GET .../jobs: the lease's jobs, newest first.
+// Once the lease has ended its owner still gets the archived records,
+// with "lease_ended": true, until the job retention window prunes them.
 func (s *Server) handleJobsList(w http.ResponseWriter, r *http.Request) {
+	if rows, ok := s.endedJobs(r); ok {
+		out := make([]jobInfo, 0, len(rows))
+		for _, row := range rows {
+			out = append(out, jobInfoOf(row))
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"jobs": out, "lease_ended": true})
+		return
+	}
 	lease := s.jobsTarget(w, r)
 	if lease == nil {
 		return
@@ -127,6 +157,20 @@ func (s *Server) handleJobsList(w http.ResponseWriter, r *http.Request) {
 // has dropped as "skipped" beside it. With ?wait=<seconds> it long-polls
 // until the job is no longer running or the wait ends.
 func (s *Server) handleJobGet(w http.ResponseWriter, r *http.Request) {
+	// An ended lease's job: the archived record, its stderr tail as the
+	// stderr (the guest's files went with the sandbox) and no stdout.
+	if rows, ok := s.endedJobs(r); ok {
+		for _, row := range rows {
+			if row.JobID == r.PathValue("job") {
+				writeJSON(w, http.StatusOK, map[string]any{
+					"job": jobInfoOf(row), "stdout": "", "stderr": row.StderrTail, "lease_ended": true,
+				})
+				return
+			}
+		}
+		writeErrorCode(w, http.StatusNotFound, "job_not_found", "job not found")
+		return
+	}
 	lease := s.jobsTarget(w, r)
 	if lease == nil {
 		return

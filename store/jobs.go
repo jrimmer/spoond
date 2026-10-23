@@ -102,6 +102,11 @@ const JobReasonTimedOut = "timed_out"
 // but no pid file appeared (the start stream broke first).
 const JobReasonNeverStarted = "never_started"
 
+// JobReasonLeaseReleased is the reason an archived job (ended_jobs)
+// records when it was still running as its lease was released: the job
+// died with the sandbox.
+const JobReasonLeaseReleased = "lease_released"
+
 // InsertJob records a newly started background job. state must be
 // "running" and exit_code nil.
 func (db *DB) InsertJob(ctx context.Context, j JobRow) error {

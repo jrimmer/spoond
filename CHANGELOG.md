@@ -34,6 +34,13 @@ Upgrading from 4.0:
   build.
 - **`GATEWAY_DEFAULT_IMAGE`** (`--default-image`): the image a bare
   `new` creates.
+- **Job records outlive their lease.** When a lease ends, its jobs'
+  records are kept for the job retention window and its owner can still
+  read them through `GET /api/leases/{id}/jobs` and `.../jobs/{job}`
+  (with `"lease_ended": true`). A job still running at the release
+  reads `lost`, reason `lease_released`, with the stderr tail the guest
+  held. Before, the records went with the lease, so a guest that died
+  early and released its own lease left no trace of why. Schema 35.
 
 ### Changed
 
