@@ -330,7 +330,7 @@ much memory goes to sandboxes.
 
 ### Quick start
 
-On main (4.0, unreleased) one command installs it:
+One command installs it:
 
 ```bash
 sudo ./spoond install --host-name sandbox.example.com --admin-key ~/.ssh/id_ed25519.pub
