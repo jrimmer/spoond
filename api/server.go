@@ -2317,6 +2317,10 @@ echo "AGENT_TIMEOUT"`, msg64, mod64)
 
 	s.svc.log.Printf("prompt %s: %s", id, req.Message)
 	start := time.Now()
+	// A prompt is a synchronous exec too: take-back passes the lease
+	// over while it runs (#166).
+	s.svc.incSyncExec(lease.ID)
+	defer s.svc.decSyncExec(lease.ID)
 	res, err := s.svc.sub.Exec(r.Context(), lease.SandboxID, substrate.ExecRequest{
 		Args:    buildShellArgs(script, ""),
 		Env:     requestEnv(lease, nil),

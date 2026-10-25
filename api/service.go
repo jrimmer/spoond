@@ -268,7 +268,8 @@ type Lease struct {
 	// this is non-zero. Background jobs are not counted: a pause stops
 	// them but does not end them. Guarded by store.mu; not persisted.
 	openWork int
-	// syncExecs counts the lease's in-flight synchronous execs: memory
+	// syncExecs counts the lease's in-flight synchronous execs (POST exec
+	// and the agent prompt): memory
 	// take-back passes the lease over while it is non-zero, because a
 	// pause cuts the command (#166). Streams are not counted: an idle
 	// shell may stay open for hours and must not shield the lease's
