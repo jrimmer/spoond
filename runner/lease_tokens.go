@@ -63,11 +63,11 @@ func ParseLeaseTokenMap(v string, readFile func(string) ([]byte, error)) (*Lease
 		key, path = strings.TrimSpace(key), strings.TrimSpace(path)
 		owner, repo, isRepo := strings.Cut(key, "/")
 		if owner == "" || (isRepo && (repo == "" || strings.Contains(repo, "/"))) || strings.ContainsAny(key, " \t") {
-			return nil, nil, fmt.Errorf("LEASE_TOKEN_MAP: entry %d: key %q is not owner/repo or owner", n, key)
+			return nil, nil, fmt.Errorf("LEASE_TOKEN_MAP: entry %d: the key is not owner/repo or owner", n)
 		}
 		if !filepath.IsAbs(path) {
 			// Not echoed either: a relative "path" may well be a token.
-			return nil, nil, fmt.Errorf("LEASE_TOKEN_MAP: %s: the value must be the absolute path of a token file, not the token", key)
+			return nil, nil, fmt.Errorf("LEASE_TOKEN_MAP: entry %d: the value must be the absolute path of a token file, not the token", n)
 		}
 		lower := strings.ToLower(key)
 		table := m.owners

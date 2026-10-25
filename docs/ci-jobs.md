@@ -251,6 +251,17 @@ orphaned job leases runs under every token, and under each it still
 deletes only runner job leases (comment `forgejo job ...`), so the
 project's own leases under the same token are left alone.
 
+Three consequences to know:
+
+- A mapped token must not be used by another runner on the same
+  backend: either runner's startup sweep would release the other's
+  in-flight job leases.
+- Per-owner limits (fair-share slices, the exec busy cap) now cover the
+  project's CI and its other leases together.
+- A pull request from a fork runs as the base repository, so its jobs
+  count against the base project's identity and can start from that
+  identity's snapshots.
+
 ## When a build fails, look for the job record
 
 A failed job writes `/var/lib/spoond/jobs/job-<id>.json` naming the step
