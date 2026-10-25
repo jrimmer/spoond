@@ -308,10 +308,29 @@ password, `spoond dash hash 'the-password'` prints the bcrypt hash for
 
 ## Install
 
-spoond needs an x86-64 Linux host with KVM (bare metal, or a VM with
-nested virtualisation), Debian 13, at least 16 GB of memory and a disk
-or directory for the snapshot store. On main (4.0, unreleased) one
-command installs it:
+### Will your box fit?
+
+| Needs | Check on the box |
+|---|---|
+| x86-64 with KVM: bare metal, or a VM with nested virtualisation on | `uname -m` says `x86_64`; `ls /dev/kvm` exists |
+| 16 GiB of memory or more (most of it becomes sandbox memory) | `free -g` |
+| Debian 13 (other distributions warn; kernel 6.1 or newer) | `cat /etc/os-release`; `uname -r` |
+| 100 GiB free for the snapshot store: a directory (XFS with reflink is best) or a spare disk | `df -h /` (or the disk or directory you'll pass as `--store-dir` or `--store-disk`) |
+| Ports 8890, 8891, 2222, 8893, 5000, 5007 and 5008 free | `ss -ltn` |
+| Internet access during the install | |
+
+Or let the installer check for you; this phase only reads:
+
+```bash
+sudo ./spoond install check
+```
+
+[docs/install.md](docs/install.md#requirements) has the details, and how
+much memory goes to sandboxes.
+
+### Quick start
+
+On main (4.0, unreleased) one command installs it:
 
 ```bash
 sudo ./spoond install --host-name sandbox.example.com --admin-key ~/.ssh/id_ed25519.pub

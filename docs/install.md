@@ -39,6 +39,9 @@ Sandbox memory is hugepage-backed. `--hugepages auto` (the default) keeps
 pages, both now and on the kernel command line; a 128 GiB host reserves
 about 106 GiB, a 16 GiB host 10 GiB. Pass a page count to choose.
 
+`sudo ./spoond install check` runs only the first phase: it reads the
+host against this list and changes nothing.
+
 ## Native install
 
 Download the release binary and run the installer as root:
