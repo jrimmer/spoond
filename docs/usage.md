@@ -48,6 +48,35 @@ Interactive/agent clients can also drive a PTY over the API:
 — that is exactly how the SSH gateway itself attaches. See
 [api.md](api.md#get-apileasesidstream--interactive-process-websocket).
 
+### Long-running work: background jobs, and what's left when a lease ends
+
+For work longer than an exec's timeout, start a background job and
+poll it:
+
+```bash
+curl -s -X POST https://sandbox.example.com/api/leases/<id>/exec \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"cmd":"make test","background":true}'
+# → 202 {"job_id":"<job>","started_at":"…"}
+curl -s "https://sandbox.example.com/api/leases/<id>/jobs/<job>?wait=60" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+A job's record outlives its lease. If the guest released its own lease
+or the lease ended some other way, its owner can still see how each job
+ended, for the job retention window:
+
+```bash
+curl -s https://sandbox.example.com/api/leases/<id>/jobs \
+  -H "Authorization: Bearer $TOKEN"
+# → {"jobs":[{"job_id":"…","state":"lost","reason":"lease_released",
+#             "stderr_tail":"…the guest's last 4 KiB of stderr…"}],"lease_ended":true}
+```
+
+That is the place to look when a worker in a sandbox stopped early and
+took its lease with it: a job still running at the end reads `lost`,
+with the stderr it had written so far.
+
 ## Moving files in and out
 
 Leases expose a small file API under `/api/leases/{id}/files/{path}` —
@@ -256,6 +285,32 @@ curl -s -X POST https://sandbox.example.com/api/users/<user-id>/llm-key \
   -d '{"llm_key":""}'             # revoke (owner reverts to open)
 ```
 
+### From inside the sandbox, without the owner's key
+
+An owner's LLM key works for every lease that owner has, so a guest
+that holds it can spend LLM credit through any of them. Create the
+lease with `self_token` and `self_token_llm` instead: the guest then
+calls the gateway with its own lease-scoped token, which works only on
+its own lease's path and dies with the lease.
+
+```bash
+curl -s -X POST https://sandbox.example.com/api/leases \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"image":"my-image","self_token":true,"self_token_llm":true}'
+
+# inside the guest: the token, the lease id and the API URL are files
+TOKEN=$(cat /run/secrets/spoond-lease-token)
+ID=$(cat /run/secrets/spoond-lease-id)
+API=$(cat /run/secrets/spoond-api-url)
+curl -s "$API/llm/$ID/openai/chat/completions" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-oss-20b-fireworks","messages":[{"role":"user","content":"hi"}]}'
+```
+
+The owner still needs an LLM key set, so LLM access stays the admin's
+decision. A lease created without `self_token_llm` gets `401` for its
+self token here, like any other wrong key.
+
 Optional per-user concurrency cap (in-flight `/llm/` requests per user;
 `429` when exceeded): set `LLM_MAX_CONCURRENT_PER_USER` (default 0 =
 unlimited).
@@ -321,6 +376,29 @@ Allowlist entries may be IPs, CIDRs or domains — or a **lease
 reference** (another lease's id, its friendly name, or `lease:<id>`),
 which permits that lease's published ports. Policy can be changed live
 with `POST /api/leases/{id}/network` — no restart, no new lease.
+
+### Capping what an agent can reach
+
+A lease's owner can widen its network access at any time, so an agent
+that controls its own lease can grant itself new destinations. An admin
+can set an **egress ceiling** on the identity: the most network access
+its leases may ever have. Check the effect first with a dry run, which
+saves nothing and lists the existing leases the ceiling would narrow:
+
+```bash
+curl -s -X POST https://sandbox.example.com/api/users/<agent-id>/egress-ceiling \
+  -H "Authorization: Bearer <admin-token>" -H 'Content-Type: application/json' \
+  -d '{"egress_ceiling":["10.0.0.0/24","github.com","*.githubusercontent.com"],"dry_run":true}'
+# {"dry_run":true,"affected":[{"lease_id":"…","network_policy":"restricted",
+#   "outside":["198.51.100.7"],"effect":"loses the outside entries as soon as the ceiling is set"}]}
+```
+
+Widen the list until `affected` holds only what you mean to cut, then
+send it without `dry_run`. From then on a create, clone, fork or network
+change past the ceiling answers `403 egress_ceiling`, and the identity's
+restricted leases lose any outside entries at once. Add `lan` or
+`internet` to the list to allow those policies; `{"egress_ceiling":null}`
+removes the ceiling.
 
 ## Multi-user tenancy
 

@@ -65,7 +65,12 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
     (shortening `JOB_RETENTION_SECS`) and `output_max_bytes`: a stream
     that grows past the cap has its front punched out
     (`fallocate --punch-hole`) between polls and only the tail is kept,
-    reported as `skipped` with absolute offsets intact.
+    reported as `skipped` with absolute offsets intact. Job records
+    outlive their lease: after it ends, its owner still reads how each
+    job ended (`"lease_ended": true`), and a job running at the end reads
+    `lost` with the guest's last stderr, so a worker that stopped early
+    and released its own lease leaves a trace
+    ([example](docs/usage.md#long-running-work-background-jobs-and-whats-left-when-a-lease-ends)).
   - **Crash test**: on a host with `CRASH_TEST=1`, `POST
     /api/leases/{id}/crash-test` sends the caller's own lease through
     crash recovery (back from its last checkpoint with a new generation,
@@ -84,7 +89,10 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
     lease_token_scope`. It stays the same across a resume, restart,
     recovery or snapshot save, so the guest can read it once; fork and
     clone children get their own. Only its sha256 is stored; it dies with
-    the lease.
+    the lease. With `"self_token_llm": true` as well, the same token stands
+    in for the owner's LLM key at the LLM gateway, on that lease only, so
+    the owner's key never has to enter the guest
+    ([example](docs/usage.md#from-inside-the-sandbox-without-the-owners-key)).
   - **Event stream**: `GET /api/leases/events` (or one lease's
     `/events`) streams lifecycle events over SSE, with resumable
     positions.
@@ -128,8 +136,10 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
   with per-user SSH keys, per-user tokens, a per-user `max_ttl`, an
   equal fair share of memory and snapshot disk among active owners (no
   per-owner caps since 3.0), admin roles, lease sharing with expiry,
-  per-user LLM gateway keys, and per-user proxy hostnames
-  (`<label>.<user>.sandbox.example`). See
+  per-user LLM gateway keys, per-user egress ceilings (the most network
+  access an identity's leases may have, with a dry run that lists what a
+  ceiling would cut; [example](docs/usage.md#capping-what-an-agent-can-reach)),
+  and per-user proxy hostnames (`<label>.<user>.sandbox.example`). See
   [docs/security.md](docs/security.md) and the [Users & identity API
   section](docs/api.md#users--identity).
 - **Fair shares**: every owner holding a running or paused lease gets
@@ -170,12 +180,17 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
   `suspended` event.
 - **Images**: spoond ships none. Any Dockerfile that copies in spoond's
   guest init ([images/README.md](images/README.md)) is built into an E2B
-  template by `spoond images build <name>` (or `--all`). Every guest
+  template by `spoond images build <name>` (or `--all`); `spoond images
+  describe --all` copies a manifest's capability and description onto
+  images already built, for `/api/capabilities`. Every guest
   resolves names through the LAN resolver only and carries a container
   marker, so container tools such as kaniko work inside sandboxes.
 - **SSH gateway**: `ssh new@sandbox.example` auto-creates a persistent
   sandbox; `ssh <lease-id>@sandbox.example` re-attaches; friendly names
-  after `tag`. Sessions land in a tmux session.
+  after `tag`. Sessions land in a tmux session. The operator names the
+  images: `GATEWAY_SSH_IMAGES` (images with sshd), `GATEWAY_DEFAULT_IMAGE`
+  (what a bare `new` creates) and `GATEWAY_IMAGE_ALIASES` (short names
+  such as `dev=my-dev-image`).
 - **Control plane over SSH**: `ssh ctl@sandbox.example "ls"` (pretty
   table by default; `--json` for raw). Verbs: `new`, `create`, `ls`,
   `stat`, `rm`, `keepalive`, `suspend`, `resume`, `restart`, `cp`
@@ -193,10 +208,13 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
   `restricted` (with an egress allowlist), enforced by the orchestrator's
   egress firewall. `internet` and `lan` guests may call the lease API
   (CI jobs lease databases from inside their sandbox); `restricted` and
-  `none` may not. Known limit: a domain in a `restricted` allowlist
-  currently breaks HTTPS to allow-listed LAN IPs, so list IPs only.
+  `none` may not. A `restricted` allowlist takes IPs, CIDRs, domains and
+  lease references, and an admin's egress ceiling bounds what an
+  identity can ever allow.
 - **Forgejo Actions runner**: `spoond runner` leases sandboxes as CI
-  workers. A checkout step tests the commit that triggered the run (or
+  workers. `IMAGE_MAP` maps `runs-on` labels to images (`DEFAULT_IMAGE`
+  for the rest), and a restart picks up new `RUNNER_LABELS`
+  ([adding a label](docs/ci-jobs.md#adding-a-label)). A checkout step tests the commit that triggered the run (or
   the step's `with: ref:`). On a full node a job waits for admission and retries instead
   of failing, and a job's `timeout-minutes` is enforced as in GitHub
   Actions (execution from sandbox creation), capped by
@@ -417,7 +435,8 @@ The settings you are most likely to change:
 | Paused leases | `PAUSED_RELEASE_DAYS` (30), `PINNED_IDLE_NOTICE_DAYS` (7) |
 | Snapshots | `MAX_KEPT_PER_LEASE` (4), `MAX_NAMED_SNAPSHOTS`, `SNAPSHOT_KEEP_VERSIONS`, `SNAPSHOT_WRITE_CONCURRENCY` |
 | Jobs and exec | `MAX_RUNNING_JOBS_PER_LEASE`, `JOB_RETENTION_SECS` (7 days, the record and guest files an exited job keeps — a job's own `retention_secs` may shorten it), `JOB_OUTPUT_MAX_BYTES` (0 = unlimited; a job's stdout/stderr guest file growing past it has its front punched out between polls, keeping the tail), `JOB_MAX_RUNTIME`, `MAX_EXEC_BODY_BYTES`, `EXEC_CONCURRENCY_MAX` (8; per-owner concurrent exec/stream ops — an agent client holding one stream per working thread runs that many at once), `GUEST_DIAL_MAX` (16; per-owner concurrent open guest-port dials). Both are per-identity overridable: an identity's `exec_concurrency` / `guest_dial` (set by an admin via `POST /api/users/{id}/quota`, stored with the user) replaces the host default for that identity alone; unset keeps the host default |
-| CI runner | `RUNNER_ADMIT_WAIT_SECS`, `RUNNER_JOB_TIMEOUT` (6h) |
+| CI runner | `RUNNER_LABELS`, `IMAGE_MAP` and `DEFAULT_IMAGE` (no default image), `RUNNER_ADMIT_WAIT_SECS`, `RUNNER_JOB_TIMEOUT` (6h) |
+| Images the clients pick | `GATEWAY_SSH_IMAGES`, `GATEWAY_DEFAULT_IMAGE`, `GATEWAY_IMAGE_ALIASES` (SSH gateway), `SPOOND_IMAGE` (`spoond mcp`); none has a default, since spoond ships no images |
 | Drain and recovery | `DRAIN_SNAPSHOT_CONCURRENCY`, `UNDRAIN_*`, `RECOVERY_RETRY_*`, `ROOTFS_PROBE_SECS`, `GUEST_UNREACHABLE_SECS`, `SWEEP_TIMEOUT`, `E2B_CREATE_TIMEOUT` and the other per-call E2B limits |
 | Housekeeping and testing | `ORPHAN_REAP` (`dryrun`), `CRASH_TEST` |
 
