@@ -126,6 +126,18 @@ host (default `/forkdcache/e2b`; it must exist), and `./config`
 (`SPOOND_CONFIG`) holds the configuration, the secrets and the database,
 laid out as on a native host under `etc/` and `var/`: back it up.
 
+To build your images, put their directory (manifest, Dockerfiles,
+`spoond-guest-init`) under `config/var/lib/spoond/`, which the `spoond`
+container sees as `/var/lib/spoond/`, and build there:
+
+```bash
+cp -r ~/my-images config/var/lib/spoond/images
+docker compose exec spoond cp /var/lib/spoond/guest/spoond-guest-init /var/lib/spoond/images/
+docker compose exec spoond spoond-container images \
+  -manifest /var/lib/spoond/images/manifest.yaml \
+  -context /var/lib/spoond/images build my-image
+```
+
 | Service | Does |
 |---|---|
 | `prepare` (run once) | `spoond install host --container` against the host's `/`: the modules, sysctls, hugepages and kernel command line. Packages, iptables, Docker and the AppArmor check are the host's own |
