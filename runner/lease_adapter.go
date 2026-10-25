@@ -32,8 +32,9 @@ const defaultCapacityRetryAfter = 30 * time.Second
 // A client is safe for concurrent use across Create/Exec/Delete/Sweep
 // calls. WithLabel, however, mutates shared state: on a client whose
 // Creates run concurrently, a label could land on another caller's
-// lease. The runner never does this — every worker owns a private
-// client and runs one job at a time — so keep that shape: one client
+// lease. The runner never does this — every worker owns private
+// clients (one per lease identity, LEASE_TOKEN_MAP) and runs one job at
+// a time — so keep that shape: one client
 // per concurrent creator, WithLabel immediately before the Create it
 // applies to.
 type HTTPLeaseClient struct {

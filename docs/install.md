@@ -387,6 +387,7 @@ for the full reference):
 |---|---|
 | `FORGEJO_URL`, `RUNNER_TOKEN` | Forgejo instance and registration token (required) |
 | `LEASE_URL` / `LEASE_TOKEN` | backend base URL and the bearer token the runner authenticates with |
+| `LEASE_TOKEN_MAP` | `owner/repo` or `owner` → token file path, comma-separated: a mapped repository's jobs lease as their own identity in fair shares; anything unmapped uses `LEASE_TOKEN` ([ci-jobs.md](ci-jobs.md#per-project-lease-identity)) |
 | `IMAGE_MAP` / `DEFAULT_IMAGE` | `runs-on` label → image mapping, and the image for unmapped labels; no default, so a job whose labels map to no image fails ([ci-jobs.md](ci-jobs.md)) |
 | `LEASE_TTL` | sandbox lease TTL seconds (default 600) |
 | `EXEC_TIMEOUT_SECS` | per-step exec timeout override (0 = the backend's `MAX_EXEC_TIMEOUT_SECS`, default 300) |

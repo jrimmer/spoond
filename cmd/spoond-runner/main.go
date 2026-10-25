@@ -15,6 +15,20 @@
 //	LEASE_URL          Lease API base URL (default http://127.0.0.1:8890)
 //	LEASE_TOKEN        Lease API bearer token (required; or
 //	                   LEASE_TOKEN_FILE, same file rules)
+//	LEASE_TOKEN_MAP    Per-project lease identity, comma-separated
+//	                   KEY=PATH (e.g. "acme/web=/etc/spoond/web.token,
+//	                   example=/etc/spoond/example.token"): a job from
+//	                   repository KEY ("owner/repo"), or from any
+//	                   repository of owner KEY ("owner"), leases with
+//	                   the token in the file at PATH, so fair shares
+//	                   count that project's CI against its own
+//	                   identity. The repository's entry beats its
+//	                   owner's; keys match case-insensitively; PATH is
+//	                   an absolute path (never the token itself), read
+//	                   by LEASE_TOKEN_FILE's rules. Anything unmapped
+//	                   uses LEASE_TOKEN. A malformed entry or an
+//	                   unreadable file fails startup, naming the entry.
+//	                   Unset: every job uses LEASE_TOKEN
 //	IMAGE_MAP          runs-on label -> image tag, comma-separated
 //	                   (e.g. "ubuntu-latest=ci-image"); a value
 //	                   "snapshot:NAME[@V]" starts the job from the
@@ -123,6 +137,29 @@ func imageConfigWarning(imageMap map[string]string, defaultImage string) string 
 	return "neither IMAGE_MAP nor DEFAULT_IMAGE is set; every job will fail until one names an image (e.g. IMAGE_MAP=ubuntu-latest=ci-image or DEFAULT_IMAGE=ci-image)"
 }
 
+// orphanSweeper is the pool's startup sweep (#119): LEASE_TOKEN's
+// client, plus one per distinct LEASE_TOKEN_MAP token (a mapped token
+// equal to LEASE_TOKEN is swept once). A named helper so the wiring —
+// every identity swept, not just LEASE_TOKEN — can be pinned by a test.
+func orphanSweeper(leaseURL, leaseToken string, admitWaitSecs int, tokenMap *runner.LeaseTokenMap) runner.LeaseSweeper {
+	leaseClient := runner.NewHTTPLeaseClient(leaseURL, leaseToken)
+	leaseClient.SetAdmitWait(admitWaitSecs)
+	ids := tokenMap.Identities()
+	if len(ids) == 0 {
+		return leaseClient
+	}
+	targets := runner.MultiSweeper{{Name: "LEASE_TOKEN", Sweeper: leaseClient}}
+	for _, id := range ids {
+		if id.Token == leaseToken {
+			continue // swept as LEASE_TOKEN already
+		}
+		c := runner.NewHTTPLeaseClient(leaseURL, id.Token)
+		c.SetAdmitWait(admitWaitSecs)
+		targets = append(targets, runner.SweepTarget{Name: "LEASE_TOKEN_MAP " + strings.Join(id.Keys, ","), Sweeper: c})
+	}
+	return targets
+}
+
 // Main runs the runner until SIGTERM/SIGINT (systemd's stop signal is
 // SIGTERM). Shutdown is graceful (#119): the pool stops fetching new
 // jobs, running jobs get StopGrace (RUNNER_STOP_GRACE) to finish, then
@@ -156,6 +193,18 @@ func Main(args []string) int {
 	}
 	if leaseToken == "" {
 		log.Fatal("LEASE_TOKEN is required (or LEASE_TOKEN_FILE)")
+	}
+	// Per-project lease identities: values are token file paths, read by
+	// LEASE_TOKEN_FILE's rules. Only the keys are ever logged.
+	tokenMap, warns, err := runner.ParseLeaseTokenMap(os.Getenv("LEASE_TOKEN_MAP"), os.ReadFile)
+	if err != nil {
+		log.Fatal(err)
+	}
+	for _, w := range warns {
+		log.Printf("warning: %s", w)
+	}
+	if keys := tokenMap.Keys(); len(keys) > 0 {
+		log.Printf("lease tokens: %d mapped (%s)", len(keys), strings.Join(keys, ", "))
 	}
 	// The Forgejo admin token is optional (the adaptive pool's admin
 	// surface); it takes the file form too (#137 C2).
@@ -206,11 +255,13 @@ func Main(args []string) int {
 	// execution, from sandbox creation, and is capped by this.
 	jobTimeout := jobTimeoutFromEnv()
 
-	// The pool's own lease client: at start it sweeps this token's
-	// orphaned job leases (#119). Per-worker copies (newWorker below)
-	// are what Create, Exec and Delete go through.
-	leaseClient := runner.NewHTTPLeaseClient(leaseURL, leaseToken)
-	leaseClient.SetAdmitWait(admitWaitSecs)
+	// The pool's own lease clients: at start they sweep the orphaned job
+	// leases (#119) of LEASE_TOKEN and of every LEASE_TOKEN_MAP token, as
+	// a previous process may have left some under any of them (the sweep
+	// deletes only runner job leases, so a project's other leases under
+	// its token stay). Per-worker copies (newWorker below) are what
+	// Create, Exec and Delete go through.
+	sweeper := orphanSweeper(leaseURL, leaseToken, admitWaitSecs, tokenMap)
 
 	// Parse image map.
 	imageMap := map[string]string{}
@@ -237,7 +288,7 @@ func Main(args []string) int {
 		StateFile:      envOr("RUNNER_STATE_FILE", "/var/lib/spoond/runner-state.json"),
 		AdminToken:     adminToken,
 		ForgejoURL:     forgejoURL,
-		Leases:         leaseClient,
+		Leases:         sweeper,
 		StopGrace:      envDurOr("RUNNER_STOP_GRACE", runner.DefaultStopGrace),
 	}
 
@@ -266,11 +317,10 @@ func Main(args []string) int {
 		}
 	}
 
-	// newWorker builds a fresh ForgejoAdapter + Executor per worker so
-	// each registered runner has its own auth headers and job loop.
-	newWorker := func() runner.RunnerWorker {
-		proto := runner.NewForgejoAdapterWithInternal(forgejoURL, envOr("REPO_BASE_URL", ""), nil)
-		lease := runner.NewHTTPLeaseClient(leaseURL, leaseToken)
+	// newLease builds one worker lease client for a token; every lease
+	// identity's client gets the same settings.
+	newLease := func(token string) *runner.HTTPLeaseClient {
+		lease := runner.NewHTTPLeaseClient(leaseURL, token)
 		lease.SetAdmitWait(admitWaitSecs)
 		// Keep the lease client's HTTP timeout above the per-step exec
 		// timeout, or long CI steps die at the client's own cap.
@@ -284,8 +334,15 @@ func Main(args []string) int {
 				lease.NetAllow[i] = strings.TrimSpace(a)
 			}
 		}
+		return lease
+	}
+	// newWorker builds a fresh ForgejoAdapter + Executor per worker so
+	// each registered runner has its own auth headers and job loop (and
+	// its own lease client per identity).
+	newWorker := func() runner.RunnerWorker {
+		proto := runner.NewForgejoAdapterWithInternal(forgejoURL, envOr("REPO_BASE_URL", ""), nil)
 		exec := &runner.Executor{
-			Sandbox:      lease,
+			Sandbox:      newLease(leaseToken),
 			Metrics:      runnerMetrics,
 			Sink:         proto,
 			Labels:       imageMap,
@@ -298,6 +355,9 @@ func Main(args []string) int {
 			// #119: the job lease's comment names the job and links to
 			// it ("forgejo job <id> <url>"); the orphan sweep keys on it.
 			ForgejoURL: forgejoURL,
+			// LEASE_TOKEN_MAP: a mapped repository's job leases through
+			// this worker's own client for its token (nil when unset).
+			SandboxFor: tokenMap.Router(func(token string) runner.SandboxProvider { return newLease(token) }),
 		}
 		return &runner.WorkerImpl{Adapter: proto, Exec: exec}
 	}

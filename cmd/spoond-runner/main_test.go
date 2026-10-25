@@ -247,7 +247,8 @@ func waitFor(t *testing.T, what string, pred func() bool) {
 func TestMainSIGTERMGraceThenCancel(t *testing.T) {
 	for _, k := range []string{"FORGEJO_URL", "RUNNER_TOKEN", "RUNNER_NAME", "LEASE_URL", "LEASE_TOKEN",
 		"RUNNER_FLOOR", "RUNNER_MAX", "RUNNER_STATE_FILE", "JOB_RECORD_DIR", "RUNNER_STOP_GRACE",
-		"METRICS_LISTEN", "IMAGE_MAP", "DEFAULT_IMAGE", "RUNNER_ADMIT_WAIT_SECS", "RUNNER_JOB_TIMEOUT"} {
+		"METRICS_LISTEN", "IMAGE_MAP", "DEFAULT_IMAGE", "RUNNER_ADMIT_WAIT_SECS", "RUNNER_JOB_TIMEOUT",
+		"LEASE_TOKEN_MAP"} {
 		os.Unsetenv(k)
 	}
 	forgejo := &fakeForgejo{}
@@ -490,5 +491,62 @@ func TestSecretsFromFileOrEnv(t *testing.T) {
 	// show and doctor must not flag them).
 	if !settings.IsKnown("RUNNER_TOKEN_FILE") || !settings.IsKnown("LEASE_TOKEN_FILE") {
 		t.Fatal("the runner's _FILE names are not known")
+	}
+}
+
+// TestOrphanSweeperCoversEveryToken: with LEASE_TOKEN_MAP set, Main's
+// start sweep lists the leases of LEASE_TOKEN and of every distinct
+// mapped token, once each (a mapped token equal to LEASE_TOKEN is not
+// swept twice), since a previous process may have left orphans under
+// any; unset, it is LEASE_TOKEN's client alone, as before.
+func TestOrphanSweeperCoversEveryToken(t *testing.T) {
+	var mu sync.Mutex
+	listed := map[string]int{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/leases" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		mu.Lock()
+		listed[strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")]++
+		mu.Unlock()
+		w.Write([]byte(`{"sandboxes":[]}`))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	write := func(name, content string) string {
+		t.Helper()
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	v := "acme/web=" + write("web", "tok-web\n") + ",acme=" + write("acme", "tok-acme") +
+		",example=" + write("example", "tok-web") + ",same=" + write("same", "lease-tok")
+	tokenMap, _, err := runner.ParseLeaseTokenMap(v, os.ReadFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := orphanSweeper(srv.URL, "lease-tok", 0, tokenMap).SweepOrphans(context.Background(), nil); err != nil {
+		t.Fatalf("SweepOrphans: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	want := map[string]int{"lease-tok": 1, "tok-web": 1, "tok-acme": 1}
+	if len(listed) != len(want) {
+		t.Fatalf("listed under %v, want %v", listed, want)
+	}
+	for k, n := range want {
+		if listed[k] != n {
+			t.Fatalf("listed under %v, want %v", listed, want)
+		}
+	}
+
+	// Unset: the sweep is LEASE_TOKEN's client, as before the map.
+	empty, _, _ := runner.ParseLeaseTokenMap("", os.ReadFile)
+	if _, ok := orphanSweeper(srv.URL, "lease-tok", 0, empty).(*runner.HTTPLeaseClient); !ok {
+		t.Fatal("with no map the sweeper is not the plain LEASE_TOKEN client")
 	}
 }

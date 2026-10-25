@@ -10,6 +10,18 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Added
+
+- **Per-project lease identity for CI** (`LEASE_TOKEN_MAP`, runner).
+  Maps a repository (`owner/repo`) or a whole owner to a token file, and
+  a job from it leases with that token, so fair shares count each
+  mapped project's CI against its own slice. Before, every job shared
+  `LEASE_TOKEN`, and take-back paused one project's small check jobs
+  because another project's big builds shared the identity. The
+  repository's entry beats its owner's; anything unmapped uses
+  `LEASE_TOKEN`, and unset changes nothing. The startup orphan sweep
+  runs under every token, still touching only runner job leases.
+
 ## [4.1.0] - 2026-10-25
 
 spoond installs as a bare service: it ships no sandbox images and names

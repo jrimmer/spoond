@@ -133,6 +133,7 @@ var Known = []string{
 	"LEASE_NETPOL",
 	"LEASE_NET_ALLOW",
 	"LEASE_TOKEN",
+	"LEASE_TOKEN_MAP",
 	"LEASE_TTL",
 	"LEASE_URL",
 	"LLM_DEFAULT_MODEL",
@@ -478,6 +479,7 @@ var Specs = []Spec{
 	{"LEASE_NETPOL", TypeString, Runner, false}, // none|lan|internet|restricted
 	{"LEASE_NET_ALLOW", TypeList, Runner, false},
 	{"LEASE_TOKEN", TypeString, Runner, true},
+	{"LEASE_TOKEN_MAP", TypeList, Runner, false}, // repo-or-owner=token-file-path pairs (the files hold the tokens)
 	{"LEASE_TTL", TypeInt, Runner, false},
 	{"LEASE_URL", TypeURL, Runner, false},
 	{"LLM_DEFAULT_MODEL", TypeString, Backend, false},
@@ -753,20 +755,35 @@ func Get(name string, get func(string) string, readFile func(string) ([]byte, er
 	case envV != "":
 		return envV, nil
 	case fileV != "":
-		b, err := readFile(fileV)
+		v, err := ReadValueFile(fileV, readFile)
 		if err != nil {
-			return "", fmt.Errorf("%s: read %s: %v", name, fileV, err)
-		}
-		v := strings.TrimRight(string(b), "\r\n")
-		if strings.TrimSpace(v) == "" {
-			// An empty secret would mean "unset" to its reader, and for
-			// some (BOOTSTRAP_TOKEN) unset means open: a truncated or
-			// never-written file must fail closed, not quietly unset.
-			return "", fmt.Errorf("%s: %s is empty", name, fileV)
+			return "", fmt.Errorf("%s: %w", name, err)
 		}
 		return v, nil
 	}
 	return "", nil
+}
+
+// ReadValueFile reads a secret's value file by Get's NAME_FILE rules:
+// trailing newlines and carriage returns trimmed, an unreadable file an
+// error, a file with nothing but whitespace an error. The errors name
+// the path, never the content. Readers whose setting names token files
+// rather than holding a token (the runner's LEASE_TOKEN_MAP) read each
+// file through it, so every token file follows the same rules;
+// FileModeWarning is the mode check to pair with it.
+func ReadValueFile(path string, readFile func(string) ([]byte, error)) (string, error) {
+	b, err := readFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read %s: %v", path, err)
+	}
+	v := strings.TrimRight(string(b), "\r\n")
+	if strings.TrimSpace(v) == "" {
+		// An empty secret would mean "unset" to its reader, and for
+		// some (BOOTSTRAP_TOKEN) unset means open: a truncated or
+		// never-written file must fail closed, not quietly unset.
+		return "", fmt.Errorf("%s is empty", path)
+	}
+	return v, nil
 }
 
 // Resolve is Get against the process environment and filesystem, plus

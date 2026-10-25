@@ -84,6 +84,13 @@ type Executor struct {
 	// "forgejo job <id> <job URL>" — see the LeaseLabeler port in
 	// ports.go. Empty disables the label.
 	ForgejoURL string
+	// SandboxFor, when set, picks the provider a job's lease goes through
+	// (LEASE_TOKEN_MAP: the repository's own lease identity, built by
+	// LeaseTokenMap.Router); nil, or a nil result, uses Sandbox. Every
+	// lease call of the job — the label, Create, each Exec and the
+	// release — goes through the one it picks, so a lease is never
+	// touched with another identity's token.
+	SandboxFor func(job *Job) SandboxProvider
 }
 
 // checkoutRe matches a uses: actions/checkout step (any version).
@@ -92,6 +99,17 @@ var checkoutRe = regexp.MustCompile(`(?i)^actions/checkout(@.*)?$`)
 // Run executes a job's workflow in a sandbox, streaming logs and
 // reporting the final state. It always releases the sandbox.
 func (e *Executor) Run(ctx context.Context, job *Job) error {
+	// A job routed to its own lease identity runs on a copy of the
+	// executor whose Sandbox is that identity's provider: everything below
+	// reads e.Sandbox, so all of the job's lease calls share it, and the
+	// executor is left as it was for the worker's next job.
+	if e.SandboxFor != nil {
+		if p := e.SandboxFor(job); p != nil {
+			routed := *e
+			routed.Sandbox, routed.SandboxFor = p, nil
+			return routed.Run(ctx, job)
+		}
+	}
 	jobStart := time.Now()
 	if e.Metrics != nil {
 		e.Metrics.JobsActive.Inc()

@@ -46,7 +46,8 @@ IMAGE_MAP=web=snapshot:scout/node24,yaml=snapshot:yaml@3,shared=snapshot:alice:c
 ```
 
 - `snapshot:NAME` starts from the newest version of a snapshot the
-  runner's own identity (`LEASE_TOKEN`) saved; `snapshot:NAME@V` from
+  runner's own identity (`LEASE_TOKEN`, or the job's
+  [mapped one](#per-project-lease-identity)) saved; `snapshot:NAME@V` from
   version V.
 - `snapshot:OWNER:NAME` starts from another user's snapshot, through a
   grant that user gave the runner's identity. Without one the create
@@ -207,6 +208,48 @@ Concurrency is bounded by host configuration, not by workflow content:
 - The admission check refuses a grant with `503 capacity` rather than
   overcommitting, so an over-subscribed host makes jobs queue rather than
   die; the runner retries.
+
+## Per-project lease identity
+
+By default every job leases with one token, `LEASE_TOKEN`, so all of
+the host's CI is one owner in spoond's fair shares. That owner is
+nearly always the one furthest over its slice, and under memory
+pressure [take-back](api.md#memory-take-back) pauses its leases first:
+one project's small check jobs get paused because another project's big
+builds share the identity.
+
+`LEASE_TOKEN_MAP` gives a repository, or every repository of an owner,
+its own lease identity, so fair shares count that project's CI against
+its own slice:
+
+```
+LEASE_TOKEN_MAP=example.org/site=/etc/spoond/lease-tokens/site,acme=/etc/spoond/lease-tokens/acme
+```
+
+- A key is `owner/repo` (that repository) or `owner` (every repository
+  of it), matched case-insensitively against the job's
+  `github.repository`, the repository `actions/checkout` clones. The
+  repository's own entry beats its owner's.
+- A value is the absolute path of a file holding the token, never the
+  token itself. Each file follows `LEASE_TOKEN_FILE`'s rules: trailing
+  newlines trimmed, an empty or unreadable file fails startup (naming
+  the entry), and a mode looser than 0600 is a startup warning.
+- A job whose repository matches nothing leases with `LEASE_TOKEN`.
+  Unset, every job does, as before.
+- Each identity needs a user with a bearer token: create it with
+  [`POST /api/users`](api.md#post-apiusers--create-a-user) (`kind`
+  `agent`, a `token` in the body) or mint one for an existing user with
+  [`POST /api/users/{id}/tokens`](api.md#post-apiusersidtokens--mint-a-named-api-token-138-a2).
+  An `IMAGE_MAP` value naming a snapshot (`snapshot:NAME`) resolves
+  against the identity the job leases with, so a mapped project's jobs
+  need the snapshot under their own identity, or a grant to it
+  (`snapshot:OWNER:NAME`).
+
+The runner logs the mapped keys at startup (`lease tokens: 2 mapped
+(example.org/site, acme)`; never a path's contents). Its startup sweep of
+orphaned job leases runs under every token, and under each it still
+deletes only runner job leases (comment `forgejo job ...`), so the
+project's own leases under the same token are left alone.
 
 ## When a build fails, look for the job record
 

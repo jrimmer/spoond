@@ -497,6 +497,7 @@ func TestSpecSecretsMatchHideRule(t *testing.T) {
 		"DASH_TLS_CERT":           true,
 		"DASH_TLS_KEY":            true,
 		"CONFORMANCE_SSH_KEY":     true,
+		"LEASE_TOKEN_MAP":         true, // repo-or-owner=token-file-path pairs
 	}
 	for _, s := range Specs {
 		upper := strings.ToUpper(s.Name)
