@@ -22,6 +22,16 @@ summarised from README "Status".
   `LEASE_TOKEN`, and unset changes nothing. The startup orphan sweep
   runs under every token, still touching only runner job leases.
 
+### Fixed
+
+- **Take-back no longer pauses a lease mid-exec.** A lease with an exec
+  or exec stream open is now passed over by memory take-back and the
+  low-memory floor, as one with a running background job already was.
+  Before, the pause cut the command, the exec answered `409 lease_busy`
+  and a CI step failed with no retry possible. Each take-back is also
+  logged as it starts (#166), so a pause that ends early (the lease
+  released mid-pause) still says which lease it was and for whom.
+
 ## [4.1.0] - 2026-10-25
 
 spoond installs as a bare service: it ships no sandbox images and names

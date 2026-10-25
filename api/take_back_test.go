@@ -1,8 +1,11 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"testing"
@@ -232,6 +235,21 @@ func TestTakeBackOwnersViews(t *testing.T) {
 	if bv.Leases[0].LastActive.IsZero() {
 		t.Fatal("LastActive not carried")
 	}
+
+	// An exec or stream in flight marks b1 busy like a running job: the
+	// pause would cut the command.
+	svc.incOpenWork(b1.ID)
+	for _, v := range svc.takeBackOwners(ctx) {
+		if v.Owner == bob.ID && (len(v.Leases) != 1 || !v.Leases[0].Busy) {
+			t.Fatalf("b1 view with an open exec = %+v, want busy", v.Leases)
+		}
+	}
+	svc.decOpenWork(b1.ID)
+	for _, v := range svc.takeBackOwners(ctx) {
+		if v.Owner == bob.ID && v.Leases[0].Busy {
+			t.Fatal("b1 still busy after its exec ended")
+		}
+	}
 }
 
 // TestTakeBackOwnersUnknownOwnerLeaseKept: a lease whose owner the fair
@@ -319,8 +337,16 @@ func TestTakeBackPausePausesVictim(t *testing.T) {
 	events := svc.Subscribe(EventFilter{LeaseID: victim.ID})
 	defer events.Close()
 
+	var logBuf bytes.Buffer
+	svc.log = log.New(&logBuf, "", 0)
 	if err := svc.takeBackPause(ctx, victim, "req-owner", 2.5); err != nil {
 		t.Fatalf("takeBackPause: %v", err)
+	}
+	// The start is logged before the pause (#166), so a pause that ends
+	// early still leaves a line naming the lease, owner and requester.
+	start := fmt.Sprintf("take back: pausing lease %s (owner victim-owner, ratio 2.50) for req-owner", victim.ID)
+	if out := logBuf.String(); !strings.Contains(out, start) || strings.Index(out, start) > strings.Index(out, "paused for req-owner") {
+		t.Fatalf("log = %q, want %q before the paused line", out, start)
 	}
 	if !victim.Suspended || victim.State != "suspended" {
 		t.Fatal("victim was not paused")
@@ -418,7 +444,8 @@ func TestTakeBackPausePausesVictim(t *testing.T) {
 
 // TestTakeBackPauseRefusesIllegalVictims: the guard re-checks every
 // eligibility rule. A pinned, suspended, released or lost lease, one
-// with a running background job, the requester's own lease and a lease
+// with a running background job or an open exec or stream (a pause
+// would cut it, #166), the requester's own lease and a lease
 // with an in-flight operation are all refused with errLeaseBusy and
 // nothing is paused.
 func TestTakeBackPauseRefusesIllegalVictims(t *testing.T) {
@@ -442,6 +469,8 @@ func TestTakeBackPauseRefusesIllegalVictims(t *testing.T) {
 	}
 	jobbed := mk("o3")
 	svc.incRunningJob(jobbed.ID)
+	execing := mk("o6")
+	svc.incOpenWork(execing.ID)
 
 	cases := []struct {
 		name string
@@ -453,6 +482,7 @@ func TestTakeBackPauseRefusesIllegalVictims(t *testing.T) {
 		{"pinned", pinned, "req", false, false},
 		{"suspended", suspended, "req", false, false},
 		{"running job", jobbed, "req", false, false},
+		{"open exec", execing, "req", false, false},
 		{"requester's own", mk("req"), "req", false, false},
 		{"already busy", mk("o4"), "req", true, false},
 		{"lost", mk("o5"), "req", false, true},
