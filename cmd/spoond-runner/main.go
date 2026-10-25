@@ -167,7 +167,18 @@ func Main(args []string) int {
 		log.Printf("warning: %s", warn)
 	}
 	name := envOr("RUNNER_NAME", "spoond-runner")
-	labels := strings.Split(envOr("RUNNER_LABELS", "ubuntu-latest"), ",")
+	// Trimmed, empty entries dropped: Register and Declare send the
+	// list as is, so "a, b" or a trailing comma would reach Forgejo as
+	// " b" or "".
+	var labels []string
+	for _, l := range strings.Split(envOr("RUNNER_LABELS", "ubuntu-latest"), ",") {
+		if l = strings.TrimSpace(l); l != "" {
+			labels = append(labels, l)
+		}
+	}
+	if len(labels) == 0 {
+		labels = []string{"ubuntu-latest"}
+	}
 	leaseURL := envOr("LEASE_URL", "http://127.0.0.1:8890")
 	defaultImage := os.Getenv("DEFAULT_IMAGE")
 	ttl := 600

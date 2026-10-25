@@ -31,6 +31,10 @@ type RunnerState map[string]RunnerStateEntry
 type RunnerWorker interface {
 	Register(ctx context.Context, name, token string, labels []string) (int64, error)
 	Restore(uuid, token string, id int64)
+	// Declare re-sends the runner's labels (and version) to Forgejo. A
+	// restored worker calls it, since Forgejo keeps the labels a runner
+	// first registered with (#161).
+	Declare(ctx context.Context, labels []string) error
 	RunnerID() int64
 	Deregister(adminToken string) error
 	Credentials() RunnerStateEntry
@@ -49,6 +53,9 @@ func (w *WorkerImpl) Register(ctx context.Context, name, token string, labels []
 }
 func (w *WorkerImpl) Restore(uuid, token string, id int64) {
 	w.Adapter.Restore(uuid, token, id)
+}
+func (w *WorkerImpl) Declare(ctx context.Context, labels []string) error {
+	return w.Adapter.Declare(ctx, labels)
 }
 func (w *WorkerImpl) RunnerID() int64 {
 	return w.Adapter.RunnerID()
@@ -356,6 +363,16 @@ func (w *worker) run(ctx context.Context, stop <-chan struct{}, jobs *jobContext
 		w.impl.Restore(savedState.UUID, savedState.Token, savedState.ID)
 		restored = true
 		log.Printf("worker %d: restored %s (id %d)", w.id, w.name, savedState.ID)
+		// Forgejo keeps the labels a runner registered with, so a
+		// RUNNER_LABELS change would never reach a restored runner:
+		// declare the current ones (#161). A failure is only logged:
+		// stale credentials are caught by the first Fetch below, which
+		// registers fresh, with the current labels.
+		if err := w.impl.Declare(ctx, w.labels); err != nil {
+			log.Printf("worker %d: declare labels: %v", w.id, err)
+		} else {
+			log.Printf("worker %d: declared labels %s", w.id, strings.Join(w.labels, ","))
+		}
 	} else {
 		if err := w.registerFresh(ctx, stop); err != nil {
 			return // registerFresh already retried and logged

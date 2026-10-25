@@ -127,33 +127,23 @@ succeeds.
    IMAGE_MAP=<existing pairs>,<label>=<name>
    ```
 
-3. Make the runners register again, as in [Adding a label](#adding-a-label).
+3. Restart the runner, as in [Adding a label](#adding-a-label).
 
 ### Adding a label
 
-A runner sends its labels to Forgejo only when it registers. Each worker
-saves its Forgejo credentials in `RUNNER_STATE_FILE` (default
-`/var/lib/spoond/runner-state.json`), and on restart a worker with saved
-credentials restores them and goes straight to fetching jobs
-(`runner/pool.go`, `worker.run`); nothing re-declares labels. So a plain
-restart after changing `RUNNER_LABELS` leaves Forgejo with the old labels,
-and jobs for the new label sit waiting. Workers spawned fresh by scale-up
-do register with the new labels, which makes this intermittent.
+Restart the runner after changing `RUNNER_LABELS` (`systemctl restart
+spoond-runner`; it drains running jobs first). Each worker saves its
+Forgejo credentials in `RUNNER_STATE_FILE` (default
+`/var/lib/spoond/runner-state.json`) and restores them on start, and a
+restored worker declares its current labels to Forgejo before it fetches
+jobs, so the new label arrives with the restart. The runner log says
+`declared labels ...` for each worker; Site Administration > Actions >
+Runners shows each runner's labels.
 
-To re-register every worker, while the runner is idle:
-
-```bash
-systemctl stop spoond-runner
-mv /var/lib/spoond/runner-state.json /var/lib/spoond/runner-state.json.bak
-systemctl start spoond-runner
-```
-
-The old runner entries stay in Forgejo, offline. With
-`FORGEJO_ADMIN_TOKEN` set, a later start deletes offline runners named
-with the `RUNNER_NAME` prefix; without it, delete them under Site
-Administration > Actions > Runners. That page also shows each runner's
-labels, which is where to check that the new one arrived. Delete the
-`.bak` file once the runners show the new label.
+Before #161 was fixed (4.0.0 and earlier) nothing re-declared labels: a
+restart left Forgejo with the old ones, and the fix was to stop the
+runner, move `runner-state.json` aside so every worker registered fresh,
+start it, and delete the old offline runner entries.
 
 ## Writing inside the sandbox
 

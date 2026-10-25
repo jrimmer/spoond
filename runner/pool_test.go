@@ -2,6 +2,8 @@ package runner
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -11,6 +13,8 @@ import (
 type fakeWorker struct {
 	mu          sync.Mutex
 	regs        int
+	declared    [][]string
+	declareErr  error
 	fetches     int
 	busy        bool // when true, Fetch blocks (simulates a running job)
 	stopCh      chan struct{}
@@ -33,9 +37,15 @@ func (f *fakeWorker) Register(ctx context.Context, name, token string, labels []
 }
 
 func (f *fakeWorker) Restore(uuid, token string, id int64) {}
-func (f *fakeWorker) RunnerID() int64                      { return 0 }
-func (f *fakeWorker) Deregister(adminToken string) error   { return nil }
-func (f *fakeWorker) Credentials() RunnerStateEntry        { return RunnerStateEntry{} }
+func (f *fakeWorker) Declare(ctx context.Context, labels []string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.declared = append(f.declared, append([]string(nil), labels...))
+	return f.declareErr
+}
+func (f *fakeWorker) RunnerID() int64                    { return 0 }
+func (f *fakeWorker) Deregister(adminToken string) error { return nil }
+func (f *fakeWorker) Credentials() RunnerStateEntry      { return RunnerStateEntry{} }
 
 func (f *fakeWorker) Fetch(ctx context.Context, version int64) (*Job, int64, error) {
 	f.mu.Lock()
@@ -199,4 +209,78 @@ func TestWithDefaultsRaisesMaxToFloor(t *testing.T) {
 	if got := (PoolConfig{Max: 1}).withDefaults().Max; got != 3 {
 		t.Fatalf("Max = %d, want 3 (raised to default Floor)", got)
 	}
+}
+
+// TestRestoredWorkerDeclaresLabels (#161): a worker restored from saved
+// credentials re-sends its current labels to Forgejo instead of keeping
+// the ones it first registered with, and does not register again.
+func TestRestoredWorkerDeclaresLabels(t *testing.T) {
+	f := newFakeWorker()
+	w := &worker{id: 0, impl: f, name: "r-0", token: "tok", labels: []string{"ubuntu-latest", "rust-gpui-accept"}}
+	ctx, cancel := context.WithCancel(context.Background())
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		w.run(ctx, stop, nil, &RunnerStateEntry{UUID: "u", Token: "t", ID: 7}, func(RunnerStateEntry) {})
+		close(done)
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		f.mu.Lock()
+		n, regs := len(f.declared), f.regs
+		var got []string
+		if n > 0 {
+			got = f.declared[0]
+		}
+		f.mu.Unlock()
+		if n > 0 {
+			if strings.Join(got, ",") != "ubuntu-latest,rust-gpui-accept" || regs != 0 {
+				t.Fatalf("declared %v, registers %d; want the current labels and no register", got, regs)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("restored worker never declared its labels")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	close(stop)
+	cancel()
+	<-done
+}
+
+// TestRestoredWorkerDeclareFailureKeepsCredentials (#161): a failed
+// declare is only logged; the worker keeps its restored credentials and
+// fetches with them rather than registering again. (An idle worker waits
+// 2 s between fetches, so one fetch is what fits the deadline.)
+func TestRestoredWorkerDeclareFailureKeepsCredentials(t *testing.T) {
+	f := newFakeWorker()
+	f.declareErr = errors.New("declare: unimplemented")
+	w := &worker{id: 0, impl: f, name: "r-0", token: "tok", labels: []string{"ubuntu-latest"}}
+	ctx, cancel := context.WithCancel(context.Background())
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		w.run(ctx, stop, nil, &RunnerStateEntry{UUID: "u", Token: "t", ID: 7}, func(RunnerStateEntry) {})
+		close(done)
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		f.mu.Lock()
+		fetches, regs := f.fetches, f.regs
+		f.mu.Unlock()
+		if regs != 0 {
+			t.Fatalf("a failed declare led to %d register(s)", regs)
+		}
+		if fetches >= 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("worker never fetched after a failed declare")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	close(stop)
+	cancel()
+	<-done
 }

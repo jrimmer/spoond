@@ -79,6 +79,15 @@ Upgrading from 4.0:
 - **The Docker install builds its image** (`spoond:local`, never
   pulled; `SPOOND_VERSION` picks the runtime tarball).
 
+### Fixed
+
+- **A runner restart picks up new labels.** A worker restored from
+  `RUNNER_STATE_FILE` declares its current `RUNNER_LABELS` to Forgejo
+  before fetching jobs; before, Forgejo kept the labels it first
+  registered with until the state file was removed (#161).
+- **`RUNNER_LABELS` entries are trimmed** and empty ones dropped, so
+  `a, b` or a trailing comma no longer reaches Forgejo as ` b` or `""`.
+
 ## [4.0.0] - 2026-10-22
 
 spoond 4.0 installs on a host that is not ours: `spoond install` sets up a

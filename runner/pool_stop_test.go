@@ -48,10 +48,11 @@ func (f *drainingWorker) Register(ctx context.Context, name, token string, label
 	f.regs++
 	return int64(f.regs), nil
 }
-func (f *drainingWorker) Restore(uuid, token string, id int64) {}
-func (f *drainingWorker) RunnerID() int64                      { return 0 }
-func (f *drainingWorker) Deregister(adminToken string) error   { return nil }
-func (f *drainingWorker) Credentials() RunnerStateEntry        { return RunnerStateEntry{} }
+func (f *drainingWorker) Restore(uuid, token string, id int64)               {}
+func (f *drainingWorker) Declare(ctx context.Context, labels []string) error { return nil }
+func (f *drainingWorker) RunnerID() int64                                    { return 0 }
+func (f *drainingWorker) Deregister(adminToken string) error                 { return nil }
+func (f *drainingWorker) Credentials() RunnerStateEntry                      { return RunnerStateEntry{} }
 
 func (f *drainingWorker) Fetch(ctx context.Context, version int64) (*Job, int64, error) {
 	f.mu.Lock()
@@ -602,10 +603,11 @@ func (w *executorWorker) SetCreateWaitNotifier(fn func(bool)) { w.exec.OnCreateW
 func (w *executorWorker) Register(ctx context.Context, name, token string, labels []string) (int64, error) {
 	return 1, nil
 }
-func (w *executorWorker) Restore(uuid, token string, id int64) {}
-func (w *executorWorker) RunnerID() int64                      { return 1 }
-func (w *executorWorker) Deregister(adminToken string) error   { return nil }
-func (w *executorWorker) Credentials() RunnerStateEntry        { return RunnerStateEntry{} }
+func (w *executorWorker) Restore(uuid, token string, id int64)               {}
+func (w *executorWorker) Declare(ctx context.Context, labels []string) error { return nil }
+func (w *executorWorker) RunnerID() int64                                    { return 1 }
+func (w *executorWorker) Deregister(adminToken string) error                 { return nil }
+func (w *executorWorker) Credentials() RunnerStateEntry                      { return RunnerStateEntry{} }
 func (w *executorWorker) Fetch(ctx context.Context, version int64) (*Job, int64, error) {
 	var job *Job
 	w.once.Do(func() {

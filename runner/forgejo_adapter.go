@@ -90,7 +90,7 @@ func (a *ForgejoAdapter) Register(ctx context.Context, name, token string, label
 		Token:     token,
 		Labels:    labels,
 		Ephemeral: false,
-		Version:   "spoond-runner-v0.1",
+		Version:   runnerVersion,
 	}))
 	if err != nil {
 		return 0, fmt.Errorf("register: %w", err)
@@ -111,6 +111,23 @@ func (a *ForgejoAdapter) Restore(uuid, token string, id int64) {
 	a.runnerUUID = uuid
 	a.runnerToken = token
 	a.runnerID = id
+}
+
+// runnerVersion is the version Register and Declare report to Forgejo.
+const runnerVersion = "spoond-runner-v0.1"
+
+// Declare sends the runner's current labels and version to Forgejo with
+// the stored credentials (#161): a runner restored from its state file
+// otherwise keeps the labels it was first registered with.
+func (a *ForgejoAdapter) Declare(ctx context.Context, labels []string) error {
+	ctx = withAuth(ctx, a.authHeaders())
+	if _, err := a.svc.Declare(ctx, connect.NewRequest(&runnerv1.DeclareRequest{
+		Version: runnerVersion,
+		Labels:  labels,
+	})); err != nil {
+		return fmt.Errorf("declare: %w", err)
+	}
+	return nil
 }
 
 // RunnerID returns the Forgejo runner ID assigned at registration.
