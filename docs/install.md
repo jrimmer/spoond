@@ -47,12 +47,12 @@ host against this list and changes nothing.
 Download the release binary and run the installer as root:
 
 ```bash
-curl -fsSLO https://github.com/jrimmer/spoond/releases/download/v4.0.0/spoond_4.0.0_linux_amd64.tar.gz
-tar xzf spoond_4.0.0_linux_amd64.tar.gz
+curl -fsSLO https://github.com/jrimmer/spoond/releases/download/v4.1.0/spoond_4.1.0_linux_amd64.tar.gz
+tar xzf spoond_4.1.0_linux_amd64.tar.gz
 sudo ./spoond install --host-name sandbox.example.com --admin-key ~/.ssh/id_ed25519.pub
 ```
 
-(`go install github.com/jrimmer/spoond/v4/cmd/spoond@v4.0.0` builds the
+(`go install github.com/jrimmer/spoond/v4/cmd/spoond@v4.1.0` builds the
 same binary.) It runs six phases in order and stops at the first failure
 with what to do next. `spoond install <phase>` runs one, and `--dry-run`
 prints the plan and changes nothing.

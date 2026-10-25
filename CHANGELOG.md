@@ -10,6 +10,8 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+## [4.1.0] - 2026-10-25
+
 spoond installs as a bare service: it ships no sandbox images and names
 none as a default, so which images a host runs is the operator's choice.
 Upgrading from 4.0:

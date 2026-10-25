@@ -361,10 +361,16 @@ containers. [docs/install.md](docs/install.md) has both.
 
 ## Status
 
-**v4.0.0** (2026-10-22) is the current release. spoond 4.0 installs on
-any Debian 13 host with KVM in one command (`spoond install`), or with
+**v4.1.0** (2026-10-25) is the current release. spoond installs on any
+Debian 13 host with KVM in one command (`spoond install`), or with
 Docker from `deploy/docker/`, using the release's artifacts; see
-[docs/install.md](docs/install.md). It shares a host fairly: every active
+[docs/install.md](docs/install.md). Since 4.1 it installs bare: it ships
+no sandbox images and assumes none, so the operator builds the images
+the host runs ([images/README.md](images/README.md)). 4.1 also keeps a
+lease's job records after the lease ends, lets a lease's own token stand
+in for its owner's LLM key, adds per-user egress ceilings, and makes a
+runner restart pick up new labels; hosts moving from 4.0 read the 4.1.0
+section of [CHANGELOG.md](CHANGELOG.md). It shares a host fairly: every active
 owner gets an equal, floating slice of memory and snapshot disk, and
 spoond pauses a lease on its own before the host runs out of memory.
 4.0 removes what 3.x deprecated: the `/api/sandboxes` path, keyless LLM
