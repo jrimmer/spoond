@@ -18,7 +18,7 @@ type takeBackLease struct {
 	Name       string // the lease's tag, echoed in the box_full own_leases body
 	MemoryMiB  int
 	Pinned     bool      // a pinned lease is never taken
-	Busy       bool      // a running job, an open exec or stream, or an in-flight operation; taken last
+	Busy       bool      // a running job, a synchronous exec or an in-flight operation; taken last
 	Drained    bool      // an undrain still owns its resume; taken never
 	LastActive time.Time // older means less recently used
 }
@@ -62,7 +62,7 @@ func tbRatio(used, slice int) float64 {
 // so unlike memVictims there is no after-pick ratio floor: only the
 // owners' own over-slice condition decides. ok is false when no owner
 // is over their slice or every lease of every over-slice owner is
-// pinned or Drained — a busy lease is still takeable, only ranked last.
+// pinned, Drained or busy — busy leases are left out (see below).
 func pressureVictim(owners []takeBackOwner) (takeBackVictim, bool) {
 	// Rank the over-slice owners by ratio, highest first (stable, so a
 	// tie keeps the view's owner order); then walk down the ranking and
@@ -249,11 +249,12 @@ func tbPickLease(ls []takeBackLease) int {
 // It re-checks, in the same store-lock critical section in which it
 // marks the lease busy, that the lease is still a legal victim —
 // running, unreleased, unpinned, not already suspended, not busy and
-// with no exec or stream open — so a pin, release, resume, job or exec
-// that landed between victim selection and this call wins and the pause
-// is refused (errLeaseBusy). An open exec or stream is refused like a
+// with no synchronous exec in flight — so a pin, release, resume, job or
+// exec that landed between victim selection and this call wins and the
+// pause is refused (errLeaseBusy). A synchronous exec is refused like a
 // running job because a pause cuts it: the caller's command dies with
-// 409 lease_busy, which a CI step cannot retry. Setting
+// 409 lease_busy, which a CI step cannot retry. An exec stream is not
+// (an idle shell may stay open for hours; see Lease.syncExecs). Setting
 // busy under the same lock closes the gap: a later pin or exec sees
 // busy and waits or fails instead of racing the pause.
 //
@@ -276,7 +277,7 @@ func tbPickLease(ls []takeBackLease) int {
 func (s *Service) takeBackPause(ctx context.Context, l *Lease, requester string, ratio float64) error {
 	s.store.mu.Lock()
 	if l.released || l.busy || l.Suspended || !l.live() || l.Pinned ||
-		s.hasRunningJobLocked(l.ID) || l.openWork > 0 || l.Owner == requester {
+		s.hasRunningJobLocked(l.ID) || l.syncExecs > 0 || l.Owner == requester {
 		s.store.mu.Unlock()
 		return errLeaseBusy
 	}
@@ -442,7 +443,7 @@ func (s *Service) takeBackOwners(ctx context.Context) []takeBackOwner {
 			Name:       l.Name,
 			MemoryMiB:  l.MemoryMB,
 			Pinned:     l.Pinned,
-			Busy:       l.busy || s.hasRunningJobLocked(l.ID) || l.openWork > 0,
+			Busy:       l.busy || s.hasRunningJobLocked(l.ID) || l.syncExecs > 0,
 			Drained:    l.Drained,
 			LastActive: l.LastActive,
 		})

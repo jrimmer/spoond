@@ -236,15 +236,23 @@ func TestTakeBackOwnersViews(t *testing.T) {
 		t.Fatal("LastActive not carried")
 	}
 
-	// An exec or stream in flight marks b1 busy like a running job: the
-	// pause would cut the command.
+	// A synchronous exec in flight marks b1 busy like a running job: the
+	// pause would cut the command. An open stream does not: an idle
+	// shell must not shield the lease's memory.
 	svc.incOpenWork(b1.ID)
+	for _, v := range svc.takeBackOwners(ctx) {
+		if v.Owner == bob.ID && v.Leases[0].Busy {
+			t.Fatal("b1 busy through an open stream alone")
+		}
+	}
+	svc.decOpenWork(b1.ID)
+	svc.incSyncExec(b1.ID)
 	for _, v := range svc.takeBackOwners(ctx) {
 		if v.Owner == bob.ID && (len(v.Leases) != 1 || !v.Leases[0].Busy) {
 			t.Fatalf("b1 view with an open exec = %+v, want busy", v.Leases)
 		}
 	}
-	svc.decOpenWork(b1.ID)
+	svc.decSyncExec(b1.ID)
 	for _, v := range svc.takeBackOwners(ctx) {
 		if v.Owner == bob.ID && v.Leases[0].Busy {
 			t.Fatal("b1 still busy after its exec ended")
@@ -444,8 +452,8 @@ func TestTakeBackPausePausesVictim(t *testing.T) {
 
 // TestTakeBackPauseRefusesIllegalVictims: the guard re-checks every
 // eligibility rule. A pinned, suspended, released or lost lease, one
-// with a running background job or an open exec or stream (a pause
-// would cut it, #166), the requester's own lease and a lease
+// with a running background job or a synchronous exec in flight (a
+// pause would cut it, #166), the requester's own lease and a lease
 // with an in-flight operation are all refused with errLeaseBusy and
 // nothing is paused.
 func TestTakeBackPauseRefusesIllegalVictims(t *testing.T) {
@@ -470,7 +478,7 @@ func TestTakeBackPauseRefusesIllegalVictims(t *testing.T) {
 	jobbed := mk("o3")
 	svc.incRunningJob(jobbed.ID)
 	execing := mk("o6")
-	svc.incOpenWork(execing.ID)
+	svc.incSyncExec(execing.ID)
 
 	cases := []struct {
 		name string
@@ -691,5 +699,54 @@ func TestMemVictimsFallsThroughToSmallerLease(t *testing.T) {
 	owners[1].Leases = []takeBackLease{tiny, other}
 	if got := memVictims(owners, "req", 512, 512); !eqStrs(ids(got), []string{"tiny"}) {
 		t.Fatalf("got %v, want [tiny]", ids(got))
+	}
+}
+
+// TestTakeBackPauseRefusesLeaseMidExec: a lease whose POST exec is in
+// flight is refused by takeBackPause (#166). In production a take-back
+// for another owner's create paused a CI lease mid-step; the pause cut
+// the command and the exec answered 409 lease_busy. Once the exec has
+// returned, the lease counts no exec any more.
+func TestTakeBackPauseRefusesLeaseMidExec(t *testing.T) {
+	ts, svc, sub, _ := checkpointTestServer(t)
+	_, body := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "ttl": 300})
+	id, _ := body["id"].(string)
+	l := svc.lookupAny(id)
+	if l == nil {
+		t.Fatalf("create lease: %v", body)
+	}
+	started, release := make(chan struct{}), make(chan struct{})
+	var once, releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	// A failure below must not leave the exec blocked: the test server's
+	// Close would wait on it forever.
+	t.Cleanup(unblock)
+	sub.execBefore = func(sandboxID string, req substrate.ExecRequest) {
+		if sandboxID == l.SandboxID && !isRootfsProbeReq(req) {
+			once.Do(func() { close(started) })
+			<-release
+		}
+	}
+	done := make(chan int, 1)
+	go func() {
+		resp, _ := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/exec", "token-a", map[string]any{"cmd": "make check"})
+		done <- resp.StatusCode
+	}()
+	<-started
+	if err := svc.takeBackPause(context.Background(), l, "req", 2.0); !errors.Is(err, errLeaseBusy) {
+		t.Fatalf("takeBackPause mid-exec err = %v, want errLeaseBusy", err)
+	}
+	if l.Suspended {
+		t.Fatal("the lease was paused mid-exec")
+	}
+	unblock()
+	if code := <-done; code != 200 {
+		t.Fatalf("exec = %d, want 200", code)
+	}
+	svc.store.mu.Lock()
+	n := l.syncExecs
+	svc.store.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("syncExecs = %d after the exec returned, want 0", n)
 	}
 }

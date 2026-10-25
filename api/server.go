@@ -2544,6 +2544,10 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	// pause merely stops (spoond-g0ok).
 	s.svc.incOpenWork(lease.ID)
 	defer s.svc.decOpenWork(lease.ID)
+	// It also keeps memory take-back off the lease (#166): a pause would
+	// cut the command and answer it 409 lease_busy.
+	s.svc.incSyncExec(lease.ID)
+	defer s.svc.decSyncExec(lease.ID)
 	res, err := s.svc.sub.Exec(r.Context(), lease.SandboxID, substrate.ExecRequest{
 		Args:    args,
 		Env:     execEnv,

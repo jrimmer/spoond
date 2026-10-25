@@ -330,9 +330,10 @@ spoond takes memory back by pausing leases through the normal pause path
 **not** change). It picks the owner furthest over their fair slice
 (usage/slice ratio), and within that owner the least recently used lease.
 Pinned leases are never taken, and neither is a lease with a running
-background job or an open exec or stream: a pause would cut that work
-mid-command, so it answers `409` `lease_busy` to a caller that cannot
-retry it. Every take-back is logged as it starts (`take back: pausing
+background job (a pause would stop it) or a synchronous exec in flight
+(a pause would cut the command, which then answers `409` `lease_busy`
+to a caller that cannot retry it). An exec stream or SSH session does
+not protect a lease: one can stay open for hours. Every take-back is logged as it starts (`take back: pausing
 lease …`), so a pause that ends early still names its lease, owner and
 requester. The requester takes only from owners whose
 ratio stays above its own after the request. Take-back runs one request
@@ -381,7 +382,7 @@ HTTP/1.1 429
 
 A row carries the lease `id`, its `name` tag (omitted when untagged),
 `memory_mb`, `last_active`, and whether it is `pinned` or `busy` with an
-in-flight operation, a running job or an open exec or stream. The rows are plain LRU, not the
+in-flight operation, a running job or a synchronous exec. The rows are plain LRU, not the
 take-back selector's own ranking: the first row can be `pinned` or
 `busy`. Pausing a pinned lease is still safe (its hugepages are freed;
 but it will not resume while room is short). Pausing a lease mid-pause,
