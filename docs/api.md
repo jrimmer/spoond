@@ -2957,6 +2957,43 @@ revokes (the owner's leases revert to the open gateway). The key is
 stored as a salted hash and never returned in responses. `404` unknown
 user; `403` non-admin.
 
+### `POST /api/users/{id}/egress-ceiling` — cap a user's network access (#164)
+
+Admin only. Request: `{"egress_ceiling": [...]}` sets the most network
+access the user's leases may have; `{"egress_ceiling": null}` clears it
+(no ceiling, the default). Entries are IPs, CIDRs, domains, `*.`
+wildcards for a domain's subdomains, and the words `lan` and `internet`.
+With a ceiling set, a create, a clone or fork, and
+`POST /api/leases/{id}/network` are refused with
+`403 {"code":"egress_ceiling"}` when they would use:
+- `internet` and the ceiling lacks `internet`;
+- `lan` and the ceiling lacks `lan` and `internet`;
+- a `restricted` allowlist entry the ceiling doesn't cover (an IP inside
+  a ceiling IP or CIDR, a CIDR inside a ceiling CIDR, a domain equal to a
+  ceiling domain or under a `*.` entry; a domain never matches an IP
+  entry).
+`none` is always allowed, and a lease reference in an allowlist fits
+only when it names one of the owner's own leases. Setting or clearing a
+ceiling re-applies every live lease's egress at once. Existing leases,
+running or suspended, keep their policy through resume, restart and
+restore, except that a `restricted` lease's allowlist entries outside the
+ceiling are left out of what is enforced, and a ceilinged owner's leases
+reach only that owner's own published peers. An empty list allows only
+`none` and an empty `restricted` list. The user view
+(`GET /api/users/me`, `GET /api/users`) shows `egress_ceiling` when set.
+`400` bad entry; `404` unknown user; `403` non-admin.
+
+Add `"dry_run": true` to see the effect first: nothing is saved, and the
+answer `{"dry_run": true, "affected": [...]}` lists the user's existing
+leases the ceiling would narrow, each with `lease_id`, `name`, `holder`,
+`state`, `network_policy`, the `outside` entries and the `effect`. A
+restricted lease loses its outside entries as soon as the ceiling is
+set; a lan or internet lease keeps its policy, but copies and changes
+outside the ceiling are refused. A real set returns the same `affected`
+list beside `user`, as a preview taken just before the save. Run the dry run before setting a ceiling on an
+identity with working leases, and widen the ceiling until `affected`
+holds only what you mean to cut.
+
 ### `POST /api/users/{id}/tokens` — mint a named API token (#138 A2)
 
 Mints one more named bearer token for a user and answers its secret

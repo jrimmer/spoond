@@ -237,6 +237,7 @@ var endpointTable = []endpointSpec{
 	ep("POST", "/api/users", "create a user"),
 	epAdmin("POST", "/api/users/{id}/quota", "set the TTL cap and the per-identity concurrency overrides (admin only)"),
 	ep("POST", "/api/users/{id}/llm-key", "set/rotate/revoke a user's LLM gateway key"),
+	epAdmin("POST", "/api/users/{id}/egress-ceiling", "set or clear the most network access a user's leases may have"),
 	ep("POST", "/api/users/{id}/tokens", "mint a named API token"),
 	ep("DELETE", "/api/users/{id}/tokens/{token_id}", "revoke a token"),
 	epAdmin("DELETE", "/api/users/{id}", "remove a user (admin only)"),

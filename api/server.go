@@ -376,6 +376,7 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 		s.mux.HandleFunc("POST /api/users", s.handleUsersCreate)
 		s.mux.HandleFunc("POST /api/users/{id}/quota", s.handleUsersQuota)
 		s.mux.HandleFunc("POST /api/users/{id}/llm-key", s.handleUsersLLMKey) // U8/T8
+		s.mux.HandleFunc("POST /api/users/{id}/egress-ceiling", s.handleUsersEgressCeiling)
 		s.mux.HandleFunc("POST /api/users/{id}/tokens", s.handleUsersTokensCreate)
 		s.mux.HandleFunc("DELETE /api/users/{id}/tokens/{token_id}", s.handleUsersTokenRevoke)
 		s.mux.HandleFunc("DELETE /api/users/{id}", s.handleUsersDelete)
@@ -1252,6 +1253,9 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "network_policy must be none|lan|internet|restricted")
 		return
 	}
+	if s.refuseOutsideCeiling(w, ownerFrom(r.Context()), req.NetPolicy, req.NetAllow) {
+		return
+	}
 	expose, err := ValidateExposePorts(req.ExposePorts)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -1907,6 +1911,11 @@ func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 	lease := s.svc.lookup(owner, id)
 	if lease == nil {
 		writeError(w, http.StatusNotFound, "lease not found")
+		return
+	}
+	// The ceiling is checked before the resume: a refused change must not
+	// spend memory waking the lease (#164).
+	if s.refuseOutsideCeiling(w, owner, req.NetPolicy, req.NetAllow) {
 		return
 	}
 	if !s.ensureRunning(w, r, lease) {
@@ -2853,6 +2862,11 @@ func (s *Server) handleClone(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req) // optional body; tag ignored
 
+	// A copy keeps its source's network policy, so it must fit the
+	// owner's egress ceiling as a create would (#164).
+	if s.writeCeilingRefusal(w, s.svc.egressOutsideCeilingOf(owner, id)) {
+		return
+	}
 	cloned, buildID, err := s.svc.clone(r.Context(), owner, id)
 	if err != nil {
 		if writeLeaseLostErr(w, err) {
@@ -2912,6 +2926,9 @@ func (s *Server) handleFork(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := validateHolder(req.Holder, req.HolderURL); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if s.writeCeilingRefusal(w, s.svc.egressOutsideCeilingOf(owner, id)) {
 		return
 	}
 	leases, buildID, err := s.svc.fork(r.Context(), owner, id, req.Count, req.Persistent, time.Duration(req.TTL)*time.Second, req.Holder, req.HolderURL)

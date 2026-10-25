@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"net/http"
@@ -26,6 +27,9 @@ type UserView struct {
 	// GUEST_DIAL_MAX).
 	ExecConcurrency int `json:"exec_concurrency"`
 	GuestDial       int `json:"guest_dial"`
+	// EgressCeiling is the most network access the user's leases may
+	// have (#164); absent = no ceiling.
+	EgressCeiling *[]string `json:"egress_ceiling,omitempty"`
 	// UsedMiB is the user's current memory charge (#128): the sum of
 	// memory_mb over their RUNNING leases (suspended ones hold no
 	// hugepages and are not charged).
@@ -45,6 +49,7 @@ func toUserView(u *identity.User, usedMiB int) UserView {
 		MaxTTL:          u.MaxTTL,
 		ExecConcurrency: u.ExecConcurrency,
 		GuestDial:       u.GuestDial,
+		EgressCeiling:   u.EgressCeiling,
 		UsedMiB:         usedMiB,
 	}
 }
@@ -361,6 +366,77 @@ func (s *Server) handleUsersLLMKey(w http.ResponseWriter, r *http.Request) {
 	}
 	u := s.svc.identities.UserByID(id)
 	writeJSON(w, http.StatusOK, map[string]any{"user": toUserView(u, s.svc.usedMiB(u.ID))})
+}
+
+// handleUsersEgressCeiling sets or clears a user's egress ceiling (#164,
+// admin only): {"egress_ceiling": [...]} sets it, {"egress_ceiling":
+// null} clears it. With "dry_run": true nothing is saved and the answer
+// lists the user's existing leases the ceiling would narrow
+// ("affected"); a real set returns the same list (a preview taken just
+// before the save) and re-applies every live lease's egress at once.
+func (s *Server) handleUsersEgressCeiling(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	id := r.PathValue("id")
+	var raw map[string]json.RawMessage
+	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	v, ok := raw["egress_ceiling"]
+	if !ok {
+		writeError(w, http.StatusBadRequest, "egress_ceiling is required (a list, or null to clear)")
+		return
+	}
+	var list []string
+	clear := string(v) == "null"
+	if !clear {
+		if err := json.Unmarshal(v, &list); err != nil {
+			writeError(w, http.StatusBadRequest, "egress_ceiling must be a list of strings or null")
+			return
+		}
+	}
+	var dryRun bool
+	if d, ok := raw["dry_run"]; ok {
+		if err := json.Unmarshal(d, &dryRun); err != nil {
+			writeError(w, http.StatusBadRequest, "dry_run must be true or false")
+			return
+		}
+	}
+	if s.svc.identities.UserByID(id) == nil {
+		writeError(w, http.StatusNotFound, "no such user")
+		return
+	}
+	// The impact is computed on the normalized ceiling, as it would be
+	// stored. Clearing narrows nothing.
+	affected := []ceilingImpact{}
+	if !clear {
+		norm := make([]string, 0, len(list))
+		for _, e := range list {
+			n, err := identity.NormalizeCeilingEntry(e)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			norm = append(norm, n)
+		}
+		affected = s.svc.ceilingImpactOn(id, norm)
+	}
+	if dryRun {
+		writeJSON(w, http.StatusOK, map[string]any{"dry_run": true, "affected": affected})
+		return
+	}
+	if err := s.svc.identities.SetEgressCeiling(id, list, clear); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// Apply it now: re-render every live lease's egress and update the
+	// ones that changed, so a ceiling (or its removal) takes effect at
+	// once rather than at the lease's next refresh.
+	s.svc.refreshPeersAsync(context.WithoutCancel(r.Context()))
+	u := s.svc.identities.UserByID(id)
+	writeJSON(w, http.StatusOK, map[string]any{"user": toUserView(u, s.svc.usedMiB(u.ID)), "affected": affected})
 }
 
 // handleUsersDelete lives in api/userdelete.go: it removes the identity

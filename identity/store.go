@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"sort"
 	"strings"
@@ -102,6 +103,13 @@ type User struct {
 	// present the matching key; the API layer never exposes it.
 	LLMKeyHash string `json:"llm_key_hash"` // SHA256 of the LLM gateway key ("" = none)
 	CreatedAt  string `json:"created_at"`   // RFC3339
+	// EgressCeiling is the most network access an admin allows this
+	// user's leases (#164): nil = no ceiling. Entries are IPs, CIDRs,
+	// domains, "*.domain" wildcards, and the policy words "lan" and
+	// "internet"; a lease may then only use none, restricted with every
+	// allowlist entry inside the ceiling, or a policy the ceiling names.
+	// An empty list allows none and an empty restricted list only.
+	EgressCeiling *[]string `json:"egress_ceiling,omitempty"`
 	// Quota (T4/#31): only the TTL cap is left. The per-owner caps
 	// max_leases, guaranteed_mib, max_mib and max_kept_bytes were removed
 	// in 3.0 (fair shares, FS4); a users file written before still loads
@@ -223,9 +231,27 @@ func (s *Store) load() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, u := range users {
+		normalizeCeiling(u)
 		s.index(u)
 	}
 	return nil
+}
+
+// normalizeCeiling puts a loaded user's egress ceiling (#164) in its
+// canonical form, so a hand-edited file matches as the API would have
+// written it. An entry that does not parse is dropped: the ceiling only
+// gets narrower, never wider.
+func normalizeCeiling(u *User) {
+	if u.EgressCeiling == nil {
+		return
+	}
+	norm := []string{}
+	for _, e := range *u.EgressCeiling {
+		if n, err := NormalizeCeilingEntry(e); err == nil {
+			norm = append(norm, n)
+		}
+	}
+	u.EgressCeiling = &norm
 }
 
 // index adds a user to the lookup maps. Caller holds the lock.
@@ -607,6 +633,60 @@ func (s *Store) SetDialLimit(userID string, n int) error {
 	}
 	u.GuestDial = n
 	return s.save()
+}
+
+// SetEgressCeiling sets (or, with nil, clears) a user's egress ceiling
+// (#164). Entries are normalized and validated: an IP, a CIDR, a domain,
+// a "*."-prefixed domain, "lan" or "internet".
+func (s *Store) SetEgressCeiling(userID string, ceiling []string, clear bool) error {
+	var norm []string
+	if !clear {
+		norm = []string{}
+		for _, e := range ceiling {
+			n, err := NormalizeCeilingEntry(e)
+			if err != nil {
+				return err
+			}
+			norm = append(norm, n)
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	u := s.users[userID]
+	if u == nil {
+		return fmt.Errorf("no such user")
+	}
+	if clear {
+		u.EgressCeiling = nil
+	} else {
+		u.EgressCeiling = &norm
+	}
+	return s.save()
+}
+
+// NormalizeCeilingEntry validates one egress ceiling entry and returns
+// its canonical form: an IP as itself, a CIDR as its network, a domain
+// lowercased without a trailing dot, "lan" and "internet" as they are.
+func NormalizeCeilingEntry(e string) (string, error) {
+	e = strings.TrimSpace(e)
+	switch e {
+	case "lan", "internet":
+		return e, nil
+	case "":
+		return "", fmt.Errorf("egress ceiling: empty entry")
+	}
+	if ip := net.ParseIP(e); ip != nil {
+		return ip.String(), nil
+	}
+	if _, n, err := net.ParseCIDR(e); err == nil {
+		return n.String(), nil
+	}
+	d := strings.TrimSuffix(strings.ToLower(e), ".")
+	host := strings.TrimPrefix(d, "*.")
+	if host == "" || strings.ContainsAny(host, "*/:@ ") || !strings.Contains(host, ".") && host != "localhost" {
+		return "", fmt.Errorf("egress ceiling: %q is not an IP, CIDR, domain, lan or internet", e)
+	}
+	return d, nil
 }
 
 // SetLLMKey sets or rotates a user's LLM gateway key (U8/T8). Only the

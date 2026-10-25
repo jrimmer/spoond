@@ -39,6 +39,14 @@ Upgrading from 4.0:
   lease's self token on that lease's path only, so a guest no longer
   needs the owner-wide LLM key. Opt-in per lease; a self token alone
   still grants no LLM access. Schema 36.
+- **Egress ceilings** (`POST /api/users/{id}/egress-ceiling`, admin):
+  the most network access a user's leases may have. A create, copy or
+  live network change past it is refused (`403 egress_ceiling`), so an
+  agent cannot widen its own lease's access beyond what an admin set.
+  No ceiling by default; `"dry_run": true` lists the existing leases a
+  ceiling would narrow without saving it. The ceiling lives in the
+  users file; an older binary drops it on its next save, so set it
+  again after a downgrade.
 - **Job records outlive their lease.** When a lease ends, its jobs'
   records are kept for the job retention window and its owner can still
   read them through `GET /api/leases/{id}/jobs` and `.../jobs/{job}`

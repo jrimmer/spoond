@@ -1393,9 +1393,15 @@ func (s *Service) egressForLocked(l *Lease) substrate.Egress {
 			Private:     append(append([]substrate.PrivateAllowance{hostSvc}, dns...), s.selfTokenAllowance(l)...),
 			GuestDNS:    guestDNS,
 		}
+		ceiling := s.ceilingOf(l.Owner)
 		for _, entry := range l.NetAllow {
 			entry = strings.TrimSpace(entry)
 			if entry == "" {
+				continue
+			}
+			// An owner's egress ceiling (#164) holds at render time too:
+			// an entry outside it is never enforced as an allowance.
+			if ceiling != nil && !s.isOwnPeerReferenceLocked(l.Owner, entry) && !entryWithinCeiling(entry, ceiling) {
 				continue
 			}
 			cidr := entry
@@ -1520,12 +1526,18 @@ func (s *Service) peerAllowances(l *Lease) []substrate.PrivateAllowance {
 		return nil
 	}
 	restricted := NetworkPolicy(policy) == PolicyRestricted
+	// An owner with an egress ceiling (#164) reaches only its own peers:
+	// another owner's published ports are not inside any ceiling.
+	ownOnly := restricted && s.ceilingOf(l.Owner) != nil
 	var out []substrate.PrivateAllowance
 	for _, p := range s.store.leases {
 		if p.ID == l.ID || len(p.ExposePorts) == 0 || !p.live() || p.HostIP == "" {
 			continue
 		}
 		if restricted && !netAllowNamesPeer(l.NetAllow, p) {
+			continue
+		}
+		if ownOnly && p.Owner != l.Owner {
 			continue
 		}
 		ports := make([]uint32, 0, len(p.ExposePorts))
