@@ -142,6 +142,9 @@ type LeaseRow struct {
 	// ends.
 	SelfToken     bool
 	SelfTokenHash string
+	// SelfTokenLLM lets the self token stand in for the owner's LLM key
+	// at the LLM gateway, for this lease only (#162). Opt-in at create.
+	SelfTokenLLM bool
 }
 
 // leaseColumns is the leases table's column list in row order. It must
@@ -157,7 +160,7 @@ const leaseColumns = `id, owner, image, sandbox_id, address, created_at, expires
 	last_action, last_action_at, generation, checkpoint_interval, idle_suspend,
 	memory_mb, disk_mb, class, priority, preempted_at, snapshot_build_id,
 	suspend_reason, suspend_policy_step, suspend_build_id, suspended_at, vcpu, sized, had_secrets,
-	start_ms, nap_since, max_nap_secs, self_token, self_token_hash`
+	start_ms, nap_since, max_nap_secs, self_token, self_token_hash, self_token_llm`
 
 // leaseHistoryColumns is the lease_history table's column list in row
 // order (InsertLeaseHistory passes one value per name).
@@ -287,7 +290,7 @@ INSERT INTO leases (`+leaseColumns+`) VALUES (
   ?, ?, ?, ?, ?, ?, ?, ?, ?,
   ?, ?, ?, ?, ?, ?, ?, ?, ?,
   ?, ?, ?, ?,
-  ?, ?, ?, ?, ?
+  ?, ?, ?, ?, ?, ?
 )
 ON CONFLICT(id) DO UPDATE SET
   owner=excluded.owner,
@@ -342,7 +345,8 @@ ON CONFLICT(id) DO UPDATE SET
   nap_since=excluded.nap_since,
   max_nap_secs=excluded.max_nap_secs,
   self_token=excluded.self_token,
-  self_token_hash=excluded.self_token_hash`,
+  self_token_hash=excluded.self_token_hash,
+  self_token_llm=excluded.self_token_llm`,
 		l.ID, l.Owner, l.Image, l.SandboxID, l.Address,
 		formatTime(l.CreatedAt), formatTime(l.ExpiresAt), l.Persistent,
 		formatTime(l.LastActive), l.Workspace, l.Suspended, l.Name,
@@ -358,7 +362,7 @@ ON CONFLICT(id) DO UPDATE SET
 		l.SuspendReason, l.SuspendPolicyStep, l.SuspendBuildID,
 		formatTime(l.SuspendedAt), l.VCPU, l.Sized, l.HadSecrets,
 		l.StartMS, formatTime(l.NapSince), l.MaxNapSecs,
-		l.SelfToken, l.SelfTokenHash)
+		l.SelfToken, l.SelfTokenHash, l.SelfTokenLLM)
 	if err != nil {
 		return fmt.Errorf("store: upsert lease %s: %w", l.ID, err)
 	}
@@ -494,7 +498,7 @@ func scanLease(scan func(dest ...any) error) (LeaseRow, error) {
 		&r.IdleSuspend, &r.MemoryMB, &r.DiskMB, &r.Class, &r.Priority, &preemptedAt,
 		&r.SnapshotBuildID, &r.SuspendReason, &r.SuspendPolicyStep,
 		&r.SuspendBuildID, &suspendedAt, &r.VCPU, &r.Sized, &r.HadSecrets,
-		&r.StartMS, &napSince, &r.MaxNapSecs, &r.SelfToken, &r.SelfTokenHash)
+		&r.StartMS, &napSince, &r.MaxNapSecs, &r.SelfToken, &r.SelfTokenHash, &r.SelfTokenLLM)
 	if errors.Is(err, sql.ErrNoRows) {
 		return LeaseRow{}, ErrNotFound
 	}

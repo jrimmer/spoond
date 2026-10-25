@@ -108,6 +108,10 @@ type Lease struct {
 	// (never the token itself); it is cleared when the lease ends.
 	SelfToken     bool   `json:"self_token"`
 	SelfTokenHash string `json:"-"`
+	// SelfTokenLLM lets this lease's self token stand in for its
+	// owner's LLM key at the LLM gateway (#162). Opt-in at create; a
+	// self token alone grants no LLM access.
+	SelfTokenLLM bool `json:"self_token_llm"`
 	// PinnedIdleSince is when a pinned lease's LastActive first passed
 	// PINNED_IDLE_NOTICE_DAYS (FS5): visibility only — GET returns it as
 	// "pinned_idle_since", a lease.pinned_idle event fires once per
@@ -2825,6 +2829,8 @@ type leaseRequest struct {
 	// pinned asks spoond never to pause or delete the new lease before
 	// its own expiry (FS5). The holder labels never pin.
 	pinned bool
+	// selfTokenLLM lets the self token reach the LLM gateway (#162).
+	selfTokenLLM bool
 	// selfToken asks for a lease-scoped self token (#156): a guest
 	// credential that may release or keep alive this lease alone.
 	selfToken     bool
@@ -3031,22 +3037,23 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 		leaseID = newID()
 	}
 	lease := &Lease{
-		ID:          leaseID,
-		Owner:       owner,
-		Image:       image,
-		CreatedAt:   now,
-		ExpiresAt:   now.Add(ttl),
-		Persistent:  persistent,
-		LastActive:  now,
-		NetPolicy:   req.netPolicy,
-		NetAllow:    req.netAllow,
-		ExposePorts: req.exposePorts,
-		Holder:      req.holder,
-		HolderUrl:   req.holderURL,
-		Comment:     req.comment,
-		Pinned:      req.pinned,
-		SelfToken:   req.selfToken,
-		State:       "running",
+		ID:           leaseID,
+		Owner:        owner,
+		Image:        image,
+		CreatedAt:    now,
+		ExpiresAt:    now.Add(ttl),
+		Persistent:   persistent,
+		LastActive:   now,
+		NetPolicy:    req.netPolicy,
+		NetAllow:     req.netAllow,
+		ExposePorts:  req.exposePorts,
+		Holder:       req.holder,
+		HolderUrl:    req.holderURL,
+		Comment:      req.comment,
+		Pinned:       req.pinned,
+		SelfToken:    req.selfToken,
+		SelfTokenLLM: req.selfTokenLLM,
+		State:        "running",
 		// The lease's MiB charge (#128): the very number reserveQuota
 		// admitted with, so accounting and release always agree and quota
 		// sums never re-read the catalog. The lease owns its size from
@@ -4482,6 +4489,7 @@ func (s *Service) clone(ctx context.Context, owner, srcID string) (*Lease, strin
 	s.store.mu.Lock()
 	srcHadSecrets := src.HadSecrets
 	srcSelfToken := src.SelfToken
+	srcSelfTokenLLM := src.SelfTokenLLM
 	s.store.mu.Unlock()
 	now := time.Now()
 	lease := &Lease{
@@ -4507,10 +4515,11 @@ func (s *Service) clone(ctx context.Context, owner, srcID string) (*Lease, strin
 		// A clone of a self-token lease gets its own token (#156), written
 		// over the copy the snapshot carried; the source's token never
 		// works on it (it is bound to the source's id anyway).
-		SelfToken:  srcSelfToken,
-		DiskMB:     diskMB, // the running reservation (FS3a)
-		Generation: 1,      // every lease starts on generation 1 (2.2)
-		TemplateID: img.TemplateID,
+		SelfToken:    srcSelfToken,
+		SelfTokenLLM: srcSelfTokenLLM,
+		DiskMB:       diskMB, // the running reservation (FS3a)
+		Generation:   1,      // every lease starts on generation 1 (2.2)
+		TemplateID:   img.TemplateID,
 	}
 	// Memory admission (FS2b-1): the clone takes its own charge against
 	// the one pool, like every lease.
@@ -4659,6 +4668,7 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 	s.store.mu.Lock()
 	srcHadSecrets := src.HadSecrets
 	srcSelfToken := src.SelfToken
+	srcSelfTokenLLM := src.SelfTokenLLM
 	s.store.mu.Unlock()
 
 	// The whole batch's memory is admitted at once, before any child
@@ -4735,10 +4745,11 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 			// A fork child of a self-token lease gets its own token (#156),
 			// written over the copy the snapshot carried; the source's token
 			// never works on the child.
-			SelfToken:  srcSelfToken,
-			DiskMB:     diskMB, // the running reservation (FS3a)
-			Generation: 1,      // every lease starts on generation 1 (2.2)
-			TemplateID: img.TemplateID,
+			SelfToken:    srcSelfToken,
+			SelfTokenLLM: srcSelfTokenLLM,
+			DiskMB:       diskMB, // the running reservation (FS3a)
+			Generation:   1,      // every lease starts on generation 1 (2.2)
+			TemplateID:   img.TemplateID,
 		}
 		// Hold this child's egress memo in flight until it is in the store
 		// (or rolled back), so a refresh mid-create does not prune it
@@ -5335,6 +5346,9 @@ func (s *Service) leaseMap(l *Lease, ms *memSampler, checkpointInterval, idleSus
 	if l.SelfToken {
 		m["self_token"] = true
 	}
+	if l.SelfTokenLLM {
+		m["self_token_llm"] = true
+	}
 	// The lease's own size (#151 Z1): what its VM runs with and what it
 	// is charged. Omitted while unknown (a lease from before the stamps
 	// over a vanished image).
@@ -5748,6 +5762,7 @@ func leaseToRow(l *Lease) store.LeaseRow {
 		Sized:                 l.Sized,
 		HadSecrets:            l.HadSecrets,
 		SelfToken:             l.SelfToken,
+		SelfTokenLLM:          l.SelfTokenLLM,
 		SelfTokenHash:         l.SelfTokenHash,
 		DiskMB:                l.DiskMB,
 		PreemptedAt:           l.PreemptedAt,
@@ -5806,6 +5821,7 @@ func rowToLease(r store.LeaseRow) *Lease {
 		Sized:                 r.Sized,
 		HadSecrets:            r.HadSecrets,
 		SelfToken:             r.SelfToken,
+		SelfTokenLLM:          r.SelfTokenLLM,
 		SelfTokenHash:         r.SelfTokenHash,
 		DiskMB:                r.DiskMB,
 		PreemptedAt:           r.PreemptedAt,

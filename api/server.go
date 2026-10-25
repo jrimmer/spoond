@@ -225,6 +225,7 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 		// svc.identities must be installed (SetIdentities) before
 		// NewServerWithLLM for per-user LLM key enforcement (U8/T8).
 		s.llm = newLLMGateway(svc.log, svc.lookupAny, svc.resumeForUse, svc.identities, openRouterURL, openRouterKey, defaultModel, modelMap)
+		s.llm.selfTokenOK = svc.llmSelfTokenOK
 		s.llm.metrics = s.metrics
 	}
 	s.svc.SetMetrics(s.metrics)
@@ -1191,6 +1192,10 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		// the API URL when configured); the token and its hash are never
 		// returned.
 		SelfToken bool `json:"self_token"`
+		// SelfTokenLLM also lets that token reach the LLM gateway in
+		// place of the owner's LLM key, for this lease only (#162).
+		// Requires self_token; off by default.
+		SelfTokenLLM bool `json:"self_token_llm"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
@@ -1202,6 +1207,10 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.SnapshotOwner != "" && req.Snapshot == "" {
 		writeErrorCode(w, http.StatusBadRequest, "bad_request", "snapshot_owner needs snapshot")
+		return
+	}
+	if req.SelfTokenLLM && !req.SelfToken {
+		writeErrorCode(w, http.StatusBadRequest, "bad_request", "self_token_llm needs self_token")
 		return
 	}
 	// A create from a named snapshot (2.7, #83): resolve the version
@@ -1354,6 +1363,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		comment:       req.Comment,
 		pinned:        req.Pinned,
 		selfToken:     req.SelfToken,
+		selfTokenLLM:  req.SelfTokenLLM,
 		createSecrets: secrets, exposePorts: expose,
 		snapshot: start,
 		vcpu:     sizeVCPU, memoryMB: sizeMemoryMB,
@@ -1530,6 +1540,9 @@ func (s *Server) writeCreatedLease(w http.ResponseWriter, r *http.Request, lease
 	// the token and its hash are never returned.
 	if lease.SelfToken {
 		body["self_token"] = true
+	}
+	if lease.SelfTokenLLM {
+		body["self_token_llm"] = true
 	}
 	// A lease started from a named snapshot carries what it started from
 	// (A3).

@@ -99,6 +99,24 @@ func (s *Service) leaseBySelfToken(token string) *Lease {
 	return found
 }
 
+// llmSelfTokenOK reports whether token is the current self token of the
+// live lease id and that lease opted in to LLM access with it
+// (self_token_llm, #162): one constant-time compare against that lease's
+// own hash, so it is bound to the path's lease by construction.
+func (s *Service) llmSelfTokenOK(id, token string) bool {
+	if !isSelfTokenBearer(token) {
+		return false
+	}
+	hash := hashSelfToken(token)
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	l := s.store.leases[id]
+	if l == nil || l.released || !l.SelfToken || !l.SelfTokenLLM || l.SelfTokenHash == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(l.SelfTokenHash), []byte(hash)) == 1
+}
+
 // selfTokenFiles returns the guest files that carry a self-token
 // lease's token, its lease id and the API URL (nil for any other
 // lease). At create (restage false) the lease is not registered yet:

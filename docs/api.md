@@ -222,6 +222,8 @@ Request:
 | `idle_suspend` | int | host default | the lease's own idle reclamation threshold in seconds: `0` = never; `60`–`604800` = suspend the lease after that long without activity (exec, stream, proxy, keepalive, guest heartbeat, files, guest port dial), resuming it on the next call. Omitted = the host default (`IDLE_SUSPEND_DEFAULT_SECS`, itself `0` = never — see [Idle reclamation](#idle-reclamation)). Anything else is `400`, and a non-zero value needs a persistent lease (`400`) — a non-persistent lease has nothing to suspend into |
 | `wait` | int | `0` | seconds a create refused for a **waitable** reason may wait for room instead of failing (see [Queued admission](#queued-admission)). `0` keeps the immediate refusal; above `0` it is capped at `MAX_ADMIT_WAIT_SECS` (`0` disables waiting, the field is accepted and ignored); negative is `400` |
 | `secrets` | object | *(none)* | `{name: value}` delivered as files under `/run/secrets` in the guest — see [Secrets](#secrets). At most 32 secrets and 64 KiB of values per request; names match `[A-Za-z0-9_.-]{1,64}`. Values are never stored, logged or returned: they live in the backend's memory for the lease's life and are lost on a backend restart |
+| `self_token` | bool | `false` | give the guest a lease-scoped token (`/run/secrets/spoond-lease-token`, with `spoond-lease-id` and, when configured, `spoond-api-url`) that can release or keep alive this lease only. The token and its hash are never returned; `GET` reports `"self_token": true` |
+| `self_token_llm` | bool | `false` | with `self_token`: the token may also stand in for the owner's LLM key at the [LLM gateway](#llm-gateway-per-lease), for this lease only. `400 bad_request` without `self_token`; `GET` reports `"self_token_llm": true` |
 
 A lease created at a chosen size (`size`, `vcpu` or `memory_mb`) keeps
 it for life: pause, resume, restart, clone, fork, restore and recovery
@@ -2605,6 +2607,14 @@ user a key (`POST /api/users/{id}/llm-key`). Legacy consumer-owned
 leases (owner not in the store) keep the open capability model. The user
 key is replaced by the server-side upstream key before forwarding, so it
 never reaches the provider.
+
+A lease created with `self_token_llm` may present its own self token
+(`Authorization: Bearer spl_…`) instead of its owner's LLM key, so the
+owner's key, which works for every lease the owner has, never has to
+enter a guest. The token counts only on its own lease's path, stops
+working when the lease ends, and the owner must still have an LLM key
+set. A self token from a lease without `self_token_llm` gets `401`
+like any other wrong key.
 
 ## Removed in 4.0
 

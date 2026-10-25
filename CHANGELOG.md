@@ -34,6 +34,11 @@ Upgrading from 4.0:
   build.
 - **`GATEWAY_DEFAULT_IMAGE`** (`--default-image`): the image a bare
   `new` creates.
+- **A lease's own token can stand in for its owner's LLM key**
+  (`self_token_llm`, with `self_token`). The LLM gateway accepts the
+  lease's self token on that lease's path only, so a guest no longer
+  needs the owner-wide LLM key. Opt-in per lease; a self token alone
+  still grants no LLM access. Schema 36.
 - **Job records outlive their lease.** When a lease ends, its jobs'
   records are kept for the job retention window and its owner can still
   read them through `GET /api/leases/{id}/jobs` and `.../jobs/{job}`

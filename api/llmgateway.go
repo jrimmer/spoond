@@ -63,6 +63,11 @@ type llmGateway struct {
 	inflight      map[string]int
 	// metrics (issue #20): LLM gateway Prometheus metrics.
 	metrics *metrics.BackendMetrics
+	// selfTokenOK reports whether a bearer is the given lease's own self
+	// token and that lease opted in to LLM access (#162): a guest may then
+	// present it instead of its owner's LLM key, so the owner-wide key
+	// never has to enter a guest. nil = self tokens are not accepted.
+	selfTokenOK func(leaseID, token string) bool
 }
 
 // newLLMGateway wires the OpenAI-compatible upstream. upstreamURL is the
@@ -92,6 +97,12 @@ func newLLMGateway(log *log.Logger, lookup func(string) *Lease, resumeLease func
 		defaultModel: defaultModel,
 		inflight:     map[string]int{},
 	}
+}
+
+// ownSelfToken reports whether token is the live self token of leaseID
+// and that lease opted in to LLM access with it (self_token_llm).
+func (g *llmGateway) ownSelfToken(token, leaseID string) bool {
+	return g.selfTokenOK != nil && g.selfTokenOK(leaseID, token)
 }
 
 // mapModel rewrites the request body's "model" field through the
@@ -130,9 +141,10 @@ func (g *llmGateway) mapModel(body []byte) []byte {
 // exempts this prefix (capability = lease id in path), so the handler
 // itself validates the lease. When the lease owner has a per-user LLM
 // key configured (U8/T8), the request must present it in the standard
-// OpenAI-compatible Authorization header; the user key only authorizes
-// the caller and never reaches the upstream (the host key below
-// authenticates to the provider). A keyless identity-user owner gets
+// OpenAI-compatible Authorization header, or the self token of the very
+// lease in the path (#162); either only authorizes the caller and never
+// reaches the upstream (the host key below authenticates to the
+// provider). A keyless identity-user owner gets
 // `401` (4.0: the LLM_OPEN_LEGACY opt-out is gone); legacy
 // consumer-owned leases keep the open capability model.
 func (g *llmGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -170,7 +182,12 @@ func (g *llmGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if owner != nil && owner.LLMKeyHash != "" {
 			auth := r.Header.Get("Authorization")
 			key := strings.TrimPrefix(auth, "Bearer ")
-			if key == "" || key == auth || !g.users.LLMKeyOK(owner.ID, key) {
+			// A self token counts only for its own lease: it is scoped to
+			// one lease and dies with it, so it carries none of the
+			// owner key's reach across the owner's other leases (#162).
+			// The owner must still have LLM access (a key set).
+			self := key != auth && g.ownSelfToken(key, lease.ID)
+			if !self && (key == "" || key == auth || !g.users.LLMKeyOK(owner.ID, key)) {
 				if g.metrics != nil {
 					g.metrics.LLMKeyFail.Inc()
 				}

@@ -18,6 +18,13 @@ import (
 // an identity store with the given users pre-registered.
 func newLLMTestServer(t *testing.T, upstreamURL string, users func(*identity.Store)) (*httptest.Server, *identity.Store, func() string) {
 	t.Helper()
+	ts, ids, gotAuth, _ := newLLMTestServerSvc(t, upstreamURL, users)
+	return ts, ids, gotAuth
+}
+
+// newLLMTestServerSvc is newLLMTestServer that also returns the Service.
+func newLLMTestServerSvc(t *testing.T, upstreamURL string, users func(*identity.Store)) (*httptest.Server, *identity.Store, func() string, *Service) {
+	t.Helper()
 	var mu sync.Mutex
 	gotAuth := ""
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -50,7 +57,7 @@ func newLLMTestServer(t *testing.T, upstreamURL string, users func(*identity.Sto
 		mu.Lock()
 		defer mu.Unlock()
 		return gotAuth
-	}
+	}, svc
 }
 
 func llmReq(t *testing.T, url, llmKey string) *http.Response {
@@ -113,6 +120,73 @@ func TestLLMGatewayPerUserKey(t *testing.T) {
 	}
 	if a := gotAuth(); a != "Bearer host-key" {
 		t.Fatalf("upstream auth = %q, want host key (user key must not leak)", a)
+	}
+}
+
+// TestLLMGatewaySelfToken verifies #162: a lease created with
+// self_token_llm may present its own self token instead of the owner's
+// LLM key. A self token without the opt-in gets nothing. The token works
+// only on its own lease's path, not on the owner's other leases, stops
+// working when the lease ends, and never reaches the upstream. An owner
+// without an LLM key stays denied, self token or not.
+func TestLLMGatewaySelfToken(t *testing.T) {
+	ts, _, gotAuth, svc := newLLMTestServerSvc(t, "", func(ids *identity.Store) {
+		owner, err := ids.AddUser("owner", identity.KindAgent, nil, "owner-tok")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := ids.SetLLMKey(owner.ID, "slk-owner-secret"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ids.AddUser("keyless", identity.KindAgent, nil, "keyless-tok"); err != nil {
+			t.Fatal(err)
+		}
+	})
+	create := func(tok string, llm bool) (string, string) {
+		_, body := doReq(t, "POST", ts.URL+"/api/leases", tok, map[string]any{"image": "py-base", "persistent": true, "self_token": true, "self_token_llm": llm})
+		id, _ := body["id"].(string)
+		st := svc.selfTokenFor(id)
+		if id == "" || !isSelfTokenBearer(st) {
+			t.Fatalf("create self-token lease: %v (token %q)", body, st)
+		}
+		return id, st
+	}
+	llmURL := func(id string) string { return ts.URL + "/llm/" + id + "/openai/chat/completions" }
+	a, tokA := create("owner-tok", true)
+	b, _ := create("owner-tok", true)
+	n, tokN := create("owner-tok", false)
+
+	if resp := llmReq(t, llmURL(n), tokN); resp.StatusCode != 401 {
+		t.Fatalf("self token without self_token_llm: expected 401, got %d", resp.StatusCode)
+	}
+	if resp, body := doReq(t, "POST", ts.URL+"/api/leases", "owner-tok", map[string]any{"image": "py-base", "self_token_llm": true}); resp.StatusCode != 400 {
+		t.Fatalf("self_token_llm without self_token: expected 400, got %d %v", resp.StatusCode, body)
+	}
+	if _, got := doReq(t, "GET", ts.URL+"/api/leases/"+a, "owner-tok", nil); got["self_token_llm"] != true {
+		t.Fatalf("GET does not report self_token_llm: %v", got)
+	}
+
+	if resp := llmReq(t, llmURL(a), tokA); resp.StatusCode != 200 {
+		t.Fatalf("own self token: expected 200, got %d", resp.StatusCode)
+	}
+	if got := gotAuth(); got != "Bearer host-key" {
+		t.Fatalf("upstream auth = %q, want the host key (self token must not leak)", got)
+	}
+	if resp := llmReq(t, llmURL(b), tokA); resp.StatusCode != 401 {
+		t.Fatalf("self token on the owner's other lease: expected 401, got %d", resp.StatusCode)
+	}
+	if resp := llmReq(t, llmURL(a), "spl_made-up"); resp.StatusCode != 401 {
+		t.Fatalf("unknown self token: expected 401, got %d", resp.StatusCode)
+	}
+	if resp, _ := doReq(t, "DELETE", ts.URL+"/api/leases/"+a, "owner-tok", nil); resp.StatusCode >= 300 {
+		t.Fatalf("release: status %d", resp.StatusCode)
+	}
+	if resp := llmReq(t, llmURL(a), tokA); resp.StatusCode == 200 {
+		t.Fatal("self token still works after its lease ended")
+	}
+	k, tokK := create("keyless-tok", true)
+	if resp := llmReq(t, llmURL(k), tokK); resp.StatusCode != 401 {
+		t.Fatalf("keyless owner with a self token: expected 401, got %d", resp.StatusCode)
 	}
 }
 
