@@ -1066,8 +1066,8 @@ in-flight operation or a running job) — so a single-lease owner over
 their slice IS a candidate, an all-pinned top owner is passed over for
 the next owner down, and owners inside their slice and pinned leases
 are never touched at this level. **Below the critical level**
-(`MEMORY_CRITICAL_MIB`, default `2048` MiB free; `0` turns the level
-off) the floor may take from any owner, in this order: unpinned leases
+(`MEMORY_CRITICAL_MIB`, default: half the floor, at most 2048 MiB
+free; `0` turns the level off) the floor may take from any owner, in this order: unpinned leases
 of the owners over their slice (as above), then unpinned leases of the
 owners inside their slice (the highest used/slice first; owners with no
 slice after them, the most memory used first; least recently used
@@ -1076,12 +1076,12 @@ owner, or with an exec sent with `"pin": true` in flight), by the same
 owner ranking over every owner, over-slice owners first, least recently
 used first. Busy and `Drained` leases are never taken at either level.
 `MEMORY_CRITICAL_MIB` must be below `MEMORY_FLOOR_MIB`: a value at or
-over the floor turns the critical level off, and the backend says so at
-startup (`memory floor: MEMORY_CRITICAL_MIB=… is not below
-MEMORY_FLOOR_MIB=…: the critical level is off`). With both left at
-their defaults (2048 and 2048) that is the case, so set the critical
-level below the floor to use it (sb runs a 10240 MiB floor, so the
-2048 default applies there). Every take below the critical level is
+over the floor, set explicitly, turns the critical level off, and the
+backend says so at startup (`memory floor: MEMORY_CRITICAL_MIB=… is not
+below MEMORY_FLOOR_MIB=…: the critical level is off`). The default
+always sits under the floor (a 10240 MiB floor gets 2048, the default
+2048 MiB floor 1024), and with the floor off the critical level is off
+too. Every take below the critical level is
 logged as `memory floor: CRITICAL: <free> MiB free (critical <c> MiB,
 floor <f> MiB): took back lease <id> (…, owner <owner>, ratio <r>,
 inside its slice|over its slice, unpinned|PINNED)` (the take-back's

@@ -56,10 +56,9 @@ const (
 	// DefaultMemoryFloorMiB is MEMORY_FLOOR_MIB when unset: keep 2 GiB
 	// of hugepage memory free.
 	DefaultMemoryFloorMiB = 2048
-	// DefaultMemoryCriticalMiB is MEMORY_CRITICAL_MIB when unset: below
-	// 2 GiB free the floor may take from any owner, pinned leases last.
-	// It must sit under the floor to mean anything (a value at or over
-	// it turns the critical level off).
+	// DefaultMemoryCriticalMiB caps MEMORY_CRITICAL_MIB's default
+	// (DefaultMemoryCritical): below 2 GiB free at most, the floor may
+	// take from any owner, pinned leases last.
 	DefaultMemoryCriticalMiB = 2048
 	// pressureInterval is how often the loop checks the floor: every
 	// second, at every distance from the floor (spoond-154) — running VMs
@@ -328,6 +327,15 @@ func (s *Service) dropOnePoolSandbox(ctx context.Context) (freedMiB int, ok bool
 	}
 	s.deleteSandboxRow(id)
 	return freedMiB, true
+}
+
+// DefaultMemoryCritical is MEMORY_CRITICAL_MIB when unset: half the
+// floor, at most DefaultMemoryCriticalMiB, so the default always sits
+// under the floor (a critical level at or over it is off): a 10240 MiB
+// floor gets 2048, the default 2048 MiB floor 1024. 0 with the floor
+// off.
+func DefaultMemoryCritical(floorMiB int) int {
+	return min(DefaultMemoryCriticalMiB, floorMiB/2)
 }
 
 // pressureCritical reports whether a reading of free MiB is below the

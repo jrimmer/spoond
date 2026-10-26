@@ -532,9 +532,10 @@ type ServiceConfig struct {
 	// hugepage memory the floor may take from any owner — over-slice
 	// owners' unpinned leases first, then inside-slice owners' unpinned
 	// leases, pinned leases last — logging and alerting each take as
-	// CRITICAL. The backend passes DefaultMemoryCriticalMiB when unset
-	// and 0 when it is not below MemoryFloorMiB; 0 turns the level off
-	// (pressureCritical also ignores a value at or over the floor).
+	// CRITICAL. The backend passes DefaultMemoryCritical (half the floor,
+	// at most 2048) when unset and 0 when a set value is not below
+	// MemoryFloorMiB; 0 turns the level off (pressureCritical also
+	// ignores a value at or over the floor).
 	MemoryCriticalMiB int
 	// GiveBackMarginMiB is GIVE_BACK_MARGIN_MIB (spoond-aeo6): give-back
 	// resumes a taken-back lease only with its memory plus the floor plus

@@ -399,14 +399,17 @@ func saturationConfig(get func(string) string) (ioFullPct, cpuSomePct float64, e
 // MEMORY_FLOOR_MIB (spoond-l3lq, default api.DefaultMemoryFloorMiB) is
 // the free hugepage memory the backend keeps on the box; below it the
 // low-memory loop (every second) pauses one unpinned lease of an owner
-// over their slice; 0 disables the floor. MEMORY_CRITICAL_MIB (default
-// api.DefaultMemoryCriticalMiB) is the level under it where the floor
-// may take from any owner, pinned leases last; 0 disables that level.
-// Either one not a whole number of MiB is an error. A critical level
-// that is not below the floor would take from everyone before the floor
-// had asked the over-slice owners alone, so it is turned off (0) with a
-// warning for the caller to log, not clamped to some value nobody set;
-// with the floor off it is off too, silently.
+// over their slice; 0 disables the floor. MEMORY_CRITICAL_MIB is the
+// level under it where the floor may take from any owner, pinned leases
+// last; 0 disables that level. Unset, it is half the floor, at most
+// api.DefaultMemoryCriticalMiB (api.DefaultMemoryCritical), so the
+// default never collides with the floor: sb's 10240 MiB floor gets
+// 2048, the default 2048 MiB floor 1024. Either one not a whole number
+// of MiB is an error. A critical level set at or over the floor would
+// take from everyone before the floor had asked the over-slice owners
+// alone, so it is turned off (0) with a warning for the caller to log,
+// not clamped to some value nobody set; with the floor off it is off
+// too, silently.
 func memoryFloorConfig(get func(string) string) (floorMiB, criticalMiB int, warn string, err error) {
 	envInt := func(key string, def int) (int, error) {
 		v := strings.TrimSpace(get(key))
@@ -422,18 +425,18 @@ func memoryFloorConfig(get func(string) string) (floorMiB, criticalMiB int, warn
 	if floorMiB, err = envInt("MEMORY_FLOOR_MIB", api.DefaultMemoryFloorMiB); err != nil {
 		return 0, 0, "", err
 	}
-	if criticalMiB, err = envInt("MEMORY_CRITICAL_MIB", api.DefaultMemoryCriticalMiB); err != nil {
+	// -1: unset, so the default follows the floor.
+	if criticalMiB, err = envInt("MEMORY_CRITICAL_MIB", -1); err != nil {
 		return 0, 0, "", err
 	}
 	if floorMiB == 0 {
 		return 0, 0, "", nil
 	}
+	if criticalMiB < 0 {
+		return floorMiB, api.DefaultMemoryCritical(floorMiB), "", nil
+	}
 	if criticalMiB >= floorMiB {
-		set := "MEMORY_CRITICAL_MIB=" + strconv.Itoa(criticalMiB)
-		if strings.TrimSpace(get("MEMORY_CRITICAL_MIB")) == "" {
-			set = "MEMORY_CRITICAL_MIB (unset, default " + strconv.Itoa(criticalMiB) + ")"
-		}
-		warn = fmt.Sprintf("memory floor: %s is not below MEMORY_FLOOR_MIB=%d: the critical level is off; set it below the floor to turn it on, or to 0 to silence this", set, floorMiB)
+		warn = fmt.Sprintf("memory floor: MEMORY_CRITICAL_MIB=%d is not below MEMORY_FLOOR_MIB=%d: the critical level is off; set it below the floor to turn it on, or to 0 to silence this", criticalMiB, floorMiB)
 		criticalMiB = 0
 	}
 	return floorMiB, criticalMiB, warn, nil
