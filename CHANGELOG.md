@@ -21,6 +21,34 @@ summarised from README "Status".
   repository's entry beats its owner's; anything unmapped uses
   `LEASE_TOKEN`, and unset changes nothing. The startup orphan sweep
   runs under every token, still touching only runner job leases.
+- **Exec-scoped pin** (`"pin": true` on `POST /api/leases/{id}/exec`,
+  default false). While that exec is in flight, secret staging
+  included, the lease counts as pinned for every automatic pause
+  (take-back, the low-memory floor, idle suspend), exactly like an
+  explicit pin, and the pin ends when the exec returns. The lease's own
+  `pinned` is unchanged; its JSON reports the in-flight count as
+  `exec_pins`. A plain exec protects nothing: a take-back pause cuts the
+  command, which answers `409 lease_busy`. With `background: true` the
+  flag is accepted and adds nothing (a running job already protects its
+  lease).
+- **Pinned CI job leases** (`PIN_JOB_LEASES`, runner): `owner/repo` or
+  `owner` keys, matched like `LEASE_TOKEN_MAP`'s, or `*` for every job.
+  A covered job's lease is created pinned, so a take-back for another
+  owner's request cannot pause it mid-step and fail the step with
+  `409 lease_busy`. Unset pins nothing.
+
+### Changed
+
+- **Pins are reaped last, not never.** Take-back for a request and the
+  idle sweep still never pause a pinned lease, and a create blocked
+  only by pins still answers `429 box_full`. The low-memory floor
+  (`MEMORY_FLOOR_MIB`) now takes a pinned lease (explicit or exec-pinned,
+  never a busy or `Drained` one) when no unpinned lease is left to take,
+  instead of only alerting while the box sinks: the pause is logged as
+  `memory floor: … took back PINNED lease …`, a pin landing mid-pause
+  does not undo it, and it raises a critical `memory_floor` event naming
+  the lease and its owner. The lease-less `memory_floor` alert now means
+  every candidate is busy or `Drained`, or no owner is over their slice.
 
 ### Fixed
 
