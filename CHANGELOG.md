@@ -31,6 +31,9 @@ summarised from README "Status".
   command, which answers `409 lease_busy`. With `background: true` the
   flag is accepted and adds nothing (a running job already protects its
   lease).
+- **`MEMORY_CRITICAL_MIB`** (backend, default `2048`, `0` = off): the
+  low-memory floor's critical level, below which it may take from any
+  owner, pinned leases last (see Changed).
 - **Pinned CI job leases** (`PIN_JOB_LEASES`, runner): `owner/repo` or
   `owner` keys, matched like `LEASE_TOKEN_MAP`'s, or `*` for every job.
   A covered job's lease is created pinned, so a take-back for another
@@ -39,16 +42,25 @@ summarised from README "Status".
 
 ### Changed
 
-- **Pins are reaped last, not never.** Take-back for a request and the
-  idle sweep still never pause a pinned lease, and a create blocked
-  only by pins still answers `429 box_full`. The low-memory floor
-  (`MEMORY_FLOOR_MIB`) now takes a pinned lease (explicit or exec-pinned,
-  never a busy or `Drained` one) when no unpinned lease is left to take,
-  instead of only alerting while the box sinks: the pause is logged as
-  `memory floor: … took back PINNED lease …`, a pin landing mid-pause
-  does not undo it, and it raises a critical `memory_floor` event naming
-  the lease and its owner. The lease-less `memory_floor` alert now means
-  every candidate is busy or `Drained`, or no owner is over their slice.
+- **The low-memory floor has a critical level, and pins are reaped
+  last, not never** (`MEMORY_CRITICAL_MIB`, default `2048`). At the
+  floor (`MEMORY_FLOOR_MIB`) nothing changes: only unpinned leases of
+  owners over their slice are taken. Below the critical level the floor
+  may take from any owner: over-slice owners' unpinned leases first,
+  then unpinned leases of owners inside their slice (the highest
+  used/slice first, least recently used first), and pinned leases
+  (explicit or exec-pinned) last of all, instead of only alerting while
+  the box sinks with every owner inside their slice. Busy and `Drained`
+  leases are never taken. Each such take is logged as `memory floor:
+  CRITICAL: …` (saying whether the owner was inside their slice and
+  whether the lease was pinned) and raises a critical `memory_floor`
+  event naming the lease and its owner; a pin landing mid-pause does
+  not undo a pinned take. `MEMORY_CRITICAL_MIB` must be below the
+  floor: a value at or over it turns the level off with a startup
+  warning (so set it below the floor when the floor is left at its
+  `2048` default), and `0` turns it off. Take-back for a request and
+  the idle sweep still never pause a pinned lease, and a create blocked
+  only by pins still answers `429 box_full`.
 
 ### Fixed
 
