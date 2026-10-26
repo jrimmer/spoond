@@ -91,6 +91,12 @@ type Executor struct {
 	// release — goes through the one it picks, so a lease is never
 	// touched with another identity's token.
 	SandboxFor func(job *Job) SandboxProvider
+	// PinLease, when set, says whether a job's lease is created pinned
+	// (PIN_JOB_LEASES, built by PinJobLeases.PinFor): memory take-back
+	// for another owner's request never pauses a pinned lease, so it
+	// cannot cut a step mid-exec. Applied through the LeasePinner
+	// capability of the job's Sandbox; nil pins nothing.
+	PinLease func(job *Job) bool
 }
 
 // checkoutRe matches a uses: actions/checkout step (any version).
@@ -123,6 +129,12 @@ func (e *Executor) Run(ctx context.Context, job *Job) error {
 	if l, ok := e.Sandbox.(LeaseLabeler); ok && e.ForgejoURL != "" {
 		l.WithLabel(fmt.Sprintf("%s%d %s/actions/runs/%d/jobs/%d",
 			JobLabelPrefix, job.ID, strings.TrimRight(e.ForgejoURL, "/"), e.runID(job), job.ID))
+	}
+	// PIN_JOB_LEASES: set the pin every job, false included, so a pin a
+	// job set but never spent (it failed before its create) cannot carry
+	// over to the worker's next job.
+	if p, ok := e.Sandbox.(LeasePinner); ok && e.PinLease != nil {
+		p.WithPin(e.PinLease(job))
 	}
 	wf, err := ParseWorkflow(job.Workflow)
 	if err != nil {

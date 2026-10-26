@@ -127,6 +127,16 @@ type LeaseLabeler interface {
 	WithLabel(label string)
 }
 
+// LeasePinner is the optional capability of a SandboxProvider to create
+// the lease it grants next pinned (PIN_JOB_LEASES): memory take-back for
+// another owner's request never pauses a pinned lease, so a step is not
+// cut mid-exec. The executor calls it before every Create when its
+// Sandbox implements it and PIN_JOB_LEASES is set, with false for a job
+// the setting does not cover, so no pin outlives the job it was for.
+type LeasePinner interface {
+	WithPin(pinned bool)
+}
+
 // CreateWaitReporter is the optional capability of a RunnerWorker to
 // learn from its executor that a create has started (or ended) a wait
 // for a sandbox (L3). The pool uses it to cancel a still-waiting job at

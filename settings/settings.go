@@ -166,6 +166,7 @@ var Known = []string{
 	"OTEL_PROM_URL",
 	"PAUSED_RELEASE_DAYS",
 	"PINNED_IDLE_NOTICE_DAYS",
+	"PIN_JOB_LEASES",
 	"POOL_SIZE",
 	"PROXY_ADDR",
 	"PROXY_AUTH_MODE",
@@ -515,6 +516,7 @@ var Specs = []Spec{
 	{"OTEL_PROM_URL", TypeURL, Backend, false},
 	{"PAUSED_RELEASE_DAYS", TypeInt, Backend, false},
 	{"PINNED_IDLE_NOTICE_DAYS", TypeInt, Backend, false},
+	{"PIN_JOB_LEASES", TypeList, Runner, false}, // owner/repo or owner keys, or *
 	{"POOL_SIZE", TypeInt, Backend, false},
 	{"PROXY_ADDR", TypeAddr, Backend, false},
 	{"PROXY_AUTH_MODE", TypeString, Backend, false}, // off|forward-auth

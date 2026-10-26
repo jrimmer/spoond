@@ -29,6 +29,15 @@
 //	                   uses LEASE_TOKEN. A malformed entry or an
 //	                   unreadable file fails startup, naming the entry.
 //	                   Unset: every job uses LEASE_TOKEN
+//	PIN_JOB_LEASES     Jobs whose lease is created pinned, comma-separated
+//	                   "owner/repo" or "owner" keys matched like
+//	                   LEASE_TOKEN_MAP's (e.g. "acme/web,example"), or
+//	                   "*" for every job. Memory take-back for another
+//	                   owner's request never pauses a pinned lease, so it
+//	                   cannot cut a step with 409 lease_busy (only the
+//	                   low-memory floor takes one, as its last resort).
+//	                   A malformed entry fails startup, naming it by
+//	                   position. Unset: no job lease is pinned
 //	IMAGE_MAP          runs-on label -> image tag, comma-separated
 //	                   (e.g. "ubuntu-latest=ci-image"); a value
 //	                   "snapshot:NAME[@V]" starts the job from the
@@ -206,6 +215,14 @@ func Main(args []string) int {
 	if keys := tokenMap.Keys(); len(keys) > 0 {
 		log.Printf("lease tokens: %d mapped (%s)", len(keys), strings.Join(keys, ", "))
 	}
+	// Which jobs' leases are created pinned; unset pins none.
+	pinJobs, err := runner.ParsePinJobLeases(os.Getenv("PIN_JOB_LEASES"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	if keys := pinJobs.Keys(); len(keys) > 0 {
+		log.Printf("job lease pins: %d keys (%s)", len(keys), strings.Join(keys, ", "))
+	}
 	// The Forgejo admin token is optional (the adaptive pool's admin
 	// surface); it takes the file form too (#137 C2).
 	adminToken, warn, err := settings.Resolve("FORGEJO_ADMIN_TOKEN")
@@ -358,6 +375,9 @@ func Main(args []string) int {
 			// LEASE_TOKEN_MAP: a mapped repository's job leases through
 			// this worker's own client for its token (nil when unset).
 			SandboxFor: tokenMap.Router(func(token string) runner.SandboxProvider { return newLease(token) }),
+			// PIN_JOB_LEASES: a covered job's lease is created pinned
+			// (nil when unset).
+			PinLease: pinJobs.PinFor(),
 		}
 		return &runner.WorkerImpl{Adapter: proto, Exec: exec}
 	}

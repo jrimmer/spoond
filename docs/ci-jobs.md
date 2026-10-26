@@ -262,6 +262,43 @@ Three consequences to know:
   count against the base project's identity and can start from that
   identity's snapshots.
 
+## Pinning job leases
+
+A job lease is not pinned by default, so memory
+[take-back](api.md#memory-take-back) for another owner's request can
+pause it in the middle of a step. The pause cuts the step's command,
+the exec answers `409 lease_busy`, and the runner fails the step: it
+cannot retry a command that may have half run. A separate identity
+(above) makes that less likely; a pin rules it out.
+
+`PIN_JOB_LEASES` names the jobs whose lease the runner creates with
+`"pinned": true`:
+
+```
+PIN_JOB_LEASES=example.org/site,acme
+```
+
+- A key is `owner/repo` (that repository) or `owner` (every repository
+  of it), matched against the job's `github.repository` like a
+  `LEASE_TOKEN_MAP` key: case-insensitively, the repository's own
+  entry before its owner's. `*` alone pins every job.
+- A malformed entry, a key listed twice or `*` beside other entries
+  fails startup, naming the entry by its position.
+- Unset or empty, no job lease is pinned, as before.
+
+The runner logs the keys at startup (`job lease pins: 2 keys
+(example.org/site, acme)`).
+
+A pin is not absolute. Take-back for a request never pauses a pinned
+lease, but the low-memory floor (`MEMORY_FLOOR_MIB`) still takes one
+when no unpinned lease is left, and it logs and alerts when it does (see
+[operations.md](operations.md#pins-and-the-paused-release-clock)). A
+pinned job lease is released with the job like any other, and its TTL
+(`LEASE_TTL`) still applies. Pinned leases are what is left when the box
+runs short: a create that only pinned leases stand in the way of answers
+`429 box_full`, which the runner waits out, so pin the projects whose
+steps must not be cut rather than every job by habit.
+
 ## When a build fails, look for the job record
 
 A failed job writes `/var/lib/spoond/jobs/job-<id>.json` naming the step

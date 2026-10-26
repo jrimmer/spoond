@@ -50,10 +50,12 @@ type HTTPLeaseClient struct {
 	// grows to cover it.
 	AdmitWaitSecs int
 
-	// labelMu guards the label the next Create applies (set via
-	// WithLabel, a LeaseLabeler capability).
+	// labelMu guards the label and the pin the next Create applies (set
+	// via WithLabel and WithPin, the LeaseLabeler and LeasePinner
+	// capabilities).
 	labelMu sync.Mutex
 	label   string
+	pin     bool
 
 	// sleepFn waits for a retry delay or until ctx ends; nil uses the
 	// real timer. A test seam for Retry-After waits.
@@ -108,6 +110,15 @@ func (c *HTTPLeaseClient) WithLabel(label string) {
 	c.label = label
 }
 
+// WithPin sets whether the next Create asks for a pinned lease
+// ("pinned": true, PIN_JOB_LEASES). Implements LeasePinner. Like the
+// label, the pin is spent by the Create that reads it.
+func (c *HTTPLeaseClient) WithPin(pinned bool) {
+	c.labelMu.Lock()
+	defer c.labelMu.Unlock()
+	c.pin = pinned
+}
+
 // SnapshotSourcePrefix marks an image-map value (IMAGE_MAP,
 // DEFAULT_IMAGE) that names a named snapshot instead of an image (scout
 // #24): "snapshot:NAME[@V]" starts the job from a snapshot the runner's
@@ -133,9 +144,9 @@ func leaseSource(image string) map[string]any {
 //
 // It sends the pending label (WithLabel) as the create body's
 // "comment" (#132), so the lease is born with it — the `created` event
-// carries it and no separate comment call follows the answer. The slot
-// is emptied once read, so a later Create is never labelled with this
-// job's comment.
+// carries it and no separate comment call follows the answer — and a
+// pending pin (WithPin) as "pinned": true. Both slots are emptied once
+// read, so a later Create is never labelled or pinned for this job.
 //
 // It sends "wait" (AdmitWaitSecs, RUNNER_ADMIT_WAIT_SECS) so a full
 // node's admission queue can hold the create instead of refusing it, and
@@ -149,11 +160,14 @@ func leaseSource(image string) map[string]any {
 // named snapshot spelled "snapshot:..." (SnapshotSourcePrefix).
 func (c *HTTPLeaseClient) Create(ctx context.Context, image string, ttl int) (string, error) {
 	c.labelMu.Lock()
-	label := c.label
-	c.label = ""
+	label, pin := c.label, c.pin
+	c.label, c.pin = "", false
 	c.labelMu.Unlock()
 	payload := leaseSource(image)
 	payload["ttl"], payload["comment"] = ttl, label
+	if pin {
+		payload["pinned"] = true
+	}
 	if c.NetPolicy != "" {
 		payload["network_policy"] = c.NetPolicy
 	}
