@@ -1060,8 +1060,8 @@ standing interval. Default `2048` (MiB); `0` disables the check. The
 victim is the lease
 pressureVictim picks: the owner with the highest used/slice among the
 owners over their slice, and inside that owner the least recently used
-unpinned lease that is not busy (an in-flight operation, a running job
-or a synchronous exec) — so a single-lease owner over
+unpinned lease that is not busy (an in-flight operation or a running
+job) — so a single-lease owner over
 their slice IS a candidate, pinned leases and owners inside their
 slice are never touched, and an all-pinned top owner is passed over
 for the next owner down. A lease still marked `Drained` (an undrain

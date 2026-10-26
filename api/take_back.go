@@ -18,7 +18,7 @@ type takeBackLease struct {
 	Name       string // the lease's tag, echoed in the box_full own_leases body
 	MemoryMiB  int
 	Pinned     bool      // a pinned lease is never taken
-	Busy       bool      // a running job, a synchronous exec or an in-flight operation; taken last
+	Busy       bool      // a running job (or in-flight operation); taken last
 	Drained    bool      // an undrain still owns its resume; taken never
 	LastActive time.Time // older means less recently used
 }
@@ -248,13 +248,9 @@ func tbPickLease(ls []takeBackLease) int {
 //
 // It re-checks, in the same store-lock critical section in which it
 // marks the lease busy, that the lease is still a legal victim —
-// running, unreleased, unpinned, not already suspended, not busy and
-// with no synchronous exec in flight — so a pin, release, resume, job or
-// exec that landed between victim selection and this call wins and the
-// pause is refused (errLeaseBusy). A synchronous exec is refused like a
-// running job because a pause cuts it: the caller's command dies with
-// 409 lease_busy, which a CI step cannot retry. An exec stream is not
-// (an idle shell may stay open for hours; see Lease.syncExecs). Setting
+// running, unreleased, unpinned, not already suspended and not busy —
+// so a pin, release, resume or job that landed between victim selection
+// and this call wins and the pause is refused (errLeaseBusy). Setting
 // busy under the same lock closes the gap: a later pin or exec sees
 // busy and waits or fails instead of racing the pause.
 //
@@ -277,7 +273,7 @@ func tbPickLease(ls []takeBackLease) int {
 func (s *Service) takeBackPause(ctx context.Context, l *Lease, requester string, ratio float64) error {
 	s.store.mu.Lock()
 	if l.released || l.busy || l.Suspended || !l.live() || l.Pinned ||
-		s.hasRunningJobLocked(l.ID) || l.syncExecs > 0 || l.Owner == requester {
+		s.hasRunningJobLocked(l.ID) || l.Owner == requester {
 		s.store.mu.Unlock()
 		return errLeaseBusy
 	}
@@ -443,7 +439,7 @@ func (s *Service) takeBackOwners(ctx context.Context) []takeBackOwner {
 			Name:       l.Name,
 			MemoryMiB:  l.MemoryMB,
 			Pinned:     l.Pinned,
-			Busy:       l.busy || s.hasRunningJobLocked(l.ID) || l.syncExecs > 0,
+			Busy:       l.busy || s.hasRunningJobLocked(l.ID),
 			Drained:    l.Drained,
 			LastActive: l.LastActive,
 		})

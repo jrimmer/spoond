@@ -268,14 +268,6 @@ type Lease struct {
 	// this is non-zero. Background jobs are not counted: a pause stops
 	// them but does not end them. Guarded by store.mu; not persisted.
 	openWork int
-	// syncExecs counts the lease's in-flight synchronous execs (POST exec
-	// and the agent prompt): memory
-	// take-back passes the lease over while it is non-zero, because a
-	// pause cuts the command (#166). Streams are not counted: an idle
-	// shell may stay open for hours and must not shield the lease's
-	// memory, while a synchronous exec ends by MAX_EXEC_TIMEOUT_SECS.
-	// Guarded by store.mu; not persisted.
-	syncExecs int
 	// checkpointDeferredSince is when the periodic pass first skipped
 	// this lease because it had open work, and checkpointForceLogged
 	// records that the pass already logged the interval cap for that
@@ -2210,24 +2202,6 @@ func (s *Service) decOpenWork(leaseID string) {
 	s.store.mu.Lock()
 	if l := s.store.leases[leaseID]; l != nil && l.openWork > 0 {
 		l.openWork--
-	}
-	s.store.mu.Unlock()
-}
-
-// incSyncExec records that a lease gained an in-flight synchronous exec.
-func (s *Service) incSyncExec(leaseID string) {
-	s.store.mu.Lock()
-	if l := s.store.leases[leaseID]; l != nil && !l.released {
-		l.syncExecs++
-	}
-	s.store.mu.Unlock()
-}
-
-// decSyncExec records that one of a lease's synchronous execs ended.
-func (s *Service) decSyncExec(leaseID string) {
-	s.store.mu.Lock()
-	if l := s.store.leases[leaseID]; l != nil && l.syncExecs > 0 {
-		l.syncExecs--
 	}
 	s.store.mu.Unlock()
 }
