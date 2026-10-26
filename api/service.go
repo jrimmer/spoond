@@ -523,11 +523,19 @@ type ServiceConfig struct {
 	// low-memory loop (api/pressure.go). Below the floor it pauses one
 	// lease through pressureVictim (the least recently used unpinned
 	// lease of the owner furthest over their fair slice — pinned leases
-	// and owners inside their slice are never touched) and repeats on the
-	// next tick; admission counts the floor as headroom (memoryHeadroom).
-	// The backend passes DefaultMemoryFloorMiB when unset; 0 disables the
-	// check.
+	// and owners inside their slice are not touched above
+	// MemoryCriticalMiB) and repeats on the next tick; admission counts
+	// the floor as headroom (memoryHeadroom). The backend passes
+	// DefaultMemoryFloorMiB when unset; 0 disables the check.
 	MemoryFloorMiB int
+	// MemoryCriticalMiB is MEMORY_CRITICAL_MIB: below this much free
+	// hugepage memory the floor may take from any owner — over-slice
+	// owners' unpinned leases first, then inside-slice owners' unpinned
+	// leases, pinned leases last — logging and alerting each take as
+	// CRITICAL. The backend passes DefaultMemoryCriticalMiB when unset
+	// and 0 when it is not below MemoryFloorMiB; 0 turns the level off
+	// (pressureCritical also ignores a value at or over the floor).
+	MemoryCriticalMiB int
 	// GiveBackMarginMiB is GIVE_BACK_MARGIN_MIB (spoond-aeo6): give-back
 	// resumes a taken-back lease only with its memory plus the floor plus
 	// this margin free. 0 means DefaultGiveBackMarginMiB; negative, none.

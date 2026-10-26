@@ -291,7 +291,8 @@ The runner logs the keys at startup (`job lease pins: 2 keys
 
 A pin is not absolute. Take-back for a request never pauses a pinned
 lease, but the low-memory floor (`MEMORY_FLOOR_MIB`) still takes one
-when no unpinned lease is left, and it logs and alerts when it does (see
+below its critical level (`MEMORY_CRITICAL_MIB`) when no unpinned lease
+of any owner is left, and it logs and alerts when it does (see
 [operations.md](operations.md#pins-and-the-paused-release-clock)). A
 pinned job lease is released with the job like any other, and its TTL
 (`LEASE_TTL`) still applies. Pinned leases are what is left when the box

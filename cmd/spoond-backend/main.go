@@ -395,6 +395,50 @@ func saturationConfig(get func(string) string) (ioFullPct, cpuSomePct float64, e
 	return ioFullPct, cpuSomePct, nil
 }
 
+// memoryFloorConfig reads the low-memory floor's two levels.
+// MEMORY_FLOOR_MIB (spoond-l3lq, default api.DefaultMemoryFloorMiB) is
+// the free hugepage memory the backend keeps on the box; below it the
+// low-memory loop (every second) pauses one unpinned lease of an owner
+// over their slice; 0 disables the floor. MEMORY_CRITICAL_MIB (default
+// api.DefaultMemoryCriticalMiB) is the level under it where the floor
+// may take from any owner, pinned leases last; 0 disables that level.
+// Either one not a whole number of MiB is an error. A critical level
+// that is not below the floor would take from everyone before the floor
+// had asked the over-slice owners alone, so it is turned off (0) with a
+// warning for the caller to log, not clamped to some value nobody set;
+// with the floor off it is off too, silently.
+func memoryFloorConfig(get func(string) string) (floorMiB, criticalMiB int, warn string, err error) {
+	envInt := func(key string, def int) (int, error) {
+		v := strings.TrimSpace(get(key))
+		if v == "" {
+			return def, nil
+		}
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return 0, fmt.Errorf("%s=%q: want a whole number of MiB (0 disables it)", key, v)
+		}
+		return n, nil
+	}
+	if floorMiB, err = envInt("MEMORY_FLOOR_MIB", api.DefaultMemoryFloorMiB); err != nil {
+		return 0, 0, "", err
+	}
+	if criticalMiB, err = envInt("MEMORY_CRITICAL_MIB", api.DefaultMemoryCriticalMiB); err != nil {
+		return 0, 0, "", err
+	}
+	if floorMiB == 0 {
+		return 0, 0, "", nil
+	}
+	if criticalMiB >= floorMiB {
+		set := "MEMORY_CRITICAL_MIB=" + strconv.Itoa(criticalMiB)
+		if strings.TrimSpace(get("MEMORY_CRITICAL_MIB")) == "" {
+			set = "MEMORY_CRITICAL_MIB (unset, default " + strconv.Itoa(criticalMiB) + ")"
+		}
+		warn = fmt.Sprintf("memory floor: %s is not below MEMORY_FLOOR_MIB=%d: the critical level is off; set it below the floor to turn it on, or to 0 to silence this", set, floorMiB)
+		criticalMiB = 0
+	}
+	return floorMiB, criticalMiB, warn, nil
+}
+
 // parseGuestDNS validates SPOOND_GUEST_DNS_ADDR: a comma-separated list
 // of bare IP addresses. An empty value means "no resolver allowance"
 // (allowed); a non-empty value that yields no address (separators or
@@ -729,17 +773,14 @@ func Main(args []string) int {
 		}
 		memoryOvercommit = f
 	}
-	// MEMORY_FLOOR_MIB (spoond-l3lq): the free hugepage memory the
-	// backend keeps on the box; below it the low-memory loop (every
-	// second) pauses one lease through the ordinary take-back rules. 0
-	// disables.
-	memoryFloorMiB := api.DefaultMemoryFloorMiB // 2048
-	if v := os.Getenv("MEMORY_FLOOR_MIB"); v != "" {
-		n, err := strconv.Atoi(strings.TrimSpace(v))
-		if err != nil || n < 0 {
-			log.Fatalf("MEMORY_FLOOR_MIB=%q: want a whole number of MiB (0 disables the floor)", v)
-		}
-		memoryFloorMiB = n
+	// MEMORY_FLOOR_MIB and MEMORY_CRITICAL_MIB: the low-memory floor and
+	// the critical level under it (memoryFloorConfig).
+	memoryFloorMiB, memoryCriticalMiB, floorWarn, err := memoryFloorConfig(os.Getenv)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if floorWarn != "" {
+		log.Print(floorWarn)
 	}
 	// GIVE_BACK and GIVE_BACK_MARGIN_MIB (spoond-aeo6): spoond resumes the
 	// leases its own take-back paused once the lease's memory plus the
@@ -847,6 +888,7 @@ func Main(args []string) int {
 		PausedReleaseDays:         pausedReleaseDays,
 		MemoryOvercommit:          memoryOvercommit,
 		MemoryFloorMiB:            memoryFloorMiB,
+		MemoryCriticalMiB:         memoryCriticalMiB,
 		GiveBackMarginMiB:         giveBackMarginMiB,
 		GiveBackOff:               giveBackOff,
 		PinnedIdleNoticeDays:      pinnedIdleNoticeDays,

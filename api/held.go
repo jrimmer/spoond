@@ -19,7 +19,8 @@ import (
 //
 //   - A pinned lease is never deleted by spoond before its own expiry,
 //     and only the low-memory floor ever pauses one: as its last resort,
-//     when no unpinned lease is left to take, logged and alerted. An
+//     below MEMORY_CRITICAL_MIB when no unpinned lease of any owner is
+//     left to take, logged and alerted. An
 //     exec sent with "pin": true pins its lease the same way for as
 //     long as it runs. A pin protects only a **running** VM: once a lease is
 //     paused (the owner's own POST /pause, or a failed drain resume),

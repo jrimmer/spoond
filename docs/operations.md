@@ -1058,25 +1058,43 @@ The check runs at every distance from the floor (spoond-154): running
 VMs fault memory back in at any moment, and free hugepages fell from
 8.4 GiB to 0.1 GiB in under 15 s in production, faster than any
 standing interval. Default `2048` (MiB); `0` disables the check. The
-victim is the lease
-pressureVictim picks: the owner with the highest used/slice among the
-owners over their slice, and inside that owner the least recently used
-unpinned lease that is not busy (an in-flight operation or a running
-job) — so a single-lease owner over
-their slice IS a candidate, owners inside their slice are never
-touched, and an all-pinned top owner is passed over for the next owner
-down. Pinned leases (pinned by their owner, or with an exec sent with
-`"pin": true` in flight) are reaped last: only when no over-slice owner
-has an unpinned candidate left does the floor take a pinned one, by the
-same ranking and least recently used first, never a busy one. That
-pause is logged as `memory floor: … took back PINNED lease …` (the
-take-back's start line says `PINNED (last resort …)` too), a pin landing
-mid-pause does not undo it, and it raises a critical `memory_floor`
-alert naming the lease and its owner ("spoond memory floor took pinned
-lease …"). The `lease.memory_floor` event fires on every pinned take;
-the notification, like every notification, is deduped per key, so it
-goes out at most once an hour per lease. A lease still marked `Drained` (an undrain
-pending on it) is never picked either, but unlike `draining` it does
+floor works at two levels (owner decision 2026-10-25). **At the floor**
+the victim is the lease pressureVictim picks: the owner with the
+highest used/slice among the owners over their slice, and inside that
+owner the least recently used unpinned lease that is not busy (an
+in-flight operation or a running job) — so a single-lease owner over
+their slice IS a candidate, an all-pinned top owner is passed over for
+the next owner down, and owners inside their slice and pinned leases
+are never touched at this level. **Below the critical level**
+(`MEMORY_CRITICAL_MIB`, default `2048` MiB free; `0` turns the level
+off) the floor may take from any owner, in this order: unpinned leases
+of the owners over their slice (as above), then unpinned leases of the
+owners inside their slice (the highest used/slice first; owners with no
+slice after them, the most memory used first; least recently used
+inside each owner), and only then pinned leases (pinned by their
+owner, or with an exec sent with `"pin": true` in flight), by the same
+owner ranking over every owner, over-slice owners first, least recently
+used first. Busy and `Drained` leases are never taken at either level.
+`MEMORY_CRITICAL_MIB` must be below `MEMORY_FLOOR_MIB`: a value at or
+over the floor turns the critical level off, and the backend says so at
+startup (`memory floor: MEMORY_CRITICAL_MIB=… is not below
+MEMORY_FLOOR_MIB=…: the critical level is off`). With both left at
+their defaults (2048 and 2048) that is the case, so set the critical
+level below the floor to use it (sb runs a 10240 MiB floor, so the
+2048 default applies there). Every take below the critical level is
+logged as `memory floor: CRITICAL: <free> MiB free (critical <c> MiB,
+floor <f> MiB): took back lease <id> (…, owner <owner>, ratio <r>,
+inside its slice|over its slice, unpinned|PINNED)` (the take-back's
+start line still says `take back: pausing lease …`, marked `PINNED
+(last resort …)` for a pinned one), and raises a critical
+`memory_floor` alert naming the lease and its owner ("spoond memory
+critical: took back lease …"). A pin landing mid-pause does not undo a
+pinned take; it does undo the pause of a lease that was unpinned when
+it was picked. The `lease.memory_floor` event fires on every critical
+take; the notification, like every notification, is deduped per key,
+so it goes out at most once an hour per lease. A lease still marked
+`Drained` (an undrain pending on it) is never picked, but unlike
+`draining` it does
 not skip the tick: the floor keeps taking back around it, since a
 lease stuck `Drained` would otherwise switch the floor off for good.
 The lease resumes on its holder's next work
@@ -1087,11 +1105,15 @@ once. The tick stands down while the node is draining and on bad node
 readings (a status other than `healthy`, or no pages reported) and —
 for the pause itself — the loop's context is abandoned: a shutdown
 cannot cut a snapshot write in half. A floor nothing can be taken back
-for (every candidate, pinned ones included, `Drained` or busy, or no
-owner over their slice) raises the
-`memory_floor` alert (a `lease.memory_floor` event, notifications
+for raises the `memory_floor` alert (a `lease.memory_floor` event, notifications
 critical, "spoond memory below floor") at most once per 10 minutes
-instead of every tick.
+instead of every tick: at the floor that means every unpinned lease of
+an over-slice owner is `Drained` or busy, or no owner is over their
+slice — a box where every owner is inside their slice sits under the
+floor, paused nothing, until free memory falls below the critical
+level; below the critical
+level it means every lease of every owner, pinned ones included, is
+`Drained` or busy.
 `spoond_memory_committed_mib` shows the memory promised to live leases
 as the loop last measured it (every tick, with the floor off too) and
 `spoond_memory_pressure_takebacks_total` counts its pauses.
@@ -1357,7 +1379,8 @@ anything: there is no auto idle pause and no different clocks. **One
 behavior.** Protection from automatic pauses is opt-in by pin, and
 pinned leases are **reaped last**, not never (owner, 2026-10-25: "Spoond
 still needs to protect itself"): only the low-memory floor ever pauses
-a pinned lease, and only when no unpinned lease is left to take.
+a pinned lease, and only below its critical level
+(`MEMORY_CRITICAL_MIB`), after every unpinned lease of every owner.
 Fairness take-back and the idle logic never do.
 
 **The lease lifecycle is:**
@@ -1384,9 +1407,10 @@ LLM gateway, a network change, a prompt, or an explicit `POST /resume`).
   /api/leases/{id}/pin`) means spoond **never deletes the lease before
   its own expiry, and pauses it only as the low-memory floor's last
   resort**: take-back for a request and the idle logic never touch it,
-  and the floor takes one only when no unpinned lease is left (the pause
-  is logged as `took back PINNED lease` and raises a critical
-  `memory_floor` alert naming it). An exec sent with `"pin": true`
+  and the floor takes one only below `MEMORY_CRITICAL_MIB` free, once
+  no unpinned lease of any owner (inside their slice or over it) is
+  left (the pause is logged as `memory floor: CRITICAL: … PINNED` and
+  raises a critical `memory_floor` alert naming it). An exec sent with `"pin": true`
   pins its lease the same way while it runs and not a moment longer,
   without touching the lease's own `pinned`. A plain exec protects
   nothing: a take-back pause cuts the command (`409` `lease_busy`). A
@@ -1417,10 +1441,13 @@ guest activity) is older than `PINNED_IDLE_NOTICE_DAYS` (default `7`)
 unpinned can be taken for a request, the request answers `429` with
 code `box_full` and an alert (`lease.box_full`, critical). Nothing is
 paused or released by a refused request. The low-memory floor is the
-one exception to pins: it takes pinned leases last, each one raising a
-critical `lease.memory_floor` event naming the lease; a floor breach
-with nothing at all left to take (every candidate busy or `Drained`)
-raises the same kind without a lease, at most once per 10 min (see
+one exception to pins: below its critical level it takes pinned
+leases last, after every unpinned lease of every owner, each one
+raising a critical `lease.memory_floor` event naming the lease; a floor
+breach with nothing left to take (at the floor: no unpinned lease of an
+over-slice owner; below the critical level: every lease busy or
+`Drained`) raises the same kind without a lease, at most once per 10
+min (see
 [Low-memory floor](#low-memory-floor-memory_floor_mib-spoond-l3lq)).
 
 | Variable | Default | Meaning |

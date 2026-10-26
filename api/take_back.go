@@ -17,7 +17,7 @@ type takeBackLease struct {
 	ID         string
 	Name       string // the lease's tag, echoed in the box_full own_leases body
 	MemoryMiB  int
-	Pinned     bool      // pinned or exec-pinned (pinnedLocked): fairness never takes it, the floor only last
+	Pinned     bool      // pinned or exec-pinned (pinnedLocked): fairness never takes it, the floor only below critical, last
 	OwnPin     bool      // the owner's own pin (Lease.Pinned), for the box_full own_leases row
 	ExecPinned bool      // an exec sent with "pin": true is in flight on it
 	Busy       bool      // a running job (or in-flight operation); taken last
@@ -35,13 +35,16 @@ type takeBackOwner struct {
 
 // takeBackVictim is one lease chosen to be paused. Ratio is the owner's
 // used/slice at the moment of the pick, before the lease was given up.
-// Pinned is set only by pressureVictim's last-resort pass: the lease is
-// pinned and the floor takes it anyway.
+// Pinned and InsideSlice are set only by pressureVictim's critical
+// level: Pinned for its last pass (the lease is pinned and the floor
+// takes it anyway), InsideSlice when the owner was at or under their
+// slice (or had none).
 type takeBackVictim struct {
 	Owner, LeaseID string
 	Ratio          float64
 	MemoryMiB      int
 	Pinned         bool
+	InsideSlice    bool
 }
 
 func tbRatio(used, slice int) float64 {
@@ -52,50 +55,79 @@ func tbRatio(used, slice int) float64 {
 }
 
 // pressureVictim picks the one lease the low-memory loop pauses
-// (MEMORY_FLOOR_MIB, no requester in mind): the owner with the highest
-// used/slice ratio among owners over their slice (used > slice, slice >
-// 0 — a zero slice has no ratio and an owner at or under it is never
-// touched), and inside that owner the least recently used unpinned
-// lease that is not busy (tbPickLease over the non-busy leases). A
-// lease still marked Drained (an undrain pending on it) is never
-// picked: the undrain owns its resume, but the rest of the box stays
-// under the floor. A single-lease owner over its slice IS a candidate:
-// that lease is the one that goes. When the top owner has no unpinned
-// lease (every lease pinned), the next owner down the ranking is tried,
-// and so on. The requester argument of memVictims does not exist here
-// (the loop is nobody's fairness case), so unlike memVictims there is
-// no after-pick ratio floor: only the owners' own over-slice condition
-// decides.
+// (MEMORY_FLOOR_MIB, no requester in mind). Owners are ranked by
+// used/slice, highest first: the owners over their slice (used > slice,
+// slice > 0), then — at the critical level only — the owners inside it
+// by the same ratio, and last the owners with no slice (zero or
+// negative: no ratio), by memory used. Inside an owner the pick is the
+// least recently used lease that is not busy (tbPickLease over the
+// non-busy leases). A lease still marked Drained (an undrain pending on
+// it) is never picked: the undrain owns its resume, but the rest of the
+// box stays under the floor. A single-lease owner over its slice IS a
+// candidate: that lease is the one that goes. When the top owner has
+// nothing to give, the next owner down the ranking is tried, and so on.
+// The requester argument of memVictims does not exist here (the loop is
+// nobody's fairness case), so unlike memVictims there is no after-pick
+// ratio floor.
 //
-// Pins are reaped last, not never: spoond must still protect itself.
-// Only when no over-slice owner has an unpinned candidate does a second
-// pass walk the same ranking for a pinned one (explicitly or by an
-// in-flight pinned exec; non-busy, not Drained, least recently used
-// first), and the victim then carries Pinned so the caller can let
-// takeBackPause take it and say so loudly. ok is false when no owner is
-// over their slice or every lease of every over-slice owner is Drained
-// or busy — busy leases are left out (see below), pinned or not.
-func pressureVictim(owners []takeBackOwner) (takeBackVictim, bool) {
-	// Rank the over-slice owners by ratio, highest first (stable, so a
-	// tie keeps the view's owner order); then walk down the ranking and
-	// take the first owner that still has a lease worth pausing.
+// Two levels (owner decision 2026-10-25):
+//
+//   - At the floor (critical false): only unpinned leases of owners
+//     over their slice. Owners inside their slice and pinned leases are
+//     never touched.
+//   - Critical (free under MEMORY_CRITICAL_MIB): any owner, in three
+//     passes — (a) unpinned leases of over-slice owners, as above; (b)
+//     unpinned leases of the owners inside their slice (then the
+//     no-slice owners); (c) pinned leases (explicitly or by an in-flight
+//     pinned exec) over the whole ranking, over-slice owners first. A
+//     later pass runs only when the earlier ones found nothing anywhere.
+//
+// The victim carries InsideSlice (its owner was at or under their slice
+// at the pick) and Pinned (pass c), so the caller can let
+// takeBackPauseWith take a pinned lease and say loudly what it took. ok
+// is false when no lease the level allows is left: every one Drained or
+// busy — busy leases are left out (see below), pinned or not — or, at
+// the floor, no owner over their slice.
+func pressureVictim(owners []takeBackOwner, critical bool) (takeBackVictim, bool) {
+	// Rank by ratio, highest first (stable, so a tie keeps the view's
+	// owner order); the no-slice owners follow by memory used.
 	type cand struct {
 		idx   int
 		ratio float64
 	}
-	var ranked []cand
+	var over, inside, noSlice []cand
 	for i := range owners {
 		o := &owners[i]
-		if o.SliceMiB <= 0 || o.UsedMiB <= o.SliceMiB {
-			continue
+		r := tbRatio(o.UsedMiB, o.SliceMiB)
+		switch {
+		case o.SliceMiB <= 0:
+			noSlice = append(noSlice, cand{idx: i, ratio: r})
+		case o.UsedMiB > o.SliceMiB:
+			over = append(over, cand{idx: i, ratio: r})
+		default:
+			inside = append(inside, cand{idx: i, ratio: r})
 		}
-		ranked = append(ranked, cand{idx: i, ratio: tbRatio(o.UsedMiB, o.SliceMiB)})
 	}
-	sort.SliceStable(ranked, func(a, b int) bool { return ranked[a].ratio > ranked[b].ratio })
-	// pass 0 takes unpinned leases only; pass 1, reached only when pass
-	// 0 found nothing anywhere, lets pinned ones in.
-	for pass := 0; pass < 2; pass++ {
-		for _, c := range ranked {
+	byRatio := func(cs []cand) {
+		sort.SliceStable(cs, func(a, b int) bool { return cs[a].ratio > cs[b].ratio })
+	}
+	byRatio(over)
+	byRatio(inside)
+	sort.SliceStable(noSlice, func(a, b int) bool { return owners[noSlice[a].idx].UsedMiB > owners[noSlice[b].idx].UsedMiB })
+	rest := append(inside, noSlice...)
+
+	type pass struct {
+		ranked []cand
+		pinned bool // this pass takes pinned leases (and only then)
+		inside bool // the pass's owners are inside their slice
+	}
+	passes := []pass{{ranked: over}}
+	if critical {
+		all := append(append([]cand(nil), over...), rest...)
+		passes = append(passes, pass{ranked: rest, inside: true}, pass{ranked: all, pinned: true})
+	}
+	for _, p := range passes {
+		for _, c := range p.ranked {
 			o := &owners[c.idx]
 			// Busy leases are left out, not ranked last: takeBackPause
 			// refuses a busy lease, so offering one would stall every
@@ -106,7 +138,10 @@ func pressureVictim(owners []takeBackOwner) (takeBackVictim, bool) {
 				if l.Busy {
 					continue
 				}
-				if pass == 1 {
+				if p.pinned {
+					if !l.Pinned {
+						continue // the unpinned passes had it first
+					}
 					// tbPickLease skips pinned leases; hand it this
 					// pass's copy unpinned.
 					l.Pinned = false
@@ -115,10 +150,13 @@ func pressureVictim(owners []takeBackOwner) (takeBackVictim, bool) {
 			}
 			li := tbPickLease(idle)
 			if li < 0 {
-				continue // every lease of the owner is pinned, Drained or busy
+				continue // nothing of the owner this pass may take
 			}
 			l := idle[li]
-			return takeBackVictim{Owner: o.Owner, LeaseID: l.ID, Ratio: c.ratio, MemoryMiB: l.MemoryMiB, Pinned: pass == 1}, true
+			return takeBackVictim{
+				Owner: o.Owner, LeaseID: l.ID, Ratio: c.ratio, MemoryMiB: l.MemoryMiB,
+				Pinned: p.pinned, InsideSlice: o.SliceMiB <= 0 || o.UsedMiB <= o.SliceMiB,
+			}, true
 		}
 	}
 	return takeBackVictim{}, false
@@ -304,9 +342,9 @@ func (s *Service) takeBackPause(ctx context.Context, l *Lease, requester string,
 // takeBackPauseWith is takeBackPause with the floor's last-resort
 // policy: takePinned lets a pinned lease (explicitly or by an in-flight
 // pinned exec) be the victim, and the post-pause pin re-check then does
-// not un-do the pause — the floor took the lease because nothing
-// unpinned was left, and resuming it at once would put the box back
-// under the floor. Every other rule (busy, a running job, Drained in
+// not un-do the pause — the floor took the lease below the critical
+// level because no unpinned lease of any owner was left, and resuming
+// it at once would put the box back under the floor. Every other rule (busy, a running job, Drained in
 // the views, the requester's own lease) still holds. Only the
 // low-memory floor passes takePinned; fairness never does. pinned
 // reports whether the lease was pinned when the pause took it (the
@@ -328,7 +366,7 @@ func (s *Service) takeBackPauseWith(ctx context.Context, l *Lease, requester str
 	// leaves no success line, and without this one nothing would say
 	// why the lease's work was cut.
 	if pinned {
-		s.log.Printf("take back: pausing lease %s (owner %s, ratio %.2f) for %s; it is PINNED (last resort, no unpinned lease left)", l.ID, l.Owner, ratio, requester)
+		s.log.Printf("take back: pausing lease %s (owner %s, ratio %.2f) for %s; it is PINNED (last resort below the critical level, no unpinned lease left)", l.ID, l.Owner, ratio, requester)
 	} else {
 		s.log.Printf("take back: pausing lease %s (owner %s, ratio %.2f) for %s", l.ID, l.Owner, ratio, requester)
 	}

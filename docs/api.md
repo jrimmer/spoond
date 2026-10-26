@@ -217,7 +217,7 @@ Request:
 | `holder` | string | `""` | a plain label naming what holds the lease (a CI job, an orchestrator's flight, a person's scratch work), at most 128 printable characters. **No lifecycle effect since v3.0:** it never pins, never keeps the lease past its TTL and never protects it from take-back. Use `pinned` for that |
 | `holder_url` | string | `""` | link to the holder; empty or an absolute `http(s)` URL of at most 512 characters |
 | `comment` | string | `""` | the lease's free-text annotation set at create time rather than through the comment route after the answer (#132): the CI runner sends its job label `forgejo job <id> <job URL>`, so the lease and its `created` event name the job from the first moment. Same validity as the comment route (at most 512 bytes; no control characters — anything below `0x20`, a newline included, and `0x7F` is `400 comment must not contain control characters`; longer is `400`) |
-| `pinned` | bool | `false` | pin the new lease: spoond never deletes it before its own expiry, and pins are reaped last: take-back for a request and the idle sweep never pause it, only the low-memory floor does, when no unpinned lease is left (logged and alerted). The TTL still applies; a pinned persistent lease stays until the owner releases it. `holder`/`holder_url` never pin. See [Pins and the paused-release clock](#pins-and-the-paused-release-clock) |
+| `pinned` | bool | `false` | pin the new lease: spoond never deletes it before its own expiry, and pins are reaped last: take-back for a request and the idle sweep never pause it, only the low-memory floor does, below `MEMORY_CRITICAL_MIB` free and once no unpinned lease of any owner is left (logged and alerted). The TTL still applies; a pinned persistent lease stays until the owner releases it. `holder`/`holder_url` never pin. See [Pins and the paused-release clock](#pins-and-the-paused-release-clock) |
 | `checkpoint_interval` | int | host default | the lease's own periodic checkpoint interval in seconds: `0` = never checkpointed by the loop; `60`–`604800` = seconds between periodic checkpoints. Omitted = the host default (`CHECKPOINT_INTERVAL_MINS`, itself `0` = never — see [Checkpoints](#checkpoints)). Anything else is `400` |
 | `idle_suspend` | int | host default | the lease's own idle reclamation threshold in seconds: `0` = never; `60`–`604800` = suspend the lease after that long without activity (exec, stream, proxy, keepalive, guest heartbeat, files, guest port dial), resuming it on the next call. Omitted = the host default (`IDLE_SUSPEND_DEFAULT_SECS`, itself `0` = never — see [Idle reclamation](#idle-reclamation)). Anything else is `400`, and a non-zero value needs a persistent lease (`400`) — a non-persistent lease has nothing to suspend into |
 | `wait` | int | `0` | seconds a create refused for a **waitable** reason may wait for room instead of failing (see [Queued admission](#queued-admission)). `0` keeps the immediate refusal; above `0` it is capped at `MAX_ADMIT_WAIT_SECS` (`0` disables waiting, the field is accepted and ignored); negative is `400` |
@@ -342,11 +342,15 @@ at a time.
 
 Pins are reaped last, not never: the low-memory floor
 (`MEMORY_FLOOR_MIB`, spoond protecting the host rather than evening out
-owners) takes the same victims first, and only when no unpinned lease is
-left to take does it pause a pinned one (by the same owner ranking,
-least recently used first; never a busy or `Drained` one). That pause
-is logged as `memory floor: … took back PINNED lease …` and raises a
-critical `memory_floor` event naming the lease (see
+owners) takes the same kind of victim at the floor (an unpinned lease of
+an owner over their slice, never anyone else's). Only below its
+critical level (`MEMORY_CRITICAL_MIB`) does it take from owners inside
+their slice too, and only once no unpinned lease of any owner is left
+does it pause a pinned one (by the same owner ranking, least recently
+used first; never a busy or `Drained` one). Every take below the
+critical level is logged as `memory floor: CRITICAL: …`, saying whether
+the owner was inside their slice and whether the lease was pinned, and
+raises a critical `memory_floor` event naming the lease (see
 [operations.md](operations.md#low-memory-floor-memory_floor_mib-spoond-l3lq)).
 
 A taken-back lease is suspended with reason `take_back`. It stays
@@ -1881,7 +1885,8 @@ state cell carries the ◆ pin mark), and a lease with a holder that has its own
 Owner or admin; anyone else gets `404`. A **pinned** lease is never
 deleted by spoond before its own expiry, and pins are reaped last:
 take-back for a request (memory or disk) and the idle sweep skip it,
-the low-memory floor pauses it only when no unpinned lease is left
+the low-memory floor pauses it only below `MEMORY_CRITICAL_MIB` free,
+once no unpinned lease of any owner is left
 (see [Memory take-back](#memory-take-back)), and only its own TTL or
 the owner's `DELETE` releases it. A pinned **persistent** lease (no TTL) stays until the owner
 releases it. There is no limit on how many leases an owner pins.
@@ -2019,7 +2024,7 @@ every 15 s thereafter, so proxies do not close an idle stream.
 | `paused_expiring` | a paused lease is 24 h from release by the one clock (FS5) | the pause date and the release time |
 | `pinned_idle` | a pinned lease's last API activity crossed `PINNED_IDLE_NOTICE_DAYS` (visibility only) | the idle-since time, or `activity; pinned-idle notice cleared` |
 | `box_full` | a request needed room and take-back could free none for it (FS5, FS2b); carries lease id `-` and the refused requester as `owner`, so it reaches the requester's own stream | the request's memory and owner |
-| `memory_floor` | free hugepages sit under `MEMORY_FLOOR_MIB` and nothing can be taken back (no lease id, no owner; at most once per 10 min), or the floor took a pinned lease as its last resort (that lease's id and owner; one per take) | the shortfall; or `took back PINNED lease <id> (…)` with the lease's memory, owner ratio and the free and floor MiB |
+| `memory_floor` | free hugepages sit under `MEMORY_FLOOR_MIB` and nothing can be taken back (no lease id, no owner; at most once per 10 min), or the floor took a lease below `MEMORY_CRITICAL_MIB` (that lease's id and owner; one per take) | the shortfall; or `CRITICAL: took back lease <id> (…)` with the lease's memory, owner ratio, `inside its slice` or `over its slice`, `unpinned` or `PINNED`, and the free, critical and floor MiB |
 | `admin_unpin` | `POST /api/admin/unpin-by-holder` unpinned leases by holder prefix; carries lease id `-` | the count and prefix |
 | `job_started` | a background exec job started (2.6, #135) | the command, cut to 120 chars |
 | `job_exited` | a background exec job ended (2.6, #135) | `exit <code>` and the last 10 stderr lines (at most 1 KiB); for a job killed by the max runtime, `timed out: exit 124` and the stderr excerpt (spoond-wb5) |

@@ -178,14 +178,16 @@ const (
 	LeaseSweep LeaseEventType = "sweep"
 	// LeaseMemoryFloor marks the low-memory loop's floor breach with
 	// nothing left to take back (MEMORY_FLOOR_MIB, spoond-l3lq): free
-	// hugepages sit under the floor and every candidate is busy or
-	// Drained, or no owner is over their slice. Its own kind, not
-	// box_full: a floor breach names no refused requester (box_full
-	// names one). Spoond's own condition, not a lease's: no lease id, no
-	// owner; the detail carries the shortfall. At most once per 10 min
-	// per breach. The same kind WITH a lease id and owner says the floor
-	// took that pinned lease as its last resort (no unpinned lease was
-	// left); one per such take.
+	// hugepages sit under the floor and every candidate the level allows
+	// is busy or Drained, or (at the floor) no owner is over their slice.
+	// Its own kind, not box_full: a floor breach names no refused
+	// requester (box_full names one). Spoond's own condition, not a
+	// lease's: no lease id, no owner; the detail carries the shortfall.
+	// At most once per 10 min per breach. The same kind WITH a lease id
+	// and owner says the floor took that lease below the critical level
+	// (MEMORY_CRITICAL_MIB): the detail starts "CRITICAL:" and says
+	// whether the owner was inside its slice and whether the lease was
+	// pinned; one per such take.
 	LeaseMemoryFloor LeaseEventType = "memory_floor"
 )
 

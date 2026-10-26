@@ -151,6 +151,7 @@ var Known = []string{
 	"MAX_NAMED_SNAPSHOTS",
 	"MAX_RUNNING_JOBS_PER_LEASE",
 	"MAX_TTL_SECS",
+	"MEMORY_CRITICAL_MIB",
 	"MEMORY_FLOOR_MIB",
 	"MEMORY_OVERCOMMIT",
 	"METRICS_LISTEN",
@@ -498,6 +499,10 @@ var Specs = []Spec{
 	{"MAX_NAMED_SNAPSHOTS", TypeInt, Backend, false},
 	{"MAX_RUNNING_JOBS_PER_LEASE", TypeInt, Backend, false},
 	{"MAX_TTL_SECS", TypeInt, Backend, false},
+	// A whole number of MiB, 0 = the critical level is off; one not
+	// below MEMORY_FLOOR_MIB turns it off with a startup warning
+	// (refused at startup when not a whole number or negative).
+	{"MEMORY_CRITICAL_MIB", TypeInt, Backend, false},
 	// A whole number of MiB, 0 = the floor is off (refused at startup
 	// when not a whole number or negative).
 	{"MEMORY_FLOOR_MIB", TypeInt, Backend, false},

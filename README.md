@@ -130,8 +130,8 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
     `PUT/DELETE /api/leases/{id}/pin`) is never deleted by spoond before
     its own expiry, and pins are reaped last: take-back for a request
     and the idle sweep touch only unpinned leases, and the low-memory
-    floor pauses a pinned one only when nothing unpinned is left
-    (logged and alerted). An exec sent with `"pin": true` pins its lease
+    floor pauses a pinned one only below its critical level, when
+    nothing unpinned is left (logged and alerted). An exec sent with `"pin": true` pins its lease
     just while it runs. Every paused lease is released 30 days after its
     pause date by one clock. See
     [operations.md](docs/operations.md#pins-and-the-paused-release-clock).
@@ -437,7 +437,7 @@ The settings you are most likely to change:
 |---|---|
 | Hosts and addresses | `SPOOND_GUEST_DNS_ADDR` (guest resolvers, comma-separated), `SPOOND_PROXY_HOST_SUFFIX`, `NODE_ID`, `HOST_GUEST_SERVICE_ADDR` (where guests reach host services), `HOST_API_PORT` (the lease API port `lan` and `internet` guests may reach) |
 | Integrations | `METRICS_TOKEN`, `LLM_UPSTREAM_URL`, `NOTIFY_WEBHOOKS` |
-| Memory | `MEMORY_OVERCOMMIT` (1.25 × the hugepage pool), `MEMORY_FLOOR_MIB` (2048), `GIVE_BACK` (on), `GIVE_BACK_MARGIN_MIB` (1024) |
+| Memory | `MEMORY_OVERCOMMIT` (1.25 × the hugepage pool), `MEMORY_FLOOR_MIB` (2048), `MEMORY_CRITICAL_MIB` (2048; off unless below the floor), `GIVE_BACK` (on), `GIVE_BACK_MARGIN_MIB` (1024) |
 | Disk and state | `SPOOND_DB_PATH`, `DISK_RESERVE_PCT` (5, the share of snapshot disk kept free) |
 | Lease sizes | `SIZE_PRESETS` (`small=1:2048,medium=2:4096,large=4:8192,xlarge=8:16384`), `MAX_LEASE_VCPU` (the host's cores), `MAX_LEASE_MEMORY_MB` (32768) |
 | Waiting and idling | `MAX_ADMIT_WAIT_SECS`, `IDLE_SUSPEND_DEFAULT_SECS`, `SATURATION_IO_FULL_PCT` (20), `SATURATION_CPU_SOME_PCT` (75) |

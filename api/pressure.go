@@ -13,8 +13,9 @@ import (
 // counterpart: every second the backend reads the node's free hugepages
 // fresh and, when they sit under the floor, takes back exactly one
 // lease (pressureVictim: the least recently used unpinned, non-busy
-// lease of the owner furthest over their fair slice; a pinned one only
-// when no unpinned candidate is left anywhere). One
+// lease of the owner furthest over their fair slice; below
+// MEMORY_CRITICAL_MIB any owner's, and a pinned one only when no
+// unpinned lease of any owner is left). One
 // lease per tick: the pause's snapshot write is what frees the pages,
 // so the next tick — not this one — judges the result, and a floor
 // breach sheds load a lease at a time instead of pausing a stack at
@@ -38,16 +39,28 @@ import (
 // picked, so a lease stuck Drained cannot switch the floor off for
 // good — the loop keeps taking back around it.
 //
-// Pins are reaped last, not never (owner: "Spoond still needs to
-// protect itself"): fairness take-back and the idle sweep never pause a
-// pinned lease, but the floor takes one when nothing unpinned is left,
-// logs it as PINNED and raises a critical memory_floor alert naming the
-// lease.
+// Two levels (owner decision 2026-10-25). At the floor only owners over
+// their slice give up a lease, and only an unpinned one: an owner inside
+// their slice is never touched there, so a box where everyone is inside
+// their slice and memory still runs short sits under the floor with the
+// alert raised. Below MEMORY_CRITICAL_MIB (critical) the floor may take
+// from any owner: over-slice owners' unpinned leases first, then the
+// unpinned leases of owners inside their slice (highest used/slice
+// first), and pinned leases last of all. Pins are reaped last, not never (owner: "Spoond
+// still needs to protect itself"): fairness take-back and the idle
+// sweep never pause a pinned lease. Every critical take is logged as
+// CRITICAL (PINNED when the pause took a pinned lease) and raises a
+// critical memory_floor alert naming the lease.
 
 const (
 	// DefaultMemoryFloorMiB is MEMORY_FLOOR_MIB when unset: keep 2 GiB
 	// of hugepage memory free.
 	DefaultMemoryFloorMiB = 2048
+	// DefaultMemoryCriticalMiB is MEMORY_CRITICAL_MIB when unset: below
+	// 2 GiB free the floor may take from any owner, pinned leases last.
+	// It must sit under the floor to mean anything (a value at or over
+	// it turns the critical level off).
+	DefaultMemoryCriticalMiB = 2048
 	// pressureInterval is how often the loop checks the floor: every
 	// second, at every distance from the floor (spoond-154) — running VMs
 	// fault memory in at any moment, and the check must keep up.
@@ -114,8 +127,8 @@ func (s *Service) committedMiB() int {
 // floor is off, or the drain is in charge of the leases. A lease still
 // marked Drained is NOT a tick skip (a lease stuck Drained would
 // switch the floor off for good): pressureVictim just never picks it,
-// the way it never picks a pinned lease, and the floor keeps taking
-// back from the rest of the box.
+// at any level, and the floor keeps taking back from the rest of the
+// box.
 func (s *Service) pressureSkip(floor int) bool {
 	if floor == 0 {
 		return true // the floor is off (the gauge has already moved)
@@ -129,11 +142,11 @@ func (s *Service) pressureSkip(floor int) bool {
 // is nobody's lease, so shedding it pauses no work, and its whole
 // memory comes back at once), then one lease — pressureVictim's pick:
 // the least recently used unpinned, non-busy lease of the owner
-// furthest over their fair slice, or, when no unpinned candidate is
-// left anywhere, a pinned one (the last resort, logged and alerted).
-// Leases still marked Drained are never taken (an undrain owns their
-// resume), so a lease stuck Drained cannot switch the floor off for
-// good.
+// furthest over their fair slice, or, below the critical level
+// (pressureCritical), any owner's, pinned ones last (logged and
+// alerted as CRITICAL). Leases still marked Drained are never taken (an
+// undrain owns their resume), so a lease stuck Drained cannot switch
+// the floor off for good.
 func (s *Service) pressureCheck(ctx context.Context) bool {
 	// What the box has promised to live VMs, for the gauge. The store
 	// read needs no node round trip, so the gauge moves every tick —
@@ -208,18 +221,21 @@ func (s *Service) pressureCheck(ctx context.Context) bool {
 		return false
 	}
 
+	critical := s.pressureCritical(free, floor)
 	owners := s.takeBackOwners(ctx)
-	v, ok := pressureVictim(owners)
+	v, ok := pressureVictim(owners, critical)
 	if !ok {
-		// Nothing can be taken back (every candidate busy or Drained, or
-		// no owner over their slice): say so, but at most once per 10 min — a
-		// standing condition must not flood the event stream. The alert
-		// is its own event kind so a floor breach is not misread as an
-		// admission's box_full refusal (which names a requester).
+		// Nothing can be taken back (at the floor: every unpinned lease of
+		// an over-slice owner busy or Drained, or no owner over their
+		// slice; critical: every lease busy or Drained): say so, but at
+		// most once per 10 min — a standing condition must not flood the
+		// event stream. The alert is its own event kind so a floor breach
+		// is not misread as an admission's box_full refusal (which names
+		// a requester).
 		now := s.now()
 		if s.pressureAlertAt.IsZero() || now.Sub(s.pressureAlertAt) >= pressureAlertEvery {
 			s.pressureAlertAt = now
-			s.pressureFloorAlert(short)
+			s.pressureFloorAlert(short, critical)
 		}
 		return false
 	}
@@ -233,8 +249,8 @@ func (s *Service) pressureCheck(ctx context.Context) bool {
 	// pause with a timeout instead (a snapshot write is bounded work).
 	pauseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), pressurePauseTimeout)
 	defer cancel()
-	// A pinned victim is the last resort: only pressureVictim's second
-	// pass hands one out, and only then may the pause take it.
+	// A pinned victim is the last resort: only pressureVictim's last
+	// critical pass hands one out, and only then may the pause take it.
 	pinned, err := s.takeBackPauseWith(pauseCtx, l, pressureRequester, v.Ratio, v.Pinned)
 	if err != nil {
 		if !errors.Is(err, errLeaseBusy) && !errors.Is(err, errLeaseReleased) {
@@ -247,13 +263,14 @@ func (s *Service) pressureCheck(ctx context.Context) bool {
 	if s.metrics != nil {
 		s.metrics.MemoryPressureTakebacksTotal.Inc()
 	}
-	// Whether the lease was pinned when the pause took it, not which
-	// pass picked it: a pin can come or go in between, and the start
-	// line already logged the pause's own reading.
-	if pinned {
-		s.log.Printf("memory floor: %d MiB free of a %d MiB floor: took back PINNED lease %s (%d MiB, owner %s, ratio %.2f): no unpinned lease was left to take",
-			free, floor, v.LeaseID, v.MemoryMiB, v.Owner, v.Ratio)
-		s.pressurePinnedAlert(v, free, floor)
+	if critical {
+		// Whether the lease was pinned when the pause took it, not which
+		// pass picked it: a pin can come or go in between, and the start
+		// line already logged the pause's own reading.
+		desc := pressureCriticalDesc(v, pinned)
+		s.log.Printf("memory floor: CRITICAL: %d MiB free (critical %d MiB, floor %d MiB): took back lease %s (%d MiB, owner %s, ratio %.2f, %s)",
+			free, s.cfg.MemoryCriticalMiB, floor, v.LeaseID, v.MemoryMiB, v.Owner, v.Ratio, desc)
+		s.pressureCriticalAlert(v, desc, free)
 		return true
 	}
 	s.log.Printf("memory floor: %d MiB free of a %d MiB floor: took back lease %s (%d MiB, owner ratio %.2f)",
@@ -313,29 +330,62 @@ func (s *Service) dropOnePoolSandbox(ctx context.Context) (freedMiB int, ok bool
 	return freedMiB, true
 }
 
-// pressureFloorAlert raises the low-memory loop's alert when nothing
-// can be taken back for the floor: short MiB of hugepages are missing
-// and every candidate, pinned ones included, is busy (an in-flight
-// operation or a running job) or Drained — or no owner is over their
-// slice. It is its own event kind, memory_floor — not box_full, which
-// names an admission's refused requester — and notifies like one (a
-// person must release leases to free room; nothing was paused).
-func (s *Service) pressureFloorAlert(short int) {
-	s.log.Printf("memory_floor: %d MiB below the floor; nothing can be taken back (every candidate busy or Drained, or no owner over their slice); nothing was paused or released", short)
-	s.emitLeaseEvent("", "", LeaseMemoryFloor,
-		fmt.Sprintf("%d MiB below the memory floor; nothing can be taken back: every candidate is busy or Drained, or no owner is over their slice", short))
+// pressureCritical reports whether a reading of free MiB is below the
+// critical level (MEMORY_CRITICAL_MIB), where the floor may take from
+// any owner, pinned leases last. The level is off at 0 and whenever it
+// is not below the floor: the backend turns such a setting off at
+// startup with a warning, and this re-check holds for a config set in
+// code too.
+func (s *Service) pressureCritical(free, floor int) bool {
+	c := s.cfg.MemoryCriticalMiB
+	return c > 0 && c < floor && free < c
 }
 
-// pressurePinnedAlert raises the critical memory_floor alert for a
-// pinned lease the floor took as its last resort: the same event kind
-// as pressureFloorAlert, but carrying the lease and its owner, so the
-// lease's own event stream shows why its pin did not hold and the
-// notification names it. The event is not rate limited (the floor
-// takes at most one lease per tick, and every pinned take is on the
-// record); the notifier's hourly per-key dedupe caps the notification
-// at one an hour per lease.
-func (s *Service) pressurePinnedAlert(v takeBackVictim, free, floor int) {
+// pressureCriticalDesc says what a critical take took: whether the
+// owner was inside or over their slice, and whether the pause took a
+// pinned lease (its own reading, not the pass that picked it).
+func pressureCriticalDesc(v takeBackVictim, pinned bool) string {
+	slice := "over its slice"
+	if v.InsideSlice {
+		slice = "inside its slice"
+	}
+	pin := "unpinned"
+	if pinned {
+		pin = "PINNED"
+	}
+	return slice + ", " + pin
+}
+
+// pressureFloorAlert raises the low-memory loop's alert when nothing
+// can be taken back for the floor: short MiB of hugepages are missing
+// and, at the floor, every unpinned lease of an over-slice owner is busy
+// (an in-flight operation or a running job) or Drained, or no owner is
+// over their slice (owners inside their slice and pinned leases wait
+// for the critical level); below the critical level every lease of
+// every owner, pinned ones included, is busy or Drained. It is its own
+// event kind, memory_floor — not box_full, which names an admission's
+// refused requester — and notifies like one (a person must release
+// leases to free room; nothing was paused).
+func (s *Service) pressureFloorAlert(short int, critical bool) {
+	why := "every unpinned lease of an owner over their slice is busy or Drained, or no owner is over their slice"
+	if critical {
+		why = "below the critical level and every lease, pinned ones included, is busy or Drained"
+	}
+	s.log.Printf("memory_floor: %d MiB below the floor; nothing can be taken back (%s); nothing was paused or released", short, why)
+	s.emitLeaseEvent("", "", LeaseMemoryFloor,
+		fmt.Sprintf("%d MiB below the memory floor; nothing can be taken back: %s", short, why))
+}
+
+// pressureCriticalAlert raises the critical memory_floor alert for a
+// lease the floor took below the critical level: the same event kind as
+// pressureFloorAlert, but carrying the lease and its owner, so the
+// lease's own event stream shows why it was taken (an owner inside
+// their slice, or a pin that did not hold) and the notification names
+// it. The event is not rate limited (the floor takes at most one lease
+// per tick, and every critical take is on the record); the notifier's
+// hourly per-key dedupe caps the notification at one an hour per lease.
+func (s *Service) pressureCriticalAlert(v takeBackVictim, desc string, free int) {
 	s.emitLeaseEvent(v.LeaseID, v.Owner, LeaseMemoryFloor,
-		fmt.Sprintf("took back PINNED lease %s (%d MiB, owner ratio %.2f): %d MiB free of a %d MiB memory floor and no unpinned lease left to take; it resumes on the holder's next work call",
-			v.LeaseID, v.MemoryMiB, v.Ratio, free, floor))
+		fmt.Sprintf("CRITICAL: took back lease %s (%d MiB, owner ratio %.2f, %s): %d MiB free, under the %d MiB critical level of a %d MiB memory floor; it resumes on the holder's next work call",
+			v.LeaseID, v.MemoryMiB, v.Ratio, desc, free, s.cfg.MemoryCriticalMiB, s.cfg.MemoryFloorMiB))
 }

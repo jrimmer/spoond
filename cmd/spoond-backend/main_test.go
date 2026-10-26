@@ -257,6 +257,51 @@ func TestSaturationConfig(t *testing.T) {
 	}
 }
 
+// TestMemoryFloorConfig: unset reads as the two defaults (a 2048 MiB
+// floor, so the 2048 MiB critical default is not below it and is turned
+// off with a warning naming it as the default); a critical level below
+// the floor is kept; 0 turns it off without a warning; one at or over
+// the floor is turned off with a warning naming the value; with the
+// floor off the critical level is off too; and anything not a whole
+// number of MiB fails startup naming the setting.
+func TestMemoryFloorConfig(t *testing.T) {
+	cfg := func(env map[string]string) (int, int, string, error) {
+		return memoryFloorConfig(func(k string) string { return env[k] })
+	}
+	floor, crit, warn, err := cfg(nil)
+	if err != nil || floor != api.DefaultMemoryFloorMiB || crit != 0 ||
+		!strings.Contains(warn, "MEMORY_CRITICAL_MIB (unset, default 2048) is not below MEMORY_FLOOR_MIB=2048") {
+		t.Fatalf("defaults = %d, %d, %q, %v; want the floor default and the critical level off with a warning", floor, crit, warn, err)
+	}
+	floor, crit, warn, err = cfg(map[string]string{"MEMORY_FLOOR_MIB": "10240"})
+	if err != nil || floor != 10240 || crit != api.DefaultMemoryCriticalMiB || warn != "" {
+		t.Fatalf("sb floor = %d, %d, %q, %v; want 10240 and the 2048 default", floor, crit, warn, err)
+	}
+	floor, crit, warn, err = cfg(map[string]string{"MEMORY_FLOOR_MIB": "10240", "MEMORY_CRITICAL_MIB": " 4096 "})
+	if err != nil || floor != 10240 || crit != 4096 || warn != "" {
+		t.Fatalf("set = %d, %d, %q, %v", floor, crit, warn, err)
+	}
+	floor, crit, warn, err = cfg(map[string]string{"MEMORY_FLOOR_MIB": "10240", "MEMORY_CRITICAL_MIB": "0"})
+	if err != nil || floor != 10240 || crit != 0 || warn != "" {
+		t.Fatalf("critical 0 = %d, %d, %q, %v; want the level off, no warning", floor, crit, warn, err)
+	}
+	for _, v := range []string{"10240", "12288"} {
+		floor, crit, warn, err = cfg(map[string]string{"MEMORY_FLOOR_MIB": "10240", "MEMORY_CRITICAL_MIB": v})
+		if err != nil || floor != 10240 || crit != 0 || !strings.Contains(warn, "MEMORY_CRITICAL_MIB="+v+" is not below MEMORY_FLOOR_MIB=10240: the critical level is off") {
+			t.Fatalf("critical %s = %d, %d, %q, %v; want the level off with a warning", v, floor, crit, warn, err)
+		}
+	}
+	floor, crit, warn, err = cfg(map[string]string{"MEMORY_FLOOR_MIB": "0", "MEMORY_CRITICAL_MIB": "4096"})
+	if err != nil || floor != 0 || crit != 0 || warn != "" {
+		t.Fatalf("floor off = %d, %d, %q, %v; want both off, no warning", floor, crit, warn, err)
+	}
+	for key, bad := range map[string]string{"MEMORY_FLOOR_MIB": "2g", "MEMORY_CRITICAL_MIB": "-1"} {
+		if _, _, _, err := cfg(map[string]string{key: bad}); err == nil || !strings.Contains(err.Error(), key) {
+			t.Errorf("%s=%q: err = %v, want a startup error naming it", key, bad, err)
+		}
+	}
+}
+
 // TestBackendValidateEntry (#137 C1) checks the backend's validation
 // entry as Main wires it: a bad int (MAX_TTL_SECS=2h, which every TTL
 // reader would silently fall back from) refuses startup, the fatal
