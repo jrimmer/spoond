@@ -18,6 +18,8 @@ type takeBackLease struct {
 	Name       string // the lease's tag, echoed in the box_full own_leases body
 	MemoryMiB  int
 	Pinned     bool      // pinned or exec-pinned (pinnedLocked): fairness never takes it, the floor only last
+	OwnPin     bool      // the owner's own pin (Lease.Pinned), for the box_full own_leases row
+	ExecPinned bool      // an exec sent with "pin": true is in flight on it
 	Busy       bool      // a running job (or in-flight operation); taken last
 	Drained    bool      // an undrain still owns its resume; taken never
 	LastActive time.Time // older means less recently used
@@ -295,7 +297,8 @@ func tbPickLease(ls []takeBackLease) int {
 // Admission take-back calls it this way and never takes a pinned lease;
 // the low-memory floor's last resort uses takeBackPauseWith instead.
 func (s *Service) takeBackPause(ctx context.Context, l *Lease, requester string, ratio float64) error {
-	return s.takeBackPauseWith(ctx, l, requester, ratio, false)
+	_, err := s.takeBackPauseWith(ctx, l, requester, ratio, false)
+	return err
 }
 
 // takeBackPauseWith is takeBackPause with the floor's last-resort
@@ -305,15 +308,18 @@ func (s *Service) takeBackPause(ctx context.Context, l *Lease, requester string,
 // unpinned was left, and resuming it at once would put the box back
 // under the floor. Every other rule (busy, a running job, Drained in
 // the views, the requester's own lease) still holds. Only the
-// low-memory floor passes takePinned; fairness never does.
-func (s *Service) takeBackPauseWith(ctx context.Context, l *Lease, requester string, ratio float64, takePinned bool) error {
+// low-memory floor passes takePinned; fairness never does. pinned
+// reports whether the lease was pinned when the pause took it (the
+// guard's own reading, the one the start line logs), so the caller's
+// own PINNED log and alert match it.
+func (s *Service) takeBackPauseWith(ctx context.Context, l *Lease, requester string, ratio float64, takePinned bool) (pinned bool, err error) {
 	s.store.mu.Lock()
 	if l.released || l.busy || l.Suspended || !l.live() || (l.pinnedLocked() && !takePinned) ||
 		s.hasRunningJobLocked(l.ID) || l.Owner == requester {
 		s.store.mu.Unlock()
-		return errLeaseBusy
+		return false, errLeaseBusy
 	}
-	pinned := l.pinnedLocked()
+	pinned = l.pinnedLocked()
 	l.busy = true
 	s.store.mu.Unlock()
 	defer s.endBusy(l)
@@ -329,7 +335,7 @@ func (s *Service) takeBackPauseWith(ctx context.Context, l *Lease, requester str
 
 	buildID, err := s.pauseLeaseBody(ctx, l, false, suspendPolicy{reason: suspendReasonTakeBack, takeBackRatio: ratio, takeBackFor: requester})
 	if err != nil {
-		return err
+		return pinned, err
 	}
 	s.noteTakeBack(requester == pressureRequester)
 
@@ -345,7 +351,7 @@ func (s *Service) takeBackPauseWith(ctx context.Context, l *Lease, requester str
 	s.store.mu.Lock()
 	if !l.Suspended || l.released {
 		s.store.mu.Unlock()
-		return errLeaseBusy
+		return pinned, errLeaseBusy
 	}
 	if (l.pinnedLocked() && !takePinned) || s.hasRunningJobLocked(l.ID) {
 		// The owner pinned the lease (or a pinned exec began, or a job
@@ -367,10 +373,10 @@ func (s *Service) takeBackPauseWith(ctx context.Context, l *Lease, requester str
 			// the lease stays pinned and suspended, and the caller's
 			// defer keeps clearing busy.
 			s.log.Printf("take back: lease %s pinned during its pause but not resumable: %v", l.ID, err)
-			return errLeaseBusy
+			return pinned, errLeaseBusy
 		}
 		s.log.Printf("take back: lease %s was pinned mid-pause; resumed at once, nothing taken", l.ID)
-		return errLeaseBusy
+		return pinned, errLeaseBusy
 	}
 	l.TakeBackAt = s.now()
 	l.TakeBackFor = requester
@@ -388,7 +394,7 @@ func (s *Service) takeBackPauseWith(ctx context.Context, l *Lease, requester str
 		fmt.Sprintf("for %s: owner %.2f over their slice; it resumes on the holder's next work call", requester, ratio))
 	// The pause already credited this lease's hugepages to the cached
 	// reading and woke the admission queue (pauseLeaseBody).
-	return nil
+	return pinned, nil
 }
 
 // unTakeBackResume brings a lease paused for take-back back at once,
@@ -481,6 +487,8 @@ func (s *Service) takeBackOwners(ctx context.Context) []takeBackOwner {
 			Name:       l.Name,
 			MemoryMiB:  l.MemoryMB,
 			Pinned:     l.pinnedLocked(),
+			OwnPin:     l.Pinned,
+			ExecPinned: l.execPins > 0,
 			Busy:       l.busy || s.hasRunningJobLocked(l.ID),
 			Drained:    l.Drained,
 			LastActive: l.LastActive,

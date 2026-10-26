@@ -223,8 +223,8 @@ func TestTakeBackOwnersViews(t *testing.T) {
 	for _, l := range av.Leases {
 		la[l.ID] = l
 	}
-	if !la[a1.ID].Pinned {
-		t.Fatal("a1 should carry Pinned")
+	if !la[a1.ID].Pinned || !la[a1.ID].OwnPin {
+		t.Fatal("a1 should carry Pinned and OwnPin")
 	}
 	if !la[a2.ID].Busy {
 		t.Fatal("a2 should be busy through its running job")
@@ -239,8 +239,8 @@ func TestTakeBackOwnersViews(t *testing.T) {
 	// An exec sent with "pin": true pins b1 for as long as it runs.
 	svc.incExecPin(b1.ID)
 	for _, v := range svc.takeBackOwners(ctx) {
-		if v.Owner == bob.ID && !v.Leases[0].Pinned {
-			t.Fatal("b1 view with a pinned exec in flight is not Pinned")
+		if v.Owner == bob.ID && (!v.Leases[0].Pinned || !v.Leases[0].ExecPinned || v.Leases[0].OwnPin) {
+			t.Fatalf("b1 view with a pinned exec in flight = %+v, want Pinned and ExecPinned, not OwnPin", v.Leases[0])
 		}
 	}
 	svc.decExecPin(b1.ID)
@@ -786,5 +786,59 @@ func TestTakeBackPauseExecPin(t *testing.T) {
 	}
 	if err := svc.takeBackPause(context.Background(), pinned, "req", 2.0); err != nil {
 		t.Fatalf("takeBackPause after the pinned exec returned: %v", err)
+	}
+}
+
+// TestExecPinCoversResumeAndErrors: an exec sent with "pin": true holds
+// its pin from before the resume-on-use of an idle-suspended lease (so
+// no take-back can pause the lease between the resume and the pin),
+// and an exec the substrate fails still releases it.
+func TestExecPinCoversResumeAndErrors(t *testing.T) {
+	ts, svc, _, sub := newTestServerWithService(t)
+	ctx := context.Background()
+	l, err := svc.grant(ctx, "consumer-a", "py-base", time.Hour, true, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	if _, err := svc.setIdlePolicy(l, 60); err != nil {
+		t.Fatalf("setIdlePolicy: %v", err)
+	}
+	if _, err := svc.pauseLease(ctx, l, false); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+	svc.store.mu.Lock()
+	l.LastAction, l.LastActionAt = idleSuspendRule+"/"+heldActionSuspendIdle, time.Now()
+	svc.saveLeaseLocked(l)
+	svc.store.mu.Unlock()
+
+	// The resume's substrate create runs on the exec's own goroutine,
+	// after the handler took the pin.
+	pinsAtResume := -1
+	sub.SetCreateFn(func(ctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error) {
+		pinsAtResume = l.execPins
+		return sub.Fake.Create(ctx, req)
+	})
+	t.Cleanup(func() { sub.SetCreateFn(nil) })
+	sub.execErr = func(sandboxID string, req substrate.ExecRequest) error {
+		if sandboxID == l.SandboxID && !isRootfsProbeReq(req) {
+			return errors.New("agent unreachable")
+		}
+		return nil
+	}
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+l.ID+"/exec", "token-a", map[string]any{"cmd": "make check", "pin": true})
+	if resp.StatusCode != 500 || body["code"] != "EIO" {
+		t.Fatalf("exec = %d %v, want 500 EIO from the failed substrate exec", resp.StatusCode, body)
+	}
+	if l.Suspended {
+		t.Fatal("the exec did not resume the lease")
+	}
+	if pinsAtResume != 1 {
+		t.Fatalf("execPins during the resume-on-use = %d, want 1 (the pin taken first)", pinsAtResume)
+	}
+	svc.store.mu.Lock()
+	n := l.execPins
+	svc.store.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("execPins = %d after the failed exec, want 0", n)
 	}
 }

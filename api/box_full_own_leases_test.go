@@ -173,12 +173,12 @@ func TestBoxFullOwnLeasesNoOtherOwners(t *testing.T) {
 	owners := []takeBackOwner{
 		{Owner: "req", UsedMiB: 4096, SliceMiB: 2048, Leases: []takeBackLease{
 			{ID: "r-new", Name: "fresh", MemoryMiB: 1024, LastActive: time.Unix(1_000_100, 0)},
-			{ID: "r-old", MemoryMiB: 3072, Pinned: true, LastActive: time.Unix(1_000_000, 0)},
+			{ID: "r-old", MemoryMiB: 3072, Pinned: true, OwnPin: true, LastActive: time.Unix(1_000_000, 0)},
 			{ID: "r-busy", MemoryMiB: 4096, Busy: true, LastActive: time.Unix(1_000_050, 0)},
 		}},
 		{Owner: "bob", UsedMiB: 2048, SliceMiB: 2048, Leases: []takeBackLease{
 			{ID: "b-1", MemoryMiB: 2048, LastActive: time.Unix(1_000_001, 0)},
-			{ID: "b-2", MemoryMiB: 2048, Pinned: true, LastActive: time.Unix(1_000_000, 0)},
+			{ID: "b-2", MemoryMiB: 2048, Pinned: true, OwnPin: true, LastActive: time.Unix(1_000_000, 0)},
 		}},
 	}
 	err := biggestBorrowerRefusal(owners, "req", 1024)
@@ -226,7 +226,7 @@ func TestOwnLeasesLRUOrder(t *testing.T) {
 	ls := []takeBackLease{
 		{ID: "z", MemoryMiB: 512, LastActive: time.Unix(500, 0)},
 		{ID: "a", MemoryMiB: 512, LastActive: time.Unix(500, 0)}, // ties z, ID wins
-		{ID: "m", MemoryMiB: 512, Pinned: true, LastActive: time.Unix(100, 0)},
+		{ID: "m", MemoryMiB: 512, Pinned: true, OwnPin: true, LastActive: time.Unix(100, 0)},
 		{ID: "q", MemoryMiB: 512, Busy: true, LastActive: time.Unix(900, 0)},
 	}
 	out := ownLeasesLRU(ls)
@@ -293,7 +293,7 @@ func TestBoxFullLeaselessErrorHasNoKey(t *testing.T) {
 func TestBoxFullOwnLeasesBodyShape(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC()
 	row := ownLeasesLRU([]takeBackLease{
-		{ID: "r1", Name: "tagged", MemoryMiB: 2048, Pinned: true, Busy: true, LastActive: now},
+		{ID: "r1", Name: "tagged", MemoryMiB: 2048, Pinned: true, OwnPin: true, Busy: true, LastActive: now},
 	})[0]
 	raw, err := json.Marshal(map[string]any{"own_leases": []BoxFullLease{row}})
 	if err != nil {
@@ -327,5 +327,15 @@ func TestBoxFullOwnLeasesBodyShape(t *testing.T) {
 	raw2, _ := json.Marshal(row2)
 	if strings.Contains(string(raw2), `"name"`) {
 		t.Fatalf("an untagged lease must omit name: %s", raw2)
+	}
+	if strings.Contains(string(raw2), `"exec_pinned"`) {
+		t.Fatalf("a lease with no pinned exec must omit exec_pinned: %s", raw2)
+	}
+	// A lease pinned only by an exec in flight: pinned stays the owner's
+	// own pin (false), exec_pinned says why take-back passes it over.
+	row3 := ownLeasesLRU([]takeBackLease{{ID: "r3", MemoryMiB: 1, Pinned: true, ExecPinned: true, LastActive: now}})[0]
+	raw3, _ := json.Marshal(row3)
+	if !strings.Contains(string(raw3), `"pinned":false`) || !strings.Contains(string(raw3), `"exec_pinned":true`) {
+		t.Fatalf("exec-pinned row = %s, want pinned false and exec_pinned true", raw3)
 	}
 }

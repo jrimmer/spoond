@@ -310,9 +310,9 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	// never pins. Owner or admin; the handler 404s for anyone else, like
 	// the other lease routes.
 	s.mux.HandleFunc("PUT /api/leases/{id}/holder", s.handleHolder)
-	// Pin (FS5): a pinned lease is never paused or deleted before its own
-	// expiry. PUT pins, DELETE unpins; owner or admin, 404 for anyone
-	// else.
+	// Pin (FS5): a pinned lease is never deleted before its own expiry
+	// and is paused only by the low-memory floor, as its last resort.
+	// PUT pins, DELETE unpins; owner or admin, 404 for anyone else.
 	s.mux.HandleFunc("PUT /api/leases/{id}/pin", s.handlePin)
 	s.mux.HandleFunc("DELETE /api/leases/{id}/pin", s.handleUnpin)
 	// Per-lease checkpoint interval (2.3, #122): owner or admin, 404 for
@@ -2421,6 +2421,21 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// The exec-scoped pin is taken before the resume-on-use below, so a
+	// take-back cannot pause the lease between that resume and the pin;
+	// it covers secret staging too. Only pin and background are read
+	// here: a body that does not decode is answered 400 by the full
+	// decode further down, and the defer releases this pin on that path
+	// like on every other. A background exec takes no pin (its running
+	// job protects the lease).
+	var pinPeek struct {
+		Pin        bool `json:"pin"`
+		Background bool `json:"background"`
+	}
+	if json.Unmarshal(body, &pinPeek) == nil && pinPeek.Pin && !pinPeek.Background {
+		s.svc.incExecPin(lease.ID)
+		defer s.svc.decExecPin(lease.ID)
+	}
 	s.svc.touch(id) // exec is activity for the idle sweeper
 	// A suspended workspace-backed lease has no running sandbox. One that
 	// idle_suspend suspended resumes first through the normal resume path
@@ -2464,8 +2479,9 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		// Pin makes the lease count as pinned, exactly like an explicit
 		// pin, for every automatic pause decision (take-back, the
 		// low-memory floor, idle suspend) while this synchronous exec is
-		// in flight; it ends when the exec returns. A background job is already protected while it runs,
-		// so pin adds nothing there.
+		// in flight; it ends when the exec returns. A background job is
+		// already protected while it runs, so pin adds nothing there.
+		// Read (and the pin taken) above, before the resume-on-use.
 		Pin bool `json:"pin"`
 	}
 	if err := json.NewDecoder(bytes.NewReader(body)).Decode(&req); err != nil {
@@ -2504,12 +2520,6 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	if req.Background {
 		s.handleBackgroundExec(w, r, lease, owner, req.Cmd, req.Cwd, req.Env, execSecrets, req.MaxRuntimeSecs, req.RetentionSecs, req.OutputMaxBytes)
 		return
-	}
-	// The exec-scoped pin covers secret staging too: a pause there would
-	// fail the staging or leave the command to start on a paused lease.
-	if req.Pin {
-		s.svc.incExecPin(lease.ID)
-		defer s.svc.decExecPin(lease.ID)
 	}
 	timeout := req.Timeout
 	if timeout <= 0 {

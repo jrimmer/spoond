@@ -4913,8 +4913,9 @@ func validateIdleSuspend(secs int64) error {
 // idle-suspended — there is no snapshot to resume from — so its
 // effective value is always 0 (never), whatever the host default is.
 //
-// A pinned lease is never paused by spoond (FS5, owner: "Pins don't
-// pause"), so its effective value is always 0 (never) too: a caller's
+// A pinned lease is never paused by spoond's idle logic (FS5; only the
+// low-memory floor takes one, as its last resort), so its effective
+// value is always 0 (never) too: a caller's
 // explicit POST /pause is the owner's own action and still works, but
 // the idle sweep skips a pinned lease whatever the host default or the
 // lease's own value says.

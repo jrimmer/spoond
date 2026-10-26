@@ -391,8 +391,11 @@ HTTP/1.1 429
 ```
 
 A row carries the lease `id`, its `name` tag (omitted when untagged),
-`memory_mb`, `last_active`, and whether it is `pinned` or `busy` with an
-in-flight operation or a running job. The rows are plain LRU, not the
+`memory_mb`, `last_active`, and whether it is `pinned` (the owner's own
+pin, as on the lease) or `busy` with an in-flight operation or a running
+job. A row also carries `exec_pinned: true` while an exec sent with
+`"pin": true` runs on the lease (omitted otherwise): take-back passes
+that lease over as pinned even though `pinned` is `false`. The rows are plain LRU, not the
 take-back selector's own ranking: the first row can be `pinned` or
 `busy`. Pausing a pinned lease is still safe (its hugepages are freed;
 but it will not resume while room is short). Pausing a lease mid-pause,

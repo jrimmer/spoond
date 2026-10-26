@@ -98,6 +98,9 @@ type testSub struct {
 	// serves. A test uses it to observe the guest's state at the first
 	// exec (the integrity probe) of a create (2.7, #83 A4/A7).
 	execBefore func(sandboxID string, req substrate.ExecRequest)
+	// execErr, when set, runs after execBefore; a non-nil error is
+	// returned as the Exec's own failure (a transport error).
+	execErr func(sandboxID string, req substrate.ExecRequest) error
 }
 
 // LastStart returns the most recent Start request.
@@ -205,6 +208,11 @@ func isRootfsProbeReq(req substrate.ExecRequest) bool {
 func (ts *testSub) Exec(ctx context.Context, sandboxID string, req substrate.ExecRequest) (substrate.ExecResult, error) {
 	if ts.execBefore != nil {
 		ts.execBefore(sandboxID, req)
+	}
+	if ts.execErr != nil {
+		if err := ts.execErr(sandboxID, req); err != nil {
+			return substrate.ExecResult{}, err
+		}
 	}
 	if isRootfsProbeReq(req) {
 		ts.rootfsProbeMu.Lock()

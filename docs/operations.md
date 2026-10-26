@@ -1073,7 +1073,9 @@ pause is logged as `memory floor: … took back PINNED lease …` (the
 take-back's start line says `PINNED (last resort …)` too), a pin landing
 mid-pause does not undo it, and it raises a critical `memory_floor`
 alert naming the lease and its owner ("spoond memory floor took pinned
-lease …"), every time. A lease still marked `Drained` (an undrain
+lease …"). The `lease.memory_floor` event fires on every pinned take;
+the notification, like every notification, is deduped per key, so it
+goes out at most once an hour per lease. A lease still marked `Drained` (an undrain
 pending on it) is never picked either, but unlike `draining` it does
 not skip the tick: the floor keeps taking back around it, since a
 lease stuck `Drained` would otherwise switch the floor off for good.

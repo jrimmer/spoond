@@ -252,8 +252,12 @@ type BoxFullLease struct {
 	Name       string    `json:"name,omitempty"`
 	MemoryMB   int       `json:"memory_mb"`
 	LastActive time.Time `json:"last_active"`
-	Pinned     bool      `json:"pinned"`
-	Busy       bool      `json:"busy"`
+	Pinned     bool      `json:"pinned"` // the owner's own pin, as on the lease
+	// ExecPinned is set while an exec sent with "pin": true runs on the
+	// lease: it counts as pinned for take-back then, without the owner's
+	// pin.
+	ExecPinned bool `json:"exec_pinned,omitempty"`
+	Busy       bool `json:"busy"`
 }
 
 // memBoxFullError is the memory box_full refusal for a requester that is
@@ -326,7 +330,7 @@ func ownLeasesLRU(ls []takeBackLease) []BoxFullLease {
 	})
 	out := make([]BoxFullLease, len(order))
 	for i, l := range order {
-		out[i] = BoxFullLease{ID: l.ID, Name: l.Name, MemoryMB: l.MemoryMiB, LastActive: l.LastActive, Pinned: l.Pinned, Busy: l.Busy}
+		out[i] = BoxFullLease{ID: l.ID, Name: l.Name, MemoryMB: l.MemoryMiB, LastActive: l.LastActive, Pinned: l.OwnPin, ExecPinned: l.ExecPinned, Busy: l.Busy}
 	}
 	return out
 }

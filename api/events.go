@@ -39,9 +39,10 @@ const (
 	LeaseHolderCleared LeaseEventType = "holder_cleared"
 	// LeasePinned and LeaseUnpinned mark a pin change (FS5, owner
 	// decision 2026-10-09): a pin protects only a running VM — spoond
-	// never pauses or releases a running pinned lease before its own
-	// expiry, and a paused pinned lease is released 30 d after its pause
-	// date like every paused lease. A holder or holder_url label never
+	// never releases a running pinned lease before its own expiry and
+	// pauses one only as the low-memory floor's last resort, and a
+	// paused pinned lease is released 30 d after its pause date like
+	// every paused lease. A holder or holder_url label never
 	// pins.
 	LeasePinned   LeaseEventType = "pinned"
 	LeaseUnpinned LeaseEventType = "unpinned"

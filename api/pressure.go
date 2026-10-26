@@ -235,7 +235,8 @@ func (s *Service) pressureCheck(ctx context.Context) bool {
 	defer cancel()
 	// A pinned victim is the last resort: only pressureVictim's second
 	// pass hands one out, and only then may the pause take it.
-	if err := s.takeBackPauseWith(pauseCtx, l, pressureRequester, v.Ratio, v.Pinned); err != nil {
+	pinned, err := s.takeBackPauseWith(pauseCtx, l, pressureRequester, v.Ratio, v.Pinned)
+	if err != nil {
 		if !errors.Is(err, errLeaseBusy) && !errors.Is(err, errLeaseReleased) {
 			s.log.Printf("memory floor: lease %s: %v", v.LeaseID, err)
 		}
@@ -246,7 +247,10 @@ func (s *Service) pressureCheck(ctx context.Context) bool {
 	if s.metrics != nil {
 		s.metrics.MemoryPressureTakebacksTotal.Inc()
 	}
-	if v.Pinned {
+	// Whether the lease was pinned when the pause took it, not which
+	// pass picked it: a pin can come or go in between, and the start
+	// line already logged the pause's own reading.
+	if pinned {
 		s.log.Printf("memory floor: %d MiB free of a %d MiB floor: took back PINNED lease %s (%d MiB, owner %s, ratio %.2f): no unpinned lease was left to take",
 			free, floor, v.LeaseID, v.MemoryMiB, v.Owner, v.Ratio)
 		s.pressurePinnedAlert(v, free, floor)
@@ -326,9 +330,10 @@ func (s *Service) pressureFloorAlert(short int) {
 // pinned lease the floor took as its last resort: the same event kind
 // as pressureFloorAlert, but carrying the lease and its owner, so the
 // lease's own event stream shows why its pin did not hold and the
-// notification names it. Not rate limited: the floor takes at most one
-// lease per tick, and a pinned take is the exception a person must see
-// every time.
+// notification names it. The event is not rate limited (the floor
+// takes at most one lease per tick, and every pinned take is on the
+// record); the notifier's hourly per-key dedupe caps the notification
+// at one an hour per lease.
 func (s *Service) pressurePinnedAlert(v takeBackVictim, free, floor int) {
 	s.emitLeaseEvent(v.LeaseID, v.Owner, LeaseMemoryFloor,
 		fmt.Sprintf("took back PINNED lease %s (%d MiB, owner ratio %.2f): %d MiB free of a %d MiB memory floor and no unpinned lease left to take; it resumes on the holder's next work call",
