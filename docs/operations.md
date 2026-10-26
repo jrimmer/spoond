@@ -1048,6 +1048,7 @@ refusal its cold create would get, listing `own_leases` — so the pool
 cannot become the door an over-slice owner walks its memory through;
 an owner inside its slice is served as before.
 
+<a id="low-memory-floor-memory_floor_mib-spoond-l3lq"></a>
 **Low-memory floor** (`MEMORY_FLOOR_MIB`, spoond-l3lq). The overcommit
 cap guards admission; the floor is the running counterpart: every
 second the backend reads the node's free hugepages fresh (never the
@@ -1084,15 +1085,18 @@ always sits under the floor (a 10240 MiB floor gets 2048, the default
 too. Every take below the critical level is
 logged as `memory floor: CRITICAL: <free> MiB free (critical <c> MiB,
 floor <f> MiB): took back lease <id> (…, owner <owner>, ratio <r>,
-inside its slice|over its slice, unpinned|PINNED)` (the take-back's
+over its slice|inside its slice|no slice, unpinned|PINNED)` (the take-back's
 start line still says `take back: pausing lease …`, marked `PINNED
 (last resort …)` for a pinned one), and raises a critical
 `memory_floor` alert naming the lease and its owner ("spoond memory
 critical: took back lease …"). A pin landing mid-pause does not undo a
 pinned take; it does undo the pause of a lease that was unpinned when
-it was picked. The `lease.memory_floor` event fires on every critical
-take; the notification, like every notification, is deduped per key,
-so it goes out at most once an hour per lease. A lease still marked
+it was picked. The `lease.memory_floor` event and the log line come
+with every critical take; the notification goes under the one key
+`memory.floor.critical` for every take, and like every notification is
+deduped per key, so a cascade of takes notifies at most once an hour
+(naming its first lease; the events and the log have the rest). A
+lease still marked
 `Drained` (an undrain pending on it) is never picked, but unlike
 `draining` it does
 not skip the tick: the floor keeps taking back around it, since a
@@ -1111,9 +1115,12 @@ instead of every tick: at the floor that means every unpinned lease of
 an over-slice owner is `Drained` or busy, or no owner is over their
 slice — a box where every owner is inside their slice sits under the
 floor, paused nothing, until free memory falls below the critical
-level; below the critical
-level it means every lease of every owner, pinned ones included, is
-`Drained` or busy.
+level; below the critical level it means every lease of every owner,
+pinned ones included, is `Drained` or busy. That critical alert reads
+`CRITICAL: … nothing can be taken back …` ("spoond memory critical:
+nothing can be taken back") and keeps its own 10-minute timer and its
+own notification key (`memory.floor.critical.none`), so a floor-level
+alert minutes earlier never holds it back.
 `spoond_memory_committed_mib` shows the memory promised to live leases
 as the loop last measured it (every tick, with the floor off too) and
 `spoond_memory_pressure_takebacks_total` counts its pauses.

@@ -1040,18 +1040,19 @@ func TestPressureVictimLevels(t *testing.T) {
 		}
 		return out
 	}
-	want := func(name string, os []takeBackOwner, critical bool, id string, pinned, inside bool) {
+	// slice is "over", "inside" or "none" (the owner has no slice).
+	want := func(name string, os []takeBackOwner, critical bool, id string, pinned bool, slice string) {
 		t.Helper()
 		v, ok := pressureVictim(os, critical)
-		if !ok || v.LeaseID != id || v.Pinned != pinned || v.InsideSlice != inside {
-			t.Fatalf("%s: victim = %+v ok=%v, want %s (pinned %v, inside %v)", name, v, ok, id, pinned, inside)
+		if !ok || v.LeaseID != id || v.Pinned != pinned || v.InsideSlice != (slice == "inside") || v.NoSlice != (slice == "none") {
+			t.Fatalf("%s: victim = %+v ok=%v, want %s (pinned %v, slice %s)", name, v, ok, id, pinned, slice)
 		}
 	}
 
 	// An unpinned over-slice candidate exists (bob's): it goes, unmarked,
 	// at both levels.
-	want("floor", owners(), false, "b-free", false, false)
-	want("critical", owners(), true, "b-free", false, false)
+	want("floor", owners(), false, "b-free", false, "over")
+	want("critical", owners(), true, "b-free", false, "over")
 
 	// No unpinned lease of an over-slice owner left: at the floor nothing,
 	// neither a pinned lease nor an inside-slice owner's.
@@ -1062,18 +1063,18 @@ func TestPressureVictimLevels(t *testing.T) {
 	// LRU unpinned lease, then his next; then carol; then the owners with
 	// no slice, erin (more memory used) before fred.
 	os := drop(owners(), "b-free")
-	want("critical inside", os, true, "d-old", false, true)
-	want("critical inside next", drop(os, "d-old"), true, "d-new", false, true)
-	want("critical lower ratio", drop(os, "d-old", "d-new"), true, "c-inside", false, true)
-	want("critical no slice", drop(os, "d-old", "d-new", "c-inside"), true, "e-noslice", false, true)
-	want("critical no slice next", drop(os, "d-old", "d-new", "c-inside", "e-noslice"), true, "f-noslice", false, true)
+	want("critical inside", os, true, "d-old", false, "inside")
+	want("critical inside next", drop(os, "d-old"), true, "d-new", false, "inside")
+	want("critical lower ratio", drop(os, "d-old", "d-new"), true, "c-inside", false, "inside")
+	want("critical no slice", drop(os, "d-old", "d-new", "c-inside"), true, "e-noslice", false, "none")
+	want("critical no slice next", drop(os, "d-old", "d-new", "c-inside", "e-noslice"), true, "f-noslice", false, "none")
 	// Nothing unpinned anywhere: the top over-slice owner's LRU pinned,
 	// non-busy lease, marked Pinned; then bob's; then the inside-slice
 	// owner's pin.
 	os = drop(owners(), "b-free", "d-old", "d-new", "c-inside", "e-noslice", "f-noslice")
-	want("critical pinned", os, true, "a-pin-old", true, false)
-	want("critical pinned next owner", drop(os, "a-pin-old", "a-pin-new"), true, "b-pin", true, false)
-	want("critical pinned inside", drop(os, "a-pin-old", "a-pin-new", "b-pin"), true, "d-pin", true, true)
+	want("critical pinned", os, true, "a-pin-old", true, "over")
+	want("critical pinned next owner", drop(os, "a-pin-old", "a-pin-new"), true, "b-pin", true, "over")
+	want("critical pinned inside", drop(os, "a-pin-old", "a-pin-new", "b-pin"), true, "d-pin", true, "inside")
 	if v, ok := pressureVictim(drop(os, "a-pin-old", "a-pin-new", "b-pin"), false); ok {
 		t.Fatalf("floor with only pinned leases: victim = %+v, want none", v)
 	}
@@ -1226,8 +1227,8 @@ func TestPressureTakesPinnedLastResort(t *testing.T) {
 	rec := &sink{}
 	svc.SetNotifier(rec)
 	svc.notifyLeaseEvent(*alert)
-	if key, sev, _ := rec.at(0); key != "memory.floor.critical."+old.ID || sev != "critical" {
-		t.Fatalf("notification = %q/%q, want memory.floor.critical.%s/critical", key, sev, old.ID)
+	if key, sev, _ := rec.at(0); key != "memory.floor.critical" || sev != "critical" {
+		t.Fatalf("notification = %q/%q, want memory.floor.critical/critical", key, sev)
 	}
 
 	// Fairness never takes a pinned lease, floor or no floor.
@@ -1236,6 +1237,178 @@ func TestPressureTakesPinnedLastResort(t *testing.T) {
 	}
 	svc.decExecPin(old.ID)
 	svc.decRunningJob(bobL.ID)
+}
+
+// TestPressureCriticalTakesOverSliceUnpinned: below the critical level
+// an over-slice owner's unpinned lease still goes first, and the take is
+// logged and alerted as CRITICAL with "over its slice, unpinned"; the
+// notification goes under the one memory.floor.critical key.
+func TestPressureCriticalTakesOverSliceUnpinned(t *testing.T) {
+	svc, sub, ctx := newPressureService(t)
+	alice := preemptOwner(t, svc, "alice")
+	bob := preemptOwner(t, svc, "bob")
+	// Two owners share the 8192 MiB pool below: a 4096 MiB slice each.
+	// Alice's single 8192 MiB lease is twice her slice; bob's 1024 MiB
+	// lease, the box's LRU, is inside his.
+	aliceL, err := svc.grantLease(ctx, leaseRequest{owner: alice, image: "big", ttl: time.Hour, persistent: true})
+	if err != nil {
+		t.Fatalf("grant alice: %v", err)
+	}
+	bobL, err := svc.grantLease(ctx, leaseRequest{owner: bob, image: "mid", ttl: time.Hour, persistent: true})
+	if err != nil {
+		t.Fatalf("grant bob: %v", err)
+	}
+	svc.store.mu.Lock()
+	bobL.LastActive = time.Unix(1_000_000, 0)
+	svc.store.mu.Unlock()
+	// 2 live sandboxes at 512 pages, baseUsed 3072: used 4096 of the
+	// 4096-page node, free 0 MiB, under the 1024 MiB critical level.
+	installDynamicNode(t, svc, sub, 4096, 3072, 512)
+	svc.cfg.MemoryFloorMiB = 2048
+	svc.cfg.MemoryCriticalMiB = 1024
+	warmFairShares(svc, ctx)
+
+	var logBuf bytes.Buffer
+	svc.log = log.New(&logBuf, "", 0)
+	events := svc.Subscribe(EventFilter{})
+	defer events.Close()
+
+	if !svc.pressureCheck(ctx) {
+		t.Fatalf("tick took nothing; log: %s", logBuf.String())
+	}
+	if susp := suspendedLeases(svc); len(susp) != 1 || !susp[aliceL.ID] {
+		t.Fatalf("suspended = %v, want alice's over-slice lease %s", susp, aliceL.ID)
+	}
+	out := logBuf.String()
+	if !strings.Contains(out, "memory floor: CRITICAL: 0 MiB free (critical 1024 MiB, floor 2048 MiB): took back lease "+aliceL.ID+" (8192 MiB, owner "+alice+", ratio ") ||
+		!strings.Contains(out, ", over its slice, unpinned)") {
+		t.Fatalf("log = %q, want the CRITICAL over-slice unpinned line for %s", out, aliceL.ID)
+	}
+	if !strings.Contains(out, "take back: pausing lease "+aliceL.ID) || strings.Contains(out, "PINNED") {
+		t.Fatalf("log = %q, want the take-back start line, unmarked", out)
+	}
+	var alert *LeaseEvent
+	for done := false; !done; {
+		select {
+		case ev := <-events.C:
+			if ev.Type == LeaseMemoryFloor {
+				ev := ev
+				alert = &ev
+			}
+		default:
+			done = true
+		}
+	}
+	if alert == nil || alert.LeaseID != aliceL.ID || alert.Owner != alice ||
+		!strings.HasPrefix(alert.Detail, "CRITICAL: took back lease "+aliceL.ID+" (8192 MiB, owner ratio ") ||
+		!strings.Contains(alert.Detail, ", over its slice, unpinned): 0 MiB free, under the 1024 MiB critical level of a 2048 MiB memory floor") {
+		t.Fatalf("memory_floor alert = %+v, want the CRITICAL over-slice unpinned one for %s", alert, aliceL.ID)
+	}
+	rec := &sink{}
+	svc.SetNotifier(rec)
+	svc.notifyLeaseEvent(*alert)
+	if key, sev, _ := rec.at(0); key != "memory.floor.critical" || sev != "critical" {
+		t.Fatalf("notification = %q/%q, want memory.floor.critical/critical", key, sev)
+	}
+}
+
+// TestPressureCriticalNothingAlert: with every lease of every owner busy,
+// a tick at the floor raises the floor-level "nothing can be taken
+// back" alert, and a tick below the critical level ten seconds later
+// still raises its own: the CRITICAL wording, under its own notify key
+// (memory.floor.critical.none) and its own 10-minute timer, so the
+// earlier floor-level alert holds neither back. Inside each window
+// neither repeats.
+func TestPressureCriticalNothingAlert(t *testing.T) {
+	svc, sub, ctx := newPressureService(t)
+	alice := preemptOwner(t, svc, "alice")
+	bob := preemptOwner(t, svc, "bob")
+	var all []*Lease
+	for i, owner := range []string{alice, alice, alice, bob} {
+		l, err := svc.grantLease(ctx, leaseRequest{owner: owner, image: "mid", ttl: time.Hour, persistent: true})
+		if err != nil {
+			t.Fatalf("grant %d: %v", i, err)
+		}
+		if i == 0 {
+			if _, err := svc.setPinned(alice, l.ID, true); err != nil {
+				t.Fatalf("pin: %v", err)
+			}
+		}
+		svc.incRunningJob(l.ID)
+		all = append(all, l)
+	}
+	now := time.Now()
+	svc.now = func() time.Time { return now }
+	// Free 512 MiB under the 4096 MiB floor (as in
+	// TestPressureAlertOncePerTenMinutes); every lease runs a job.
+	installDynamicNode(t, svc, sub, 1536, 256, 256)
+	svc.cfg.MemoryFloorMiB = 4096
+	svc.cfg.MemoryCriticalMiB = 256 // under the free memory: the floor's level
+	warmFairShares(svc, ctx)
+
+	var logBuf bytes.Buffer
+	svc.log = log.New(&logBuf, "", 0)
+	events := svc.Subscribe(EventFilter{})
+	defer events.Close()
+	floorAlerts := func() []LeaseEvent {
+		var out []LeaseEvent
+		for {
+			select {
+			case ev := <-events.C:
+				if ev.Type == LeaseMemoryFloor {
+					out = append(out, ev)
+				}
+			default:
+				return out
+			}
+		}
+	}
+	rec := &sink{}
+	svc.SetNotifier(rec)
+
+	svc.pressureCheck(ctx)
+	as := floorAlerts()
+	if len(as) != 1 || as[0].LeaseID != "" || strings.HasPrefix(as[0].Detail, "CRITICAL") {
+		t.Fatalf("floor-level alerts = %+v, want one lease-less floor-level alert", as)
+	}
+	svc.notifyLeaseEvent(as[0])
+	if key, _, _ := rec.at(0); key != "memory.floor" {
+		t.Fatalf("floor-level notification key = %q, want memory.floor", key)
+	}
+
+	// Ten seconds on, below the critical level: the critical alert is
+	// raised all the same.
+	now = now.Add(10 * time.Second)
+	svc.cfg.MemoryCriticalMiB = 1024
+	logBuf.Reset()
+	svc.pressureCheck(ctx)
+	as = floorAlerts()
+	if len(as) != 1 || as[0].LeaseID != "" ||
+		as[0].Detail != "CRITICAL: 3584 MiB below the memory floor; nothing can be taken back: below the critical level and every lease, pinned ones included, is busy or Drained" {
+		t.Fatalf("critical alerts = %+v, want the one lease-less CRITICAL alert", as)
+	}
+	if out := logBuf.String(); !strings.Contains(out, "memory_floor: CRITICAL: 3584 MiB below the floor; nothing can be taken back (below the critical level") {
+		t.Fatalf("log = %q, want the CRITICAL nothing-can-be-taken line", out)
+	}
+	svc.notifyLeaseEvent(as[0])
+	if key, sev, _ := rec.at(1); key != "memory.floor.critical.none" || sev != "critical" {
+		t.Fatalf("critical notification = %q/%q, want memory.floor.critical.none/critical", key, sev)
+	}
+
+	// Inside both windows neither level repeats.
+	now = now.Add(10 * time.Second)
+	svc.pressureCheck(ctx)
+	svc.cfg.MemoryCriticalMiB = 256
+	svc.pressureCheck(ctx)
+	if as = floorAlerts(); len(as) != 0 {
+		t.Fatalf("ticks inside the windows raised %+v, want none", as)
+	}
+	if susp := suspendedLeases(svc); len(susp) != 0 {
+		t.Fatalf("suspended = %v, want none (every lease busy)", susp)
+	}
+	for _, l := range all {
+		svc.decRunningJob(l.ID)
+	}
 }
 
 // TestPressureCriticalTakesAnyOwner: a box where alice is over her
@@ -1359,7 +1532,10 @@ func TestPressureCriticalTakesAnyOwner(t *testing.T) {
 		}
 	}
 	for _, p := range aPins {
-		if p.Suspended {
+		svc.store.mu.Lock()
+		suspended := p.Suspended
+		svc.store.mu.Unlock()
+		if suspended {
 			t.Fatalf("pinned lease %s went before the LRU pin", p.ID)
 		}
 	}

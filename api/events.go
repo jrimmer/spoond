@@ -186,8 +186,9 @@ const (
 	// At most once per 10 min per breach. The same kind WITH a lease id
 	// and owner says the floor took that lease below the critical level
 	// (MEMORY_CRITICAL_MIB): the detail starts "CRITICAL:" and says
-	// whether the owner was inside its slice and whether the lease was
-	// pinned; one per such take.
+	// whether the owner was over, inside or without a slice and whether
+	// the lease was pinned; one per such take. The lease-less alert below
+	// the critical level starts "CRITICAL:" too.
 	LeaseMemoryFloor LeaseEventType = "memory_floor"
 )
 

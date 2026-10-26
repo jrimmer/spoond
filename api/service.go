@@ -907,6 +907,11 @@ type Service struct {
 	// instead of every tick. Written only by pressureCheck, which the
 	// loop calls alone (no other goroutine reads or writes it).
 	pressureAlertAt time.Time
+	// pressureCriticalAlertAt is pressureAlertAt for the critical level's
+	// own "nothing can be taken back" alert (every lease busy or
+	// Drained), timed apart so a floor-level alert minutes earlier never
+	// holds a critical one back. Written only by pressureCheck.
+	pressureCriticalAlertAt time.Time
 	// pressureNodeInfoLogAt is when the low-memory loop last logged a
 	// failed NodeInfo read: against a down orchestrator the 1 s loop logs
 	// at most once per pressureNodeInfoLogEvery. Written only by

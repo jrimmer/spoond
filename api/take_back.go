@@ -35,16 +35,17 @@ type takeBackOwner struct {
 
 // takeBackVictim is one lease chosen to be paused. Ratio is the owner's
 // used/slice at the moment of the pick, before the lease was given up.
-// Pinned and InsideSlice are set only by pressureVictim's critical
-// level: Pinned for its last pass (the lease is pinned and the floor
+// Pinned, InsideSlice and NoSlice are set only by pressureVictim:
+// Pinned for its last critical pass (the lease is pinned and the floor
 // takes it anyway), InsideSlice when the owner was at or under their
-// slice (or had none).
+// slice, NoSlice when the owner had none (a zero slice, no ratio).
 type takeBackVictim struct {
 	Owner, LeaseID string
 	Ratio          float64
 	MemoryMiB      int
 	Pinned         bool
 	InsideSlice    bool
+	NoSlice        bool
 }
 
 func tbRatio(used, slice int) float64 {
@@ -83,7 +84,7 @@ func tbRatio(used, slice int) float64 {
 //     later pass runs only when the earlier ones found nothing anywhere.
 //
 // The victim carries InsideSlice (its owner was at or under their slice
-// at the pick) and Pinned (pass c), so the caller can let
+// at the pick), NoSlice (its owner had none) and Pinned (pass c), so the caller can let
 // takeBackPauseWith take a pinned lease and say loudly what it took. ok
 // is false when no lease the level allows is left: every one Drained or
 // busy — busy leases are left out (see below), pinned or not — or, at
@@ -119,12 +120,11 @@ func pressureVictim(owners []takeBackOwner, critical bool) (takeBackVictim, bool
 	type pass struct {
 		ranked []cand
 		pinned bool // this pass takes pinned leases (and only then)
-		inside bool // the pass's owners are inside their slice
 	}
 	passes := []pass{{ranked: over}}
 	if critical {
 		all := append(append([]cand(nil), over...), rest...)
-		passes = append(passes, pass{ranked: rest, inside: true}, pass{ranked: all, pinned: true})
+		passes = append(passes, pass{ranked: rest}, pass{ranked: all, pinned: true})
 	}
 	for _, p := range passes {
 		for _, c := range p.ranked {
@@ -155,7 +155,8 @@ func pressureVictim(owners []takeBackOwner, critical bool) (takeBackVictim, bool
 			l := idle[li]
 			return takeBackVictim{
 				Owner: o.Owner, LeaseID: l.ID, Ratio: c.ratio, MemoryMiB: l.MemoryMiB,
-				Pinned: p.pinned, InsideSlice: o.SliceMiB <= 0 || o.UsedMiB <= o.SliceMiB,
+				Pinned: p.pinned, NoSlice: o.SliceMiB <= 0,
+				InsideSlice: o.SliceMiB > 0 && o.UsedMiB <= o.SliceMiB,
 			}, true
 		}
 	}

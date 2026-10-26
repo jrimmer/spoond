@@ -9,6 +9,7 @@ package api
 
 import (
 	"context"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -127,18 +128,20 @@ func (s *Service) notifyLeaseEvent(ev LeaseEvent) {
 	case LeaseMemoryFloor:
 		if ev.LeaseID != "" {
 			// The floor took this lease below the critical level
-			// (MEMORY_CRITICAL_MIB): an owner inside their slice, or a
-			// pinned lease once nothing unpinned was left (the detail
-			// says which). The pause is done; a person should know whose
-			// lease went and free room.
+			// (MEMORY_CRITICAL_MIB): any owner's, a pinned one once
+			// nothing unpinned was left (the detail says which). The
+			// pause is done; a person should know the box is critical
+			// and free room. One key for every take, so a cascade
+			// notifies at most once an hour (the first lease's); the
+			// event stream and the log keep every take.
 			s.notifier.Enqueue(notify.Event{
-				Key:      "memory.floor.critical." + ev.LeaseID,
+				Key:      "memory.floor.critical",
 				Severity: notify.Critical,
 				Title:    "spoond memory critical: took back lease " + shortID(ev.LeaseID),
 				Body: joinBody([]string{
 					"lease " + ev.LeaseID + " (owner " + ev.Owner + ")",
 					ev.Detail,
-					"release leases to make room",
+					"further critical takes this hour are in the lease events and the log; release leases to make room",
 				}),
 				At: ev.At,
 			})
@@ -147,12 +150,20 @@ func (s *Service) notifyLeaseEvent(ev LeaseEvent) {
 		// The low-memory loop's floor breach with nothing left to take
 		// back (MEMORY_FLOOR_MIB): free hugepages sit under the floor and
 		// every candidate the level allows is busy or Drained, or (at the
-		// floor) no owner is over their slice. A person must free room (release leases); nothing was
-		// paused or released by spoond. Raised at most once per 10 min.
+		// floor) no owner is over their slice. A person must free room
+		// (release leases); nothing was paused or released by spoond.
+		// Raised at most once per 10 min per level.
+		key, title := "memory.floor", "spoond memory below floor"
+		if strings.HasPrefix(ev.Detail, memoryFloorCritical) {
+			// The critical level found nothing to take either (every
+			// lease busy or Drained): its own key, so a floor-level
+			// alert earlier in the hour does not dedupe it away.
+			key, title = "memory.floor.critical.none", "spoond memory critical: nothing can be taken back"
+		}
 		s.notifier.Enqueue(notify.Event{
-			Key:      "memory.floor",
+			Key:      key,
 			Severity: notify.Critical,
-			Title:    "spoond memory below floor",
+			Title:    title,
 			Body:     joinBody([]string{ev.Detail, "nothing was paused or released; unpin or release leases to make room"}),
 			At:       ev.At,
 		})

@@ -45,22 +45,26 @@ summarised from README "Status".
 - **The low-memory floor has a critical level, and pins are reaped
   last, not never** (`MEMORY_CRITICAL_MIB`, default: half the floor, at
   most `2048`). At the floor (`MEMORY_FLOOR_MIB`) nothing changes: only
-  unpinned leases of
-  owners over their slice are taken. Below the critical level the floor
-  may take from any owner: over-slice owners' unpinned leases first,
-  then unpinned leases of owners inside their slice (the highest
-  used/slice first, least recently used first), and pinned leases
-  (explicit or exec-pinned) last of all, instead of only alerting while
-  the box sinks with every owner inside their slice. Busy and `Drained`
-  leases are never taken. Each such take is logged as `memory floor:
-  CRITICAL: …` (saying whether the owner was inside their slice and
-  whether the lease was pinned) and raises a critical `memory_floor`
-  event naming the lease and its owner; a pin landing mid-pause does
-  not undo a pinned take. `MEMORY_CRITICAL_MIB` must be below the
-  floor: a value set at or over it turns the level off with a startup
-  warning, and `0` (or a floor of `0`) turns it off. Take-back for a
-  request and the idle sweep still never pause a pinned lease, and a
-  create blocked only by pins still answers `429 box_full`.
+  unpinned leases of owners over their slice are taken. Below the
+  critical level the floor may take from any owner: over-slice owners'
+  unpinned leases first, then unpinned leases of owners inside their
+  slice (the highest used/slice first, owners with no slice last by
+  memory used, least recently used first inside each), and pinned
+  leases (explicit or exec-pinned) last of all, instead of only
+  alerting while the box sinks with every owner inside their slice.
+  Busy and `Drained` leases are never taken. Each such take is logged
+  as `memory floor:
+  CRITICAL: …` (saying whether the owner was over, inside or without a
+  slice and whether the lease was pinned) and raises a critical
+  `memory_floor` event naming the lease and its owner; the
+  notifications share one key, so a cascade notifies at most once an
+  hour. A critical level with nothing left to take alerts under its own
+  key and timer, never held back by a floor-level alert. A pin landing
+  mid-pause does not undo a pinned take. `MEMORY_CRITICAL_MIB` must be
+  below the floor: a value set at or over it turns the level off with a
+  startup warning, and `0` (or a floor of `0`) turns it off. Take-back
+  for a request and the idle sweep still never pause a pinned lease,
+  and a create blocked only by pins still answers `429 box_full`.
 
 ### Fixed
 

@@ -227,13 +227,19 @@ func (s *Service) pressureCheck(ctx context.Context) bool {
 		// Nothing can be taken back (at the floor: every unpinned lease of
 		// an over-slice owner busy or Drained, or no owner over their
 		// slice; critical: every lease busy or Drained): say so, but at
-		// most once per 10 min — a standing condition must not flood the
-		// event stream. The alert is its own event kind so a floor breach
-		// is not misread as an admission's box_full refusal (which names
-		// a requester).
+		// most once per 10 min per level — a standing condition must not
+		// flood the event stream, and the two levels keep their own
+		// timers, so a floor-level alert never holds back the critical
+		// one. The alert is its own event kind so a floor breach is not
+		// misread as an admission's box_full refusal (which names a
+		// requester).
+		at := &s.pressureAlertAt
+		if critical {
+			at = &s.pressureCriticalAlertAt
+		}
 		now := s.now()
-		if s.pressureAlertAt.IsZero() || now.Sub(s.pressureAlertAt) >= pressureAlertEvery {
-			s.pressureAlertAt = now
+		if at.IsZero() || now.Sub(*at) >= pressureAlertEvery {
+			*at = now
 			s.pressureFloorAlert(short, critical)
 		}
 		return false
@@ -349,12 +355,21 @@ func (s *Service) pressureCritical(free, floor int) bool {
 	return c > 0 && c < floor && free < c
 }
 
+// memoryFloorCritical starts the detail of every critical-level
+// memory_floor event (a take, or nothing left to take); the notifier
+// keys those apart from the floor-level alert by it.
+const memoryFloorCritical = "CRITICAL: "
+
 // pressureCriticalDesc says what a critical take took: whether the
-// owner was inside or over their slice, and whether the pause took a
-// pinned lease (its own reading, not the pass that picked it).
+// owner was inside or over their slice or had none, and whether the
+// pause took a pinned lease (its own reading, not the pass that picked
+// it).
 func pressureCriticalDesc(v takeBackVictim, pinned bool) string {
 	slice := "over its slice"
-	if v.InsideSlice {
+	switch {
+	case v.NoSlice:
+		slice = "no slice"
+	case v.InsideSlice:
 		slice = "inside its slice"
 	}
 	pin := "unpinned"
@@ -370,30 +385,33 @@ func pressureCriticalDesc(v takeBackVictim, pinned bool) string {
 // (an in-flight operation or a running job) or Drained, or no owner is
 // over their slice (owners inside their slice and pinned leases wait
 // for the critical level); below the critical level every lease of
-// every owner, pinned ones included, is busy or Drained. It is its own
+// every owner, pinned ones included, is busy or Drained (its detail
+// starts "CRITICAL: ", which notifies under its own key). It is its own
 // event kind, memory_floor — not box_full, which names an admission's
 // refused requester — and notifies like one (a person must release
 // leases to free room; nothing was paused).
 func (s *Service) pressureFloorAlert(short int, critical bool) {
-	why := "every unpinned lease of an owner over their slice is busy or Drained, or no owner is over their slice"
+	why, prefix := "every unpinned lease of an owner over their slice is busy or Drained, or no owner is over their slice", ""
 	if critical {
-		why = "below the critical level and every lease, pinned ones included, is busy or Drained"
+		why, prefix = "below the critical level and every lease, pinned ones included, is busy or Drained", memoryFloorCritical
 	}
-	s.log.Printf("memory_floor: %d MiB below the floor; nothing can be taken back (%s); nothing was paused or released", short, why)
+	s.log.Printf("memory_floor: %s%d MiB below the floor; nothing can be taken back (%s); nothing was paused or released", prefix, short, why)
 	s.emitLeaseEvent("", "", LeaseMemoryFloor,
-		fmt.Sprintf("%d MiB below the memory floor; nothing can be taken back: %s", short, why))
+		fmt.Sprintf("%s%d MiB below the memory floor; nothing can be taken back: %s", prefix, short, why))
 }
 
 // pressureCriticalAlert raises the critical memory_floor alert for a
 // lease the floor took below the critical level: the same event kind as
 // pressureFloorAlert, but carrying the lease and its owner, so the
 // lease's own event stream shows why it was taken (an owner inside
-// their slice, or a pin that did not hold) and the notification names
-// it. The event is not rate limited (the floor takes at most one lease
-// per tick, and every critical take is on the record); the notifier's
-// hourly per-key dedupe caps the notification at one an hour per lease.
+// their slice, or a pin that did not hold). The event is not rate
+// limited (the floor takes at most one lease per tick, and every
+// critical take is on the record); every take notifies under the one
+// key memory.floor.critical, so the notifier's hourly per-key dedupe
+// sends at most one notification an hour for a whole cascade, naming
+// its first lease.
 func (s *Service) pressureCriticalAlert(v takeBackVictim, desc string, free int) {
 	s.emitLeaseEvent(v.LeaseID, v.Owner, LeaseMemoryFloor,
-		fmt.Sprintf("CRITICAL: took back lease %s (%d MiB, owner ratio %.2f, %s): %d MiB free, under the %d MiB critical level of a %d MiB memory floor; it resumes on the holder's next work call",
+		fmt.Sprintf(memoryFloorCritical+"took back lease %s (%d MiB, owner ratio %.2f, %s): %d MiB free, under the %d MiB critical level of a %d MiB memory floor; it resumes on the holder's next work call",
 			v.LeaseID, v.MemoryMiB, v.Ratio, desc, free, s.cfg.MemoryCriticalMiB, s.cfg.MemoryFloorMiB))
 }
