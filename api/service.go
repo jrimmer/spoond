@@ -268,6 +268,13 @@ type Lease struct {
 	// this is non-zero. Background jobs are not counted: a pause stops
 	// them but does not end them. Guarded by store.mu; not persisted.
 	openWork int
+	// execPins counts the lease's in-flight synchronous execs that asked
+	// for "pin": true: while it is non-zero the lease counts as pinned
+	// for every automatic pause decision (pinnedLocked), exactly like an
+	// explicit pin, and the count drops when each exec returns. It never
+	// touches the Pinned field or its row. Guarded by store.mu; not
+	// persisted.
+	execPins int
 	// checkpointDeferredSince is when the periodic pass first skipped
 	// this lease because it had open work, and checkpointForceLogged
 	// records that the pass already logged the interval cap for that
@@ -276,6 +283,13 @@ type Lease struct {
 	checkpointDeferredSince time.Time
 	checkpointForceLogged   bool
 }
+
+// pinnedLocked reports whether the lease is pinned for an automatic
+// pause decision: its owner pinned it (Pinned) or an exec that asked
+// for "pin": true is in flight on it (execPins). Take-back, the
+// low-memory floor and the idle sweep all ask this, never Pinned
+// alone. Call with s.store.mu held.
+func (l *Lease) pinnedLocked() bool { return l.Pinned || l.execPins > 0 }
 
 // live reports whether the lease has a running sandbox. "recovered" is
 // introduced in U10 and behaves exactly like "running".
@@ -2206,6 +2220,25 @@ func (s *Service) decOpenWork(leaseID string) {
 	s.store.mu.Unlock()
 }
 
+// incExecPin records that a lease gained an in-flight exec that asked
+// for "pin": true; decExecPin records that one ended. The pair brackets
+// the exec in handleExec, on every return path.
+func (s *Service) incExecPin(leaseID string) {
+	s.store.mu.Lock()
+	if l := s.store.leases[leaseID]; l != nil && !l.released {
+		l.execPins++
+	}
+	s.store.mu.Unlock()
+}
+
+func (s *Service) decExecPin(leaseID string) {
+	s.store.mu.Lock()
+	if l := s.store.leases[leaseID]; l != nil && l.execPins > 0 {
+		l.execPins--
+	}
+	s.store.mu.Unlock()
+}
+
 // openWorkCount reports how many open streams and synchronous execs a
 // lease has, under the store lock.
 func (s *Service) openWorkCount(leaseID string) int {
@@ -3587,7 +3620,8 @@ type suspendPolicy struct {
 	reason     string
 	policyStep string
 	// refusePinned, when set, makes pauseLeaseWith refuse a pinned lease
-	// in the same store-lock section that sets busy: the idle sweep
+	// (explicitly or by an in-flight pinned exec, pinnedLocked) in the
+	// same store-lock section that sets busy: the idle sweep
 	// re-checks a pin there, so a pin landing between its collection pass
 	// and the pause wins and the lease is not suspended (FS5, "pins don't
 	// pause"). A hand or drain pause leaves it unset: the owner's own
@@ -3614,7 +3648,7 @@ func (s *Service) pauseLeaseWith(ctx context.Context, l *Lease, drained bool, po
 		s.store.mu.Unlock()
 		return "", errLeaseBusy
 	}
-	if pol.refusePinned && l.Pinned {
+	if pol.refusePinned && l.pinnedLocked() {
 		// A pin landed between the idle sweep's re-check and this pause:
 		// refuse in the same lock section that would set busy, so the
 		// pin wins (FS5). The caller treats it like a busy lease.
@@ -5424,6 +5458,13 @@ func (s *Service) leaseMap(l *Lease, ms *memSampler, checkpointInterval, idleSus
 func (s *Service) leaseDetailMap(l *Lease) map[string]any {
 	ms := s.memSamples
 	m := s.leaseMap(l, ms, s.effectiveCheckpointInterval(l), s.effectiveIdleSuspend(l))
+	// In-flight pinned execs (exec "pin": true), read-only and omitted at
+	// 0; "pinned" stays the owner's own pin.
+	s.store.mu.Lock()
+	if n := l.execPins; n > 0 {
+		m["exec_pins"] = n
+	}
+	s.store.mu.Unlock()
 	m["state"] = l.State
 	m["recovered_from"] = formatRFC3339(l.RecoveredFrom)
 	m["last_checkpoint_at"] = formatRFC3339(l.LastCheckpointAt)
@@ -5522,6 +5563,9 @@ func (s *Service) list(owner string) []map[string]any {
 		if l.Owner == owner && !l.released {
 			m := s.leaseMap(l, ms, s.effectiveCheckpointInterval(l), s.effectiveIdleSuspend(l))
 			m["jobs"] = jobsSummaryView(running[l.ID], exits[l.ID])
+			if l.execPins > 0 {
+				m["exec_pins"] = l.execPins
+			}
 			out = append(out, m)
 		}
 	}

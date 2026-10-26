@@ -594,7 +594,9 @@ rest of the row.
 
 A pinned lease's row adds `pinned_idle_since` (RFC 3339) once its last
 API activity passes `PINNED_IDLE_NOTICE_DAYS` (visibility only; cleared
-when activity returns). A lease that was ever automatically executed
+when activity returns). A lease with execs sent with `"pin": true` in
+flight adds `exec_pins`, how many (read-only, omitted at 0; `pinned`
+stays the owner's own pin). A lease that was ever automatically executed
 carries `last_action` (`"rule/action"`, e.g. `"idle_suspend/suspend_idle"`)
 with `last_action_at` (RFC 3339). A paused lease carries `paused_at`
 (RFC 3339, the one clock's start).
@@ -868,6 +870,7 @@ event ring and the lease row.
 | `env` | object | *(none)* | extra environment variables |
 | `timeout` | int | `30` | seconds; capped at `MAX_EXEC_TIMEOUT_SECS` (default 300) |
 | `secrets` | object | *(none)* | `{name: value}` written to `/run/secrets` for this command only and removed afterwards — see [Secrets](#secrets). Same limits as on create |
+| `pin` | bool | `false` | pin the lease for this exec only: while it is in flight (secret staging included) the lease counts as pinned for every automatic pause — take-back, idle suspend and the low-memory floor — exactly like an explicit pin, and the pin ends when the exec returns, on every path. The lease's own `pinned` does not change; its row reports the in-flight count as `exec_pins`. Without it a running exec does not protect its lease: a take-back pause cuts the command, which answers `409` `lease_busy`. See [Memory take-back](#memory-take-back). No extra effect with `background: true` |
 
 Response `200 OK`:
 
@@ -927,6 +930,8 @@ Add `"background": true` to the exec body and the command runs as a
 tracked job instead of holding the request open. The other fields keep
 their meaning (`cmd`, `cwd`, `env`, `secrets`); `timeout` is ignored —
 a background job runs until it exits, is signalled, or the lease does.
+`pin` is accepted and adds nothing: a running job already keeps
+take-back, the low-memory floor and idle suspend off its lease.
 The optional `max_runtime_secs` shortens the host's `JOB_MAX_RUNTIME`
 (default 24 h) for this job only; it can never make a job run longer
 than the host cap and a negative value is `400`. It applies to a

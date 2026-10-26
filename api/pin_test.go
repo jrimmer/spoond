@@ -443,6 +443,49 @@ func TestPinnedNotIdleSuspended(t *testing.T) {
 	}
 }
 
+// TestExecPinnedNotIdleSuspended: a lease with an exec that asked for
+// "pin": true in flight is skipped by the idle sweep like a pinned one,
+// at both the collection pass and the pause's own re-check; once the
+// exec ends the sweep takes it.
+func TestExecPinnedNotIdleSuspended(t *testing.T) {
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	ctx := context.Background()
+
+	base := time.Now()
+	svc.now = func() time.Time { return base }
+	l, err := svc.grant(ctx, "c", "py-base", time.Hour, true, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	if _, err := svc.setIdlePolicy(l, 60); err != nil {
+		t.Fatalf("setIdlePolicy: %v", err)
+	}
+	svc.store.mu.Lock()
+	l.LastActive = base.Add(-time.Hour)
+	svc.store.mu.Unlock()
+
+	svc.incExecPin(l.ID)
+	svc.suspendIdleLeases(ctx, base)
+	if l.Suspended {
+		t.Fatal("the idle sweep paused a lease with a pinned exec in flight")
+	}
+	// A pinned exec that starts between the sweep's re-check and the
+	// pause still wins.
+	svc.decExecPin(l.ID)
+	svc.idleBeforePause = func(*Lease) { svc.incExecPin(l.ID) }
+	svc.suspendIdleLeases(ctx, base)
+	if l.Suspended {
+		t.Fatal("a pinned exec landing before the pause did not stop it")
+	}
+	svc.decExecPin(l.ID)
+	svc.idleBeforePause = nil
+	svc.suspendIdleLeases(ctx, base)
+	if !l.Suspended {
+		t.Fatal("the idle sweep did not take the lease once its pinned exec ended")
+	}
+}
+
 // TestPinnedNotPausedByHostDefaultIdle: the same with the host default
 // idle_suspend (idle_suspend absent): effectiveIdleSuspend must return 0
 // for a pinned lease (spoond-k0uz H2).

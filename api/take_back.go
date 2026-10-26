@@ -17,7 +17,7 @@ type takeBackLease struct {
 	ID         string
 	Name       string // the lease's tag, echoed in the box_full own_leases body
 	MemoryMiB  int
-	Pinned     bool      // a pinned lease is never taken
+	Pinned     bool      // pinned or exec-pinned (pinnedLocked): fairness never takes it
 	Busy       bool      // a running job (or in-flight operation); taken last
 	Drained    bool      // an undrain still owns its resume; taken never
 	LastActive time.Time // older means less recently used
@@ -272,7 +272,7 @@ func tbPickLease(ls []takeBackLease) int {
 // that displaced it (no ping-pong).
 func (s *Service) takeBackPause(ctx context.Context, l *Lease, requester string, ratio float64) error {
 	s.store.mu.Lock()
-	if l.released || l.busy || l.Suspended || !l.live() || l.Pinned ||
+	if l.released || l.busy || l.Suspended || !l.live() || l.pinnedLocked() ||
 		s.hasRunningJobLocked(l.ID) || l.Owner == requester {
 		s.store.mu.Unlock()
 		return errLeaseBusy
@@ -306,10 +306,11 @@ func (s *Service) takeBackPause(ctx context.Context, l *Lease, requester string,
 		s.store.mu.Unlock()
 		return errLeaseBusy
 	}
-	if l.Pinned || s.hasRunningJobLocked(l.ID) {
-		// The owner pinned the lease (or started a job on it) while the
-		// pause was in flight: the pin wins, the lease is brought back at
-		// once and the caller counts nothing as freed. The immediate
+	if l.pinnedLocked() || s.hasRunningJobLocked(l.ID) {
+		// The owner pinned the lease (or a pinned exec began, or a job
+		// started on it) while the pause was in flight: the pin wins,
+		// the lease is brought back at once and the caller counts
+		// nothing as freed. The immediate
 		// resume stays inside this critical section's protection: busy
 		// blocks every other operation until endBusy below, so nothing
 		// can interleave on the lease between this check and the resume.
@@ -438,7 +439,7 @@ func (s *Service) takeBackOwners(ctx context.Context) []takeBackOwner {
 			ID:         l.ID,
 			Name:       l.Name,
 			MemoryMiB:  l.MemoryMB,
-			Pinned:     l.Pinned,
+			Pinned:     l.pinnedLocked(),
 			Busy:       l.busy || s.hasRunningJobLocked(l.ID),
 			Drained:    l.Drained,
 			LastActive: l.LastActive,

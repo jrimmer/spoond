@@ -235,6 +235,20 @@ func TestTakeBackOwnersViews(t *testing.T) {
 	if bv.Leases[0].LastActive.IsZero() {
 		t.Fatal("LastActive not carried")
 	}
+
+	// An exec sent with "pin": true pins b1 for as long as it runs.
+	svc.incExecPin(b1.ID)
+	for _, v := range svc.takeBackOwners(ctx) {
+		if v.Owner == bob.ID && !v.Leases[0].Pinned {
+			t.Fatal("b1 view with a pinned exec in flight is not Pinned")
+		}
+	}
+	svc.decExecPin(b1.ID)
+	for _, v := range svc.takeBackOwners(ctx) {
+		if v.Owner == bob.ID && v.Leases[0].Pinned {
+			t.Fatal("b1 still Pinned after its pinned exec ended")
+		}
+	}
 }
 
 // TestTakeBackOwnersUnknownOwnerLeaseKept: a lease whose owner the fair
@@ -672,5 +686,105 @@ func TestMemVictimsFallsThroughToSmallerLease(t *testing.T) {
 	owners[1].Leases = []takeBackLease{tiny, other}
 	if got := memVictims(owners, "req", 512, 512); !eqStrs(ids(got), []string{"tiny"}) {
 		t.Fatalf("got %v, want [tiny]", ids(got))
+	}
+}
+
+// TestTakeBackPauseExecPin: a plain POST exec in flight does not keep
+// take-back off its lease (protection is opt-in by pin); one sent with
+// "pin": true does, exactly like an explicit pin, and the exec-pin
+// count is back to 0 once the exec has returned.
+func TestTakeBackPauseExecPin(t *testing.T) {
+	ts, svc, sub, _ := checkpointTestServer(t)
+	mk := func() *Lease {
+		t.Helper()
+		_, body := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
+		id, _ := body["id"].(string)
+		l := svc.lookupAny(id)
+		if l == nil {
+			t.Fatalf("create lease: %v", body)
+		}
+		return l
+	}
+	// holdExec starts a POST exec on l and returns once it is inside the
+	// substrate call; unblock lets it finish and wait reports its status.
+	holdExec := func(l *Lease, pin bool) (unblock func(), wait func() int) {
+		t.Helper()
+		started, release := make(chan struct{}), make(chan struct{})
+		var once, releaseOnce sync.Once
+		unblock = func() { releaseOnce.Do(func() { close(release) }) }
+		// A failure below must not leave the exec blocked: the test
+		// server's Close would wait on it forever.
+		t.Cleanup(unblock)
+		sub.execBefore = func(sandboxID string, req substrate.ExecRequest) {
+			if sandboxID == l.SandboxID && !isRootfsProbeReq(req) {
+				once.Do(func() { close(started) })
+				<-release
+			}
+		}
+		done := make(chan int, 1)
+		go func() {
+			resp, _ := doReq(t, "POST", ts.URL+"/api/leases/"+l.ID+"/exec", "token-a", map[string]any{"cmd": "make check", "pin": pin})
+			done <- resp.StatusCode
+		}()
+		<-started
+		return unblock, func() int { return <-done }
+	}
+
+	// A plain exec is no shield: the take-back pauses the lease.
+	plain := mk()
+	unblock, wait := holdExec(plain, false)
+	if err := svc.takeBackPause(context.Background(), plain, "req", 2.0); err != nil {
+		t.Fatalf("takeBackPause mid plain exec: %v, want the pause", err)
+	}
+	if !plain.Suspended {
+		t.Fatal("the lease with a plain exec in flight was not paused")
+	}
+	unblock()
+	wait()
+
+	// An exec with "pin": true is: refused like a pinned lease.
+	pinned := mk()
+	unblock, wait = holdExec(pinned, true)
+	svc.store.mu.Lock()
+	n := pinned.execPins
+	svc.store.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("execPins = %d mid pinned exec, want 1", n)
+	}
+	_, body := doReq(t, "GET", ts.URL+"/api/leases/"+pinned.ID, "token-a", nil)
+	if body["exec_pins"] != float64(1) || body["pinned"] != false {
+		t.Fatalf("lease JSON exec_pins=%v pinned=%v, want 1 and false", body["exec_pins"], body["pinned"])
+	}
+	// Refused at the guard, before any pause: not paused and resumed by
+	// the post-pause pin re-check, which would still cut the command.
+	events := svc.Subscribe(EventFilter{LeaseID: pinned.ID})
+	defer events.Close()
+	if err := svc.takeBackPause(context.Background(), pinned, "req", 2.0); !errors.Is(err, errLeaseBusy) {
+		t.Fatalf("takeBackPause mid pinned exec err = %v, want errLeaseBusy", err)
+	}
+	if pinned.Suspended {
+		t.Fatal("the lease was paused mid pinned exec")
+	}
+	select {
+	case ev := <-events.C:
+		t.Fatalf("event %q on the exec-pinned lease, want none (no pause at all)", ev.Type)
+	case <-time.After(200 * time.Millisecond):
+	}
+	unblock()
+	if code := wait(); code != 200 {
+		t.Fatalf("pinned exec = %d, want 200", code)
+	}
+	svc.store.mu.Lock()
+	n = pinned.execPins
+	svc.store.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("execPins = %d after the exec returned, want 0", n)
+	}
+	_, body = doReq(t, "GET", ts.URL+"/api/leases/"+pinned.ID, "token-a", nil)
+	if _, ok := body["exec_pins"]; ok {
+		t.Fatalf("exec_pins still reported after the exec returned: %v", body["exec_pins"])
+	}
+	if err := svc.takeBackPause(context.Background(), pinned, "req", 2.0); err != nil {
+		t.Fatalf("takeBackPause after the pinned exec returned: %v", err)
 	}
 }

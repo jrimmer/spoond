@@ -17,8 +17,9 @@ import (
 // change, and the next call resumes it. This is the only idle threshold
 // spoond has (FS5): the plain IDLE_TIMEOUT_SECS sweep and the held rules
 // that shortened it are removed. A lease with no value (and no host
-// default) is never idle-suspended, and a **pinned** lease is never
-// paused by spoond at all, whatever its idle_suspend says.
+// default) is never idle-suspended, and a **pinned** lease (or one with
+// an exec that asked for "pin": true in flight) is never idle-suspended,
+// whatever its idle_suspend says.
 //
 // An idle pause must fit in usable snapshot disk like every pause
 // (ensureDiskRoom, FS3b): one that cannot is skipped this sweep and
@@ -40,9 +41,10 @@ func (s *Service) suspendIdleLeases(ctx context.Context, now time.Time) {
 	for _, l := range s.store.leases {
 		// A running background job is activity (2.6, #135): never
 		// suspend a lease mid-job. A pinned lease is never paused by
-		// spoond's idle logic (FS5, owner: "Pins don't pause"); only
-		// the owner's own POST /pause pauses a pinned lease.
-		if l.released || l.Suspended || l.busy || l.Pinned || !l.Persistent || s.hasRunningJobLocked(l.ID) {
+		// spoond's idle logic (FS5, owner: "Pins don't pause"), nor is
+		// one with a pinned exec in flight; only the owner's own POST
+		// /pause pauses a pinned lease.
+		if l.released || l.Suspended || l.busy || l.pinnedLocked() || !l.Persistent || s.hasRunningJobLocked(l.ID) {
 			continue
 		}
 		threshold := time.Duration(s.effectiveIdleSuspend(l)) * time.Second
@@ -75,7 +77,7 @@ func (s *Service) suspendIdleLeases(ctx context.Context, now time.Time) {
 		s.store.mu.Lock()
 		threshold := time.Duration(s.effectiveIdleSuspend(l)) * time.Second
 		lastActive := l.LastActive
-		skip := l.released || l.Suspended || l.busy || l.Pinned || !l.Persistent || threshold <= 0 ||
+		skip := l.released || l.Suspended || l.busy || l.pinnedLocked() || !l.Persistent || threshold <= 0 ||
 			!now.After(lastActive.Add(threshold))
 		s.store.mu.Unlock()
 		if skip {

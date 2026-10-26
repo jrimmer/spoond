@@ -2460,6 +2460,12 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		// command only and removed afterwards. Values are kept in memory
 		// only, never stored, logged or returned.
 		Secrets map[string]string `json:"secrets"`
+		// Pin makes the lease count as pinned, exactly like an explicit
+		// pin, for every automatic pause decision (take-back, the
+		// low-memory floor, idle suspend) while this synchronous exec is
+		// in flight; it ends when the exec returns. A background job is already protected while it runs,
+		// so pin adds nothing there.
+		Pin bool `json:"pin"`
 	}
 	if err := json.NewDecoder(bytes.NewReader(body)).Decode(&req); err != nil {
 		writeErrorCode(w, http.StatusBadRequest, "bad_request", "invalid JSON body")
@@ -2497,6 +2503,12 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	if req.Background {
 		s.handleBackgroundExec(w, r, lease, owner, req.Cmd, req.Cwd, req.Env, execSecrets, req.MaxRuntimeSecs, req.RetentionSecs, req.OutputMaxBytes)
 		return
+	}
+	// The exec-scoped pin covers secret staging too: a pause there would
+	// fail the staging or leave the command to start on a paused lease.
+	if req.Pin {
+		s.svc.incExecPin(lease.ID)
+		defer s.svc.decExecPin(lease.ID)
 	}
 	timeout := req.Timeout
 	if timeout <= 0 {
