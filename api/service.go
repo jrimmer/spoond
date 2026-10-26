@@ -80,8 +80,9 @@ type Lease struct {
 	// resumes exactly the drained leases.
 	Drained bool
 	// Pinned marks a lease its owner pinned (FS5, owner decision
-	// 2026-10-08): spoond never pauses or deletes a pinned lease before
-	// its own expiry. The lease's TTL still applies; a persistent pinned
+	// 2026-10-08): spoond never deletes a pinned lease before its own
+	// expiry, and only the low-memory floor pauses one, as its last
+	// resort (pinnedLocked also counts an in-flight pinned exec). The lease's TTL still applies; a persistent pinned
 	// lease stays until the owner releases it. Pin and expiry work
 	// together. Only the owner (unpin, DELETE) changes a pin. A create's
 	// holder/holder_url labels never pin; only "pinned": true or the pin
@@ -5382,7 +5383,8 @@ func (s *Service) leaseMap(l *Lease, ms *memSampler, checkpointInterval, idleSus
 		// for client compatibility.
 		"preempted": false,
 		// Pin (FS5): true when the owner pinned this lease; spoond never
-		// pauses or deletes it before its own expiry. A pinned lease
+		// deletes it before its own expiry and pauses it only as the
+		// low-memory floor's last resort. A pinned lease
 		// reports pinned_idle_since once its last API activity passed
 		// PINNED_IDLE_NOTICE_DAYS (visibility only).
 		"pinned": l.Pinned,

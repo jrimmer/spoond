@@ -29,8 +29,9 @@ type LeaseRow struct {
 	LostReason string
 	Drained    bool // paused by the admin drain, resumed by undrain (U10)
 	// Pinned marks a lease its owner pinned (FS5, owner decision
-	// 2026-10-08): spoond never pauses or deletes a pinned lease before
-	// its own expiry. The lease's TTL still applies; a persistent pinned
+	// 2026-10-08): spoond never deletes a pinned lease before its own
+	// expiry, and only the low-memory floor pauses one, as its last
+	// resort. The lease's TTL still applies; a persistent pinned
 	// lease stays until the owner releases it. Only the owner (unpin,
 	// DELETE) changes a pin.
 	Pinned bool

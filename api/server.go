@@ -1162,9 +1162,10 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		// validator in api/comment.go: 512 bytes, no control characters;
 		// a violation is a bad request).
 		Comment string `json:"comment"`
-		// Pinned pins the new lease (FS5): spoond never pauses or deletes
-		// it before its own expiry. A persistent pinned lease stays until
-		// the owner releases it.
+		// Pinned pins the new lease (FS5): spoond never deletes it before
+		// its own expiry and pauses it only as the low-memory floor's last
+		// resort. A persistent pinned lease stays until the owner
+		// releases it.
 		Pinned bool `json:"pinned"`
 		// CheckpointInterval is the lease's own periodic checkpoint
 		// interval in seconds (2.3, #122): 0 = never; omitted (nil) =

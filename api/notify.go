@@ -125,10 +125,27 @@ func (s *Service) notifyLeaseEvent(ev LeaseEvent) {
 			At:       ev.At,
 		})
 	case LeaseMemoryFloor:
+		if ev.LeaseID != "" {
+			// The floor took a pinned lease as its last resort: nothing
+			// unpinned was left. The pause is done; a person should know
+			// whose pin did not hold and free room.
+			s.notifier.Enqueue(notify.Event{
+				Key:      "memory.floor.pinned." + ev.LeaseID,
+				Severity: notify.Critical,
+				Title:    "spoond memory floor took pinned lease " + shortID(ev.LeaseID),
+				Body: joinBody([]string{
+					"lease " + ev.LeaseID + " (owner " + ev.Owner + ")",
+					ev.Detail,
+					"release leases to make room",
+				}),
+				At: ev.At,
+			})
+			return
+		}
 		// The low-memory loop's floor breach with nothing left to take
 		// back (MEMORY_FLOOR_MIB): free hugepages sit under the floor and
-		// every candidate is pinned or no owner is over their slice. A
-		// person must free room (unpin or release leases); nothing was
+		// every candidate is busy or Drained, or no owner is over their
+		// slice. A person must free room (release leases); nothing was
 		// paused or released by spoond. Raised at most once per 10 min.
 		s.notifier.Enqueue(notify.Event{
 			Key:      "memory.floor",

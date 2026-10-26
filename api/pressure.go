@@ -12,8 +12,9 @@ import (
 // than the running VMs may fault back in; the floor is the running
 // counterpart: every second the backend reads the node's free hugepages
 // fresh and, when they sit under the floor, takes back exactly one
-// lease (pressureVictim: the least recently used unpinned lease of the
-// owner furthest over their fair slice, non-busy before busy). One
+// lease (pressureVictim: the least recently used unpinned, non-busy
+// lease of the owner furthest over their fair slice; a pinned one only
+// when no unpinned candidate is left anywhere). One
 // lease per tick: the pause's snapshot write is what frees the pages,
 // so the next tick — not this one — judges the result, and a floor
 // breach sheds load a lease at a time instead of pausing a stack at
@@ -36,6 +37,12 @@ import (
 // A lease still marked Drained (an undrain pending on it) is never
 // picked, so a lease stuck Drained cannot switch the floor off for
 // good — the loop keeps taking back around it.
+//
+// Pins are reaped last, not never (owner: "Spoond still needs to
+// protect itself"): fairness take-back and the idle sweep never pause a
+// pinned lease, but the floor takes one when nothing unpinned is left,
+// logs it as PINNED and raises a critical memory_floor alert naming the
+// lease.
 
 const (
 	// DefaultMemoryFloorMiB is MEMORY_FLOOR_MIB when unset: keep 2 GiB
@@ -121,10 +128,12 @@ func (s *Service) pressureSkip(floor int) bool {
 // one thing — a warm-pool sandbox first (dropOnePoolSandbox: a pool VM
 // is nobody's lease, so shedding it pauses no work, and its whole
 // memory comes back at once), then one lease — pressureVictim's pick:
-// the least recently used unpinned lease of the owner furthest over
-// their fair slice, non-busy before busy. Leases still marked Drained
-// are skipped like pinned ones (an undrain owns their resume), so a
-// lease stuck Drained cannot switch the floor off for good.
+// the least recently used unpinned, non-busy lease of the owner
+// furthest over their fair slice, or, when no unpinned candidate is
+// left anywhere, a pinned one (the last resort, logged and alerted).
+// Leases still marked Drained are never taken (an undrain owns their
+// resume), so a lease stuck Drained cannot switch the floor off for
+// good.
 func (s *Service) pressureCheck(ctx context.Context) bool {
 	// What the box has promised to live VMs, for the gauge. The store
 	// read needs no node round trip, so the gauge moves every tick —
@@ -202,8 +211,8 @@ func (s *Service) pressureCheck(ctx context.Context) bool {
 	owners := s.takeBackOwners(ctx)
 	v, ok := pressureVictim(owners)
 	if !ok {
-		// Nothing can be taken back (every candidate pinned, or no owner
-		// over their slice): say so, but at most once per 10 min — a
+		// Nothing can be taken back (every candidate busy or Drained, or
+		// no owner over their slice): say so, but at most once per 10 min — a
 		// standing condition must not flood the event stream. The alert
 		// is its own event kind so a floor breach is not misread as an
 		// admission's box_full refusal (which names a requester).
@@ -224,7 +233,9 @@ func (s *Service) pressureCheck(ctx context.Context) bool {
 	// pause with a timeout instead (a snapshot write is bounded work).
 	pauseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), pressurePauseTimeout)
 	defer cancel()
-	if err := s.takeBackPause(pauseCtx, l, pressureRequester, v.Ratio); err != nil {
+	// A pinned victim is the last resort: only pressureVictim's second
+	// pass hands one out, and only then may the pause take it.
+	if err := s.takeBackPauseWith(pauseCtx, l, pressureRequester, v.Ratio, v.Pinned); err != nil {
 		if !errors.Is(err, errLeaseBusy) && !errors.Is(err, errLeaseReleased) {
 			s.log.Printf("memory floor: lease %s: %v", v.LeaseID, err)
 		}
@@ -234,6 +245,12 @@ func (s *Service) pressureCheck(ctx context.Context) bool {
 	}
 	if s.metrics != nil {
 		s.metrics.MemoryPressureTakebacksTotal.Inc()
+	}
+	if v.Pinned {
+		s.log.Printf("memory floor: %d MiB free of a %d MiB floor: took back PINNED lease %s (%d MiB, owner %s, ratio %.2f): no unpinned lease was left to take",
+			free, floor, v.LeaseID, v.MemoryMiB, v.Owner, v.Ratio)
+		s.pressurePinnedAlert(v, free, floor)
+		return true
 	}
 	s.log.Printf("memory floor: %d MiB free of a %d MiB floor: took back lease %s (%d MiB, owner ratio %.2f)",
 		free, floor, v.LeaseID, v.MemoryMiB, v.Ratio)
@@ -294,13 +311,26 @@ func (s *Service) dropOnePoolSandbox(ctx context.Context) (freedMiB int, ok bool
 
 // pressureFloorAlert raises the low-memory loop's alert when nothing
 // can be taken back for the floor: short MiB of hugepages are missing
-// and every candidate is pinned or Drained — or no owner is over their
-// slice (a busy lease is still takeable, only ranked last). It is
-// its own event kind, memory_floor — not box_full, which names an
-// admission's refused requester — and notifies like one (a person must
-// unpin or release leases to free room; nothing was paused).
+// and every candidate, pinned ones included, is busy (an in-flight
+// operation or a running job) or Drained — or no owner is over their
+// slice. It is its own event kind, memory_floor — not box_full, which
+// names an admission's refused requester — and notifies like one (a
+// person must release leases to free room; nothing was paused).
 func (s *Service) pressureFloorAlert(short int) {
-	s.log.Printf("memory_floor: %d MiB below the floor; nothing can be taken back (every candidate pinned, or no owner over their slice); nothing was paused or released", short)
+	s.log.Printf("memory_floor: %d MiB below the floor; nothing can be taken back (every candidate busy or Drained, or no owner over their slice); nothing was paused or released", short)
 	s.emitLeaseEvent("", "", LeaseMemoryFloor,
-		fmt.Sprintf("%d MiB below the memory floor; nothing can be taken back: every candidate is pinned, or no owner is over their slice", short))
+		fmt.Sprintf("%d MiB below the memory floor; nothing can be taken back: every candidate is busy or Drained, or no owner is over their slice", short))
+}
+
+// pressurePinnedAlert raises the critical memory_floor alert for a
+// pinned lease the floor took as its last resort: the same event kind
+// as pressureFloorAlert, but carrying the lease and its owner, so the
+// lease's own event stream shows why its pin did not hold and the
+// notification names it. Not rate limited: the floor takes at most one
+// lease per tick, and a pinned take is the exception a person must see
+// every time.
+func (s *Service) pressurePinnedAlert(v takeBackVictim, free, floor int) {
+	s.emitLeaseEvent(v.LeaseID, v.Owner, LeaseMemoryFloor,
+		fmt.Sprintf("took back PINNED lease %s (%d MiB, owner ratio %.2f): %d MiB free of a %d MiB memory floor and no unpinned lease left to take; it resumes on the holder's next work call",
+			v.LeaseID, v.MemoryMiB, v.Ratio, free, floor))
 }

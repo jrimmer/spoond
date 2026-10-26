@@ -18,8 +18,10 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log"
 	"strings"
 	"testing"
 	"time"
@@ -556,33 +558,44 @@ func TestPressureGaugeMovesWithFloorOff(t *testing.T) {
 }
 
 // TestPressureAlertOncePerTenMinutes: below a floor nothing can be
-// taken back for (every candidate pinned), the tick raises the
-// memory_floor alert — its own event kind, not box_full — at most once
-// per 10 min; past the window it repeats.
+// taken back for (every candidate busy with a running job, pinned or
+// not: the floor's last resort takes pinned leases but never busy ones),
+// the tick raises the memory_floor alert — its own event kind, not
+// box_full — at most once per 10 min; past the window it repeats.
 func TestPressureAlertOncePerTenMinutes(t *testing.T) {
 	svc, sub, ctx := newPressureService(t)
 	alice := preemptOwner(t, svc, "alice")
-	preemptOwner(t, svc, "bob") // inside his slice (holds nothing); never touched
+	bob := preemptOwner(t, svc, "bob")
+	// bob's one lease holds him to his fair half, so alice's slice is
+	// that half too and not the whole idle pool; it is inside his slice
+	// and never touched.
+	bobL, err := svc.grantLease(ctx, leaseRequest{owner: bob, image: "mid", ttl: time.Hour, persistent: true})
+	if err != nil {
+		t.Fatalf("grant bob: %v", err)
+	}
 	var pins []*Lease
 	for i := 0; i < 3; i++ {
 		l, err := svc.grantLease(ctx, leaseRequest{owner: alice, image: "mid", ttl: time.Hour, persistent: true})
 		if err != nil {
 			t.Fatalf("grant alice %d: %v", i, err)
 		}
-		if _, err := svc.setPinned(alice, l.ID, true); err != nil {
-			t.Fatalf("pin %d: %v", i, err)
+		if i == 0 {
+			if _, err := svc.setPinned(alice, l.ID, true); err != nil {
+				t.Fatalf("pin %d: %v", i, err)
+			}
 		}
+		svc.incRunningJob(l.ID)
 		pins = append(pins, l)
 	}
 
 	now := time.Now()
 	svc.now = func() time.Time { return now }
-	// 3 live sandboxes at 256 pages hold 768 pages, baseUsed 512: used
+	// 4 live sandboxes at 256 pages hold 1024 pages, baseUsed 256: used
 	// 1280 of the 1536-page (3072 MiB) node, free = 512 MiB, under the
 	// 4096 MiB floor. Two owners share the 3072 MiB: a 1536 MiB slice,
-	// alice's 3072 is 2x over — but every lease of hers is pinned and
-	// nobody else borrows, so nothing can be taken back.
-	installDynamicNode(t, svc, sub, 1536, 512, 256)
+	// alice's 3072 is 2x over — but every lease of hers runs a job and
+	// bob is inside his slice, so nothing can be taken back.
+	installDynamicNode(t, svc, sub, 1536, 256, 256)
 	svc.cfg.MemoryFloorMiB = 4096
 	warmFairShares(svc, ctx)
 
@@ -602,7 +615,7 @@ func TestPressureAlertOncePerTenMinutes(t *testing.T) {
 		t.Fatalf("a tick inside the 10-minute window raised %v, want none", kinds)
 	}
 	if susp := suspendedLeases(svc); len(susp) != 0 {
-		t.Fatalf("suspended = %v, want none (every candidate pinned)", susp)
+		t.Fatalf("suspended = %v, want none (every candidate busy)", susp)
 	}
 
 	// Ten minutes on: the alert may repeat.
@@ -613,8 +626,11 @@ func TestPressureAlertOncePerTenMinutes(t *testing.T) {
 	}
 	for _, l := range pins {
 		if l.Suspended {
-			t.Fatal("a pinned lease was paused")
+			t.Fatal("a busy lease was paused")
 		}
+	}
+	if bobL.Suspended {
+		t.Fatal("bob's inside-slice lease was paused")
 	}
 	if got := counterValue(t, svc.metrics.MemoryPressureTakebacksTotal); got != 0 {
 		t.Fatalf("take-back counter = %v, want 0", got)
@@ -959,5 +975,202 @@ func TestPressureChecksEverySecond(t *testing.T) {
 	svc.pressureCheck(ctx)
 	if got := svc.pressureNextInterval(); got != time.Second {
 		t.Fatalf("next interval far above the floor = %s, want 1s (a whole second at every distance)", got)
+	}
+}
+
+// TestPressureVictimPinsLast: pressureVictim takes an unpinned lease
+// wherever one is (even of a lower-ranked owner, over a pinned LRU
+// lease of the top owner); only with no unpinned candidate anywhere
+// does it hand out a pinned one, marked Pinned, by the same owner
+// ranking and LRU order. Busy and Drained leases stay out, pinned or
+// not.
+func TestPressureVictimPinsLast(t *testing.T) {
+	base := time.Unix(1_000_000, 0)
+	at := func(h int) time.Time { return base.Add(time.Duration(h) * time.Hour) }
+	owners := func() []takeBackOwner {
+		return []takeBackOwner{
+			{Owner: "alice", UsedMiB: 6000, SliceMiB: 1000, Leases: []takeBackLease{
+				{ID: "a-pin-old", MemoryMiB: 1000, Pinned: true, LastActive: at(1)},
+				{ID: "a-pin-new", MemoryMiB: 1000, Pinned: true, LastActive: at(5)},
+				{ID: "a-pin-busy", MemoryMiB: 1000, Pinned: true, Busy: true, LastActive: at(0)},
+			}},
+			{Owner: "bob", UsedMiB: 2000, SliceMiB: 1000, Leases: []takeBackLease{
+				{ID: "b-pin", MemoryMiB: 1000, Pinned: true, LastActive: at(0)},
+				{ID: "b-free", MemoryMiB: 1000, LastActive: at(9)},
+			}},
+			{Owner: "carol", UsedMiB: 500, SliceMiB: 1000, Leases: []takeBackLease{
+				{ID: "c-inside", MemoryMiB: 500, LastActive: at(0)},
+			}},
+		}
+	}
+
+	// An unpinned candidate exists (bob's): it goes, unmarked.
+	v, ok := pressureVictim(owners())
+	if !ok || v.LeaseID != "b-free" || v.Pinned {
+		t.Fatalf("victim = %+v ok=%v, want bob's unpinned b-free", v, ok)
+	}
+
+	// No unpinned candidate left anywhere: the top owner's LRU pinned,
+	// non-busy lease, marked Pinned. carol's inside-slice lease is
+	// still never touched.
+	os := owners()
+	os[1].Leases = os[1].Leases[:1]
+	v, ok = pressureVictim(os)
+	if !ok || v.LeaseID != "a-pin-old" || !v.Pinned || v.Owner != "alice" {
+		t.Fatalf("victim = %+v ok=%v, want alice's LRU pinned a-pin-old marked Pinned", v, ok)
+	}
+
+	// Busy and Drained pinned leases are never taken, not even last.
+	os = owners()
+	os[0].Leases = []takeBackLease{
+		{ID: "a-busy", MemoryMiB: 1000, Pinned: true, Busy: true, LastActive: at(0)},
+		{ID: "a-drained", MemoryMiB: 1000, Pinned: true, Drained: true, LastActive: at(1)},
+	}
+	os[1].Leases = []takeBackLease{
+		{ID: "b-busy", MemoryMiB: 1000, Busy: true, LastActive: at(0)},
+		{ID: "b-drained", MemoryMiB: 1000, Drained: true, LastActive: at(1)},
+	}
+	if v, ok = pressureVictim(os); ok {
+		t.Fatalf("victim = %+v, want none (every lease busy or Drained)", v)
+	}
+}
+
+// TestPressureTakesPinnedLastResort: below the floor with every lease
+// of the only over-slice owner pinned (one explicitly, one by an
+// in-flight pinned exec), the floor takes the LRU one anyway, keeps it
+// paused (the post-pause pin re-check does not resume it), logs it as
+// PINNED and raises a critical memory_floor alert naming the lease.
+// Admission take-back still refuses the other pinned lease.
+func TestPressureTakesPinnedLastResort(t *testing.T) {
+	svc, sub, ctx := newPressureService(t)
+	alice := preemptOwner(t, svc, "alice")
+	bob := preemptOwner(t, svc, "bob")
+	// bob's one unpinned lease is inside his slice: never a candidate,
+	// pinned pass or not.
+	bobL, err := svc.grantLease(ctx, leaseRequest{owner: bob, image: "mid", ttl: time.Hour, persistent: true})
+	if err != nil {
+		t.Fatalf("grant bob: %v", err)
+	}
+	old, err := svc.grantLease(ctx, leaseRequest{owner: alice, image: "mid", ttl: time.Hour, persistent: true})
+	if err != nil {
+		t.Fatalf("grant old: %v", err)
+	}
+	newer, err := svc.grantLease(ctx, leaseRequest{owner: alice, image: "mid", ttl: time.Hour, persistent: true})
+	if err != nil {
+		t.Fatalf("grant newer: %v", err)
+	}
+	// old is pinned by an exec in flight, newer by its owner.
+	svc.incExecPin(old.ID)
+	if _, err := svc.setPinned(alice, newer.ID, true); err != nil {
+		t.Fatalf("pin: %v", err)
+	}
+	base := time.Unix(1_000_000, 0)
+	svc.store.mu.Lock()
+	old.LastActive = base.Add(-2 * time.Hour)
+	newer.LastActive = base.Add(-time.Minute)
+	bobL.LastActive = base.Add(-10 * time.Hour) // the box's LRU, but inside his slice
+	svc.store.mu.Unlock()
+	// 3 live sandboxes at 256 pages hold 768 pages, baseUsed 512: used
+	// 1280 of the 1536-page (3072 MiB) node, free 512 MiB under the
+	// 2048 MiB floor; alice's 2048 MiB is over her 1536 MiB slice.
+	installDynamicNode(t, svc, sub, 1536, 512, 256)
+	svc.cfg.MemoryFloorMiB = 2048
+	warmFairShares(svc, ctx)
+
+	var logBuf bytes.Buffer
+	svc.log = log.New(&logBuf, "", 0)
+	events := svc.Subscribe(EventFilter{})
+	defer events.Close()
+
+	if !svc.pressureCheck(ctx) {
+		t.Fatalf("tick took nothing; want the pinned LRU lease. log: %s", logBuf.String())
+	}
+	if susp := suspendedLeases(svc); len(susp) != 1 || !susp[old.ID] {
+		t.Fatalf("suspended = %v, want exactly the LRU pinned lease %s (kept paused)", susp, old.ID)
+	}
+	if old.TakeBackFor != pressureRequester {
+		t.Fatalf("take-back requester = %q, want %q", old.TakeBackFor, pressureRequester)
+	}
+	out := logBuf.String()
+	if !strings.Contains(out, "memory floor: ") || !strings.Contains(out, "took back PINNED lease "+old.ID) {
+		t.Fatalf("log = %q, want the PINNED take-back line for %s", out, old.ID)
+	}
+	if !strings.Contains(out, "take back: pausing lease "+old.ID) || !strings.Contains(out, "PINNED (last resort") {
+		t.Fatalf("log = %q, want the take-back start line marked PINNED", out)
+	}
+	var alert *LeaseEvent
+	for done := false; !done; {
+		select {
+		case ev := <-events.C:
+			if ev.Type == LeaseMemoryFloor {
+				ev := ev
+				alert = &ev
+			}
+		default:
+			done = true
+		}
+	}
+	if alert == nil || alert.LeaseID != old.ID || alert.Owner != alice {
+		t.Fatalf("memory_floor alert = %+v, want one naming lease %s of %s", alert, old.ID, alice)
+	}
+	rec := &sink{}
+	svc.SetNotifier(rec)
+	svc.notifyLeaseEvent(*alert)
+	if key, sev, _ := rec.at(0); key != "memory.floor.pinned."+old.ID || sev != "critical" {
+		t.Fatalf("notification = %q/%q, want memory.floor.pinned.%s/critical", key, sev, old.ID)
+	}
+
+	// Fairness never takes a pinned lease, floor or no floor.
+	if err := svc.takeBackPause(ctx, newer, "req", 2.0); !errors.Is(err, errLeaseBusy) {
+		t.Fatalf("admission takeBackPause of a pinned lease = %v, want errLeaseBusy", err)
+	}
+	svc.decExecPin(old.ID)
+}
+
+// TestPressurePinMidPauseOfUnpinnedVictimWins: the floor's last-resort
+// policy is for a victim pressureVictim handed out as pinned. A lease it
+// picked unpinned and that its owner pins while the pause runs is
+// resumed at once (the pin wins, as for admission take-back), and the
+// tick counts nothing as taken.
+func TestPressurePinMidPauseOfUnpinnedVictimWins(t *testing.T) {
+	svc, sub, ctx := newPressureService(t)
+	alice := preemptOwner(t, svc, "alice")
+	bob := preemptOwner(t, svc, "bob")
+	var a []*Lease
+	for i := 0; i < 3; i++ {
+		l, err := svc.grantLease(ctx, leaseRequest{owner: alice, image: "mid", ttl: time.Hour, persistent: true})
+		if err != nil {
+			t.Fatalf("grant alice %d: %v", i, err)
+		}
+		a = append(a, l)
+	}
+	if _, err := svc.grantLease(ctx, leaseRequest{owner: bob, image: "mid", ttl: time.Hour, persistent: true}); err != nil {
+		t.Fatalf("grant bob: %v", err)
+	}
+	svc.store.mu.Lock()
+	a[0].LastActive = time.Unix(1_000_000, 0) // alice's LRU: the victim
+	svc.store.mu.Unlock()
+	// 4 live sandboxes at 256 pages hold 1024 pages, baseUsed 512: used
+	// 1536 of the 2048-page (4096 MiB) node, free 1024 MiB under the
+	// 2048 MiB floor. Two owners: a 2048 MiB slice each, alice's 3072
+	// over it. The paused lease fits back (free 1536 MiB after the
+	// pause; an un-done pause is not held to the floor).
+	installDynamicNode(t, svc, sub, 2048, 512, 256)
+	svc.cfg.MemoryFloorMiB = 2048
+	warmFairShares(svc, ctx)
+	svc.pauseBeforeSuspend = func(l *Lease) {
+		svc.pauseBeforeSuspend = nil
+		if _, err := svc.setPinned(alice, l.ID, true); err != nil {
+			t.Errorf("pin mid-pause: %v", err)
+		}
+	}
+	if svc.pressureCheck(ctx) {
+		t.Fatal("tick counted a take-back the pin un-did")
+	}
+	svc.store.mu.Lock()
+	pinned, suspended := a[0].Pinned, a[0].Suspended
+	svc.store.mu.Unlock()
+	if !pinned || suspended {
+		t.Fatalf("alice's LRU pinned=%v suspended=%v, want pinned and running again", pinned, suspended)
 	}
 }

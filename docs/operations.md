@@ -1016,7 +1016,8 @@ If creates start failing this way, check `grep HugePages_
 **Memory take-back** (FS2). All leases share one hugepage pool. When a
 request does not fit, spoond pauses leases of the owner furthest over
 their fair slice, least recently used first. Pinned leases are never
-taken. A taken-back lease resumes on its holder's next work call
+taken for a request (only the low-memory floor below takes one, as its
+last resort). A taken-back lease resumes on its holder's next work call
 (exec, files, proxy, jobs, the LLM gateway), through the normal
 admission path; a call that finds the node still full answers `503`
 `capacity_wait` with `Retry-After: 30` and the lease stays suspended,
@@ -1062,9 +1063,17 @@ pressureVictim picks: the owner with the highest used/slice among the
 owners over their slice, and inside that owner the least recently used
 unpinned lease that is not busy (an in-flight operation or a running
 job) — so a single-lease owner over
-their slice IS a candidate, pinned leases and owners inside their
-slice are never touched, and an all-pinned top owner is passed over
-for the next owner down. A lease still marked `Drained` (an undrain
+their slice IS a candidate, owners inside their slice are never
+touched, and an all-pinned top owner is passed over for the next owner
+down. Pinned leases (pinned by their owner, or with an exec sent with
+`"pin": true` in flight) are reaped last: only when no over-slice owner
+has an unpinned candidate left does the floor take a pinned one, by the
+same ranking and least recently used first, never a busy one. That
+pause is logged as `memory floor: … took back PINNED lease …` (the
+take-back's start line says `PINNED (last resort …)` too), a pin landing
+mid-pause does not undo it, and it raises a critical `memory_floor`
+alert naming the lease and its owner ("spoond memory floor took pinned
+lease …"), every time. A lease still marked `Drained` (an undrain
 pending on it) is never picked either, but unlike `draining` it does
 not skip the tick: the floor keeps taking back around it, since a
 lease stuck `Drained` would otherwise switch the floor off for good.
@@ -1076,8 +1085,8 @@ once. The tick stands down while the node is draining and on bad node
 readings (a status other than `healthy`, or no pages reported) and —
 for the pause itself — the loop's context is abandoned: a shutdown
 cannot cut a snapshot write in half. A floor nothing can be taken back
-for (every candidate pinned, `Drained` or busy, or no owner over their
-slice) raises the
+for (every candidate, pinned ones included, `Drained` or busy, or no
+owner over their slice) raises the
 `memory_floor` alert (a `lease.memory_floor` event, notifications
 critical, "spoond memory below floor") at most once per 10 minutes
 instead of every tick.
@@ -1342,9 +1351,12 @@ start's orphan sweep (or their TTL) releases them.
 ## Pins and the paused-release clock
 
 Since v3.0 (owner decision 2026-10-08) spoond does not pre-emptively do
-anything: there is no auto idle pause, no pressure sweep and no
-different clocks. **One behavior.** A user can pin anything they want,
-even to the point of abuse, and spoond honors it.
+anything: there is no auto idle pause and no different clocks. **One
+behavior.** Protection from automatic pauses is opt-in by pin, and
+pinned leases are **reaped last**, not never (owner, 2026-10-25: "Spoond
+still needs to protect itself"): only the low-memory floor ever pauses
+a pinned lease, and only when no unpinned lease is left to take.
+Fairness take-back and the idle logic never do.
 
 **The lease lifecycle is:**
 
@@ -1354,9 +1366,10 @@ running ──► paused ──► resumed on next call
               └──► released 30 d after the pause date
 ```
 
-- A lease is **paused** for one of three reasons: take-back (memory or
-disk — a request needs room and the unpinned lease is a candidate), its
-own `idle_suspend` opt-in, or `POST /api/leases/{id}/pause`. A paused
+- A lease is **paused** for one of four reasons: take-back (memory or
+disk — a request needs room and the unpinned lease is a candidate), the
+low-memory floor (below), its own `idle_suspend` opt-in, or `POST
+/api/leases/{id}/pause`. A paused
 lease resumes on the next call (exec, stream, files, proxy, jobs, the
 LLM gateway, a network change, a prompt, or an explicit `POST /resume`).
 - **One clock.** Every paused lease is released `PAUSED_RELEASE_DAYS`
@@ -1366,13 +1379,21 @@ LLM gateway, a network change, a prompt, or an explicit `POST /resume`).
   timer. The GC still cleans spoond's own garbage (orphan dirs,
   leftovers) as housekeeping.
 - **Pinned** (`pinned: true` on create, or `PUT
-  /api/leases/{id}/pin`) means spoond **never pauses or deletes the
-  lease before its own expiry**. A pin protects only a **running** VM:
+  /api/leases/{id}/pin`) means spoond **never deletes the lease before
+  its own expiry, and pauses it only as the low-memory floor's last
+  resort**: take-back for a request and the idle logic never touch it,
+  and the floor takes one only when no unpinned lease is left (the pause
+  is logged as `took back PINNED lease` and raises a critical
+  `memory_floor` alert naming it). An exec sent with `"pin": true`
+  pins its lease the same way while it runs and not a moment longer,
+  without touching the lease's own `pinned`. A plain exec protects
+  nothing: a take-back pause cuts the command (`409` `lease_busy`). A
+  pin protects only a **running** VM:
   once a lease is paused — the owner's own `POST /pause`, or a failed
   drain resume that left it suspended — it is on the same one clock as
   every other paused lease (owner decision 2026-10-09). The lease's
   **TTL still applies**: pin and expiry collaborate, so a pinned lease
-  is unpausable until it expires. A pinned **persistent** lease (which
+  is protected until it expires. A pinned **persistent** lease (which
   has no TTL) stays until the owner releases it. There is no limit on
   how many leases an owner pins. Only the owner (unpin, `DELETE`)
   changes a pin. A pinned lease is never paused by spoond's idle logic,
@@ -1390,12 +1411,15 @@ guest activity) is older than `PINNED_IDLE_NOTICE_DAYS` (default `7`)
   count, ...)`, with a per-owner breakdown. Nothing is paused, unpinned
   or released because of it.
 
-**Take-back touches only unpinned leases.** If nothing unpinned can be
-taken for a request, the request answers `429` with code `box_full` and
-an alert (`lease.box_full`, critical). Nothing is paused or released by
-a refused request. The low-memory floor's own variant (a floor breach
-with no refused request) is its own kind, `lease.memory_floor`, at most
-once per 10 min (see [Low-memory floor](#low-memory-floor-memory_floor_mib-spoond-l3lq)).
+**Take-back for a request touches only unpinned leases.** If nothing
+unpinned can be taken for a request, the request answers `429` with
+code `box_full` and an alert (`lease.box_full`, critical). Nothing is
+paused or released by a refused request. The low-memory floor is the
+one exception to pins: it takes pinned leases last, each one raising a
+critical `lease.memory_floor` event naming the lease; a floor breach
+with nothing at all left to take (every candidate busy or `Drained`)
+raises the same kind without a lease, at most once per 10 min (see
+[Low-memory floor](#low-memory-floor-memory_floor_mib-spoond-l3lq)).
 
 | Variable | Default | Meaning |
 |---|---|---|

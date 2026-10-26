@@ -17,7 +17,7 @@ type takeBackLease struct {
 	ID         string
 	Name       string // the lease's tag, echoed in the box_full own_leases body
 	MemoryMiB  int
-	Pinned     bool      // pinned or exec-pinned (pinnedLocked): fairness never takes it
+	Pinned     bool      // pinned or exec-pinned (pinnedLocked): fairness never takes it, the floor only last
 	Busy       bool      // a running job (or in-flight operation); taken last
 	Drained    bool      // an undrain still owns its resume; taken never
 	LastActive time.Time // older means less recently used
@@ -33,10 +33,13 @@ type takeBackOwner struct {
 
 // takeBackVictim is one lease chosen to be paused. Ratio is the owner's
 // used/slice at the moment of the pick, before the lease was given up.
+// Pinned is set only by pressureVictim's last-resort pass: the lease is
+// pinned and the floor takes it anyway.
 type takeBackVictim struct {
 	Owner, LeaseID string
 	Ratio          float64
 	MemoryMiB      int
+	Pinned         bool
 }
 
 func tbRatio(used, slice int) float64 {
@@ -51,18 +54,25 @@ func tbRatio(used, slice int) float64 {
 // used/slice ratio among owners over their slice (used > slice, slice >
 // 0 — a zero slice has no ratio and an owner at or under it is never
 // touched), and inside that owner the least recently used unpinned
-// lease, non-busy before busy (tbPickLease). A lease still marked
-// Drained (an undrain pending on it) is never picked, the way pinned
-// ones are not: the undrain owns its resume, but the rest of the box
-// stays under the floor. A single-lease owner over
-// its slice IS a candidate: that lease is the one that goes. When the
-// top owner has no unpinned lease (every lease pinned), the next owner
-// down the ranking is tried, and so on. The requester argument of
-// memVictims does not exist here (the loop is nobody's fairness case),
-// so unlike memVictims there is no after-pick ratio floor: only the
-// owners' own over-slice condition decides. ok is false when no owner
-// is over their slice or every lease of every over-slice owner is
-// pinned, Drained or busy — busy leases are left out (see below).
+// lease that is not busy (tbPickLease over the non-busy leases). A
+// lease still marked Drained (an undrain pending on it) is never
+// picked: the undrain owns its resume, but the rest of the box stays
+// under the floor. A single-lease owner over its slice IS a candidate:
+// that lease is the one that goes. When the top owner has no unpinned
+// lease (every lease pinned), the next owner down the ranking is tried,
+// and so on. The requester argument of memVictims does not exist here
+// (the loop is nobody's fairness case), so unlike memVictims there is
+// no after-pick ratio floor: only the owners' own over-slice condition
+// decides.
+//
+// Pins are reaped last, not never: spoond must still protect itself.
+// Only when no over-slice owner has an unpinned candidate does a second
+// pass walk the same ranking for a pinned one (explicitly or by an
+// in-flight pinned exec; non-busy, not Drained, least recently used
+// first), and the victim then carries Pinned so the caller can let
+// takeBackPause take it and say so loudly. ok is false when no owner is
+// over their slice or every lease of every over-slice owner is Drained
+// or busy — busy leases are left out (see below), pinned or not.
 func pressureVictim(owners []takeBackOwner) (takeBackVictim, bool) {
 	// Rank the over-slice owners by ratio, highest first (stable, so a
 	// tie keeps the view's owner order); then walk down the ranking and
@@ -80,24 +90,34 @@ func pressureVictim(owners []takeBackOwner) (takeBackVictim, bool) {
 		ranked = append(ranked, cand{idx: i, ratio: tbRatio(o.UsedMiB, o.SliceMiB)})
 	}
 	sort.SliceStable(ranked, func(a, b int) bool { return ranked[a].ratio > ranked[b].ratio })
-	for _, c := range ranked {
-		o := &owners[c.idx]
-		// Busy leases are left out, not ranked last: takeBackPause
-		// refuses a busy lease, so offering one would stall every tick
-		// on the same refusal and never reach the next owner (or the
-		// alert when the whole box is busy).
-		idle := make([]takeBackLease, 0, len(o.Leases))
-		for _, l := range o.Leases {
-			if !l.Busy {
+	// pass 0 takes unpinned leases only; pass 1, reached only when pass
+	// 0 found nothing anywhere, lets pinned ones in.
+	for pass := 0; pass < 2; pass++ {
+		for _, c := range ranked {
+			o := &owners[c.idx]
+			// Busy leases are left out, not ranked last: takeBackPause
+			// refuses a busy lease, so offering one would stall every
+			// tick on the same refusal and never reach the next owner
+			// (or the alert when the whole box is busy).
+			idle := make([]takeBackLease, 0, len(o.Leases))
+			for _, l := range o.Leases {
+				if l.Busy {
+					continue
+				}
+				if pass == 1 {
+					// tbPickLease skips pinned leases; hand it this
+					// pass's copy unpinned.
+					l.Pinned = false
+				}
 				idle = append(idle, l)
 			}
+			li := tbPickLease(idle)
+			if li < 0 {
+				continue // every lease of the owner is pinned, Drained or busy
+			}
+			l := idle[li]
+			return takeBackVictim{Owner: o.Owner, LeaseID: l.ID, Ratio: c.ratio, MemoryMiB: l.MemoryMiB, Pinned: pass == 1}, true
 		}
-		li := tbPickLease(idle)
-		if li < 0 {
-			continue // every lease of the owner is pinned, Drained or busy
-		}
-		l := idle[li]
-		return takeBackVictim{Owner: o.Owner, LeaseID: l.ID, Ratio: c.ratio, MemoryMiB: l.MemoryMiB}, true
 	}
 	return takeBackVictim{}, false
 }
@@ -254,7 +274,8 @@ func tbPickLease(ls []takeBackLease) int {
 // busy under the same lock closes the gap: a later pin or exec sees
 // busy and waits or fails instead of racing the pause.
 //
-// A pin that lands DURING the pause body still wins: after the pause
+// A pin that lands DURING the pause body still wins (except under the
+// floor's last resort, takeBackPauseWith): after the pause
 // returns, the same lock re-checks pinned and running jobs, and a lease
 // that became pinned (or gained a job) while paused for take-back is
 // resumed at once and counted as NOT freed — a pin protects a running
@@ -270,13 +291,29 @@ func tbPickLease(ls []takeBackLease) int {
 // carrying the victim owner's ratio and the requester, and stamps the
 // lease so no auto-resume brings it back into a take-back of the lease
 // that displaced it (no ping-pong).
+//
+// Admission take-back calls it this way and never takes a pinned lease;
+// the low-memory floor's last resort uses takeBackPauseWith instead.
 func (s *Service) takeBackPause(ctx context.Context, l *Lease, requester string, ratio float64) error {
+	return s.takeBackPauseWith(ctx, l, requester, ratio, false)
+}
+
+// takeBackPauseWith is takeBackPause with the floor's last-resort
+// policy: takePinned lets a pinned lease (explicitly or by an in-flight
+// pinned exec) be the victim, and the post-pause pin re-check then does
+// not un-do the pause — the floor took the lease because nothing
+// unpinned was left, and resuming it at once would put the box back
+// under the floor. Every other rule (busy, a running job, Drained in
+// the views, the requester's own lease) still holds. Only the
+// low-memory floor passes takePinned; fairness never does.
+func (s *Service) takeBackPauseWith(ctx context.Context, l *Lease, requester string, ratio float64, takePinned bool) error {
 	s.store.mu.Lock()
-	if l.released || l.busy || l.Suspended || !l.live() || l.pinnedLocked() ||
+	if l.released || l.busy || l.Suspended || !l.live() || (l.pinnedLocked() && !takePinned) ||
 		s.hasRunningJobLocked(l.ID) || l.Owner == requester {
 		s.store.mu.Unlock()
 		return errLeaseBusy
 	}
+	pinned := l.pinnedLocked()
 	l.busy = true
 	s.store.mu.Unlock()
 	defer s.endBusy(l)
@@ -284,7 +321,11 @@ func (s *Service) takeBackPause(ctx context.Context, l *Lease, requester string,
 	// ends early (the lease released mid-pause, a failed snapshot)
 	// leaves no success line, and without this one nothing would say
 	// why the lease's work was cut.
-	s.log.Printf("take back: pausing lease %s (owner %s, ratio %.2f) for %s", l.ID, l.Owner, ratio, requester)
+	if pinned {
+		s.log.Printf("take back: pausing lease %s (owner %s, ratio %.2f) for %s; it is PINNED (last resort, no unpinned lease left)", l.ID, l.Owner, ratio, requester)
+	} else {
+		s.log.Printf("take back: pausing lease %s (owner %s, ratio %.2f) for %s", l.ID, l.Owner, ratio, requester)
+	}
 
 	buildID, err := s.pauseLeaseBody(ctx, l, false, suspendPolicy{reason: suspendReasonTakeBack, takeBackRatio: ratio, takeBackFor: requester})
 	if err != nil {
@@ -306,7 +347,7 @@ func (s *Service) takeBackPause(ctx context.Context, l *Lease, requester string,
 		s.store.mu.Unlock()
 		return errLeaseBusy
 	}
-	if l.pinnedLocked() || s.hasRunningJobLocked(l.ID) {
+	if (l.pinnedLocked() && !takePinned) || s.hasRunningJobLocked(l.ID) {
 		// The owner pinned the lease (or a pinned exec began, or a job
 		// started on it) while the pause was in flight: the pin wins,
 		// the lease is brought back at once and the caller counts

@@ -127,10 +127,13 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
   - **Holders and pins**: `holder` and `holder_url` are plain labels
     saying what holds a lease (a CI job, an orchestrator's run,
     someone's scratch work). A **pinned** lease (`pinned` on create, or
-    `PUT/DELETE /api/leases/{id}/pin`) is never paused or deleted by
-    spoond before its own expiry; take-back touches only unpinned
-    leases, and every paused lease is released 30 days after its pause
-    date by one clock. See
+    `PUT/DELETE /api/leases/{id}/pin`) is never deleted by spoond before
+    its own expiry, and pins are reaped last: take-back for a request
+    and the idle sweep touch only unpinned leases, and the low-memory
+    floor pauses a pinned one only when nothing unpinned is left
+    (logged and alerted). An exec sent with `"pin": true` pins its lease
+    just while it runs. Every paused lease is released 30 days after its
+    pause date by one clock. See
     [operations.md](docs/operations.md#pins-and-the-paused-release-clock).
 - **Multi-user tenancy**: people and agents are first-class identities,
   with per-user SSH keys, per-user tokens, a per-user `max_ttl`, an

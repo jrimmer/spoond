@@ -13,19 +13,24 @@ import (
 // anything. No auto idle pause, no different clocks. One behavior. A
 // user can pin anything they want, even to the point of abuse, and
 // spoond honors it. Never pausing. Pins don't pause. All paused VMs are
-// deleted 30d from pause date."
+// deleted 30d from pause date." Since amended (owner, 2026-10-25): pins
+// are among the last things reaped, not absolute — "Spoond still needs
+// to protect itself."
 //
-//   - A pinned lease is never paused or deleted by spoond before its own
-//     expiry. A pin protects only a **running** VM: once a lease is
+//   - A pinned lease is never deleted by spoond before its own expiry,
+//     and only the low-memory floor ever pauses one: as its last resort,
+//     when no unpinned lease is left to take, logged and alerted. An
+//     exec sent with "pin": true pins its lease the same way for as
+//     long as it runs. A pin protects only a **running** VM: once a lease is
 //     paused (the owner's own POST /pause, or a failed drain resume),
 //     it is on the same one clock as every other paused lease. The
 //     lease's TTL still applies (pin and expiry work together); a pinned
 //     persistent lease stays until the owner releases it. There is no
 //     limit on how many leases an owner pins. Only the owner (unpin,
 //     DELETE) changes a pin.
-//   - Take-back (memory and disk) touches only unpinned leases. If
-//     nothing unpinned can be taken for a request, the request answers
-//     429 box_full and an alert is raised.
+//   - Take-back for a request (memory and disk) touches only unpinned
+//     leases. If nothing unpinned can be taken for a request, the
+//     request answers 429 box_full and an alert is raised.
 //   - Spoond acts only when a request needs room. There is no pressure
 //     sweep, no idle pause of any kind and no proactive disk threshold.
 //     Spoond's own garbage (orphan dirs, leftovers) is still cleaned as
@@ -76,7 +81,8 @@ func (s *Service) pinnedIdleNotice() time.Duration {
 }
 
 // setPinned pins or unpins a lease. A pin is the only thing that keeps
-// spoond from pausing or deleting a lease before its own expiry; holder
+// spoond from deleting a lease before its own expiry and from pausing it
+// for anything but the low-memory floor's last resort; holder
 // and holder_url are plain labels and never pin (FS5). Only the owner
 // (or an admin, resolved by the route) changes a pin. Emits a pinned or
 // unpinned event.
@@ -108,7 +114,7 @@ func (s *Service) setPinned(owner, id string, pinned bool) (*Lease, error) {
 	return l, nil
 }
 
-const pinEventDetail = "pinned; a pin protects only a running VM — it is never paused or released by spoond before its own expiry, and a paused pinned lease is released 30 d after its pause date like any other"
+const pinEventDetail = "pinned; a pin protects only a running VM — it is never released by spoond before its own expiry and is paused only by the low-memory floor as its last resort, and a paused pinned lease is released 30 d after its pause date like any other"
 
 // unpinByHolderPrefix clears the pinned flag of every lease whose holder
 // label starts with prefix, returning the count. It exists for the
